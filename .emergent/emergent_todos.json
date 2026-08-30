@@ -1,18 +1,18 @@
 [
   {
-    "content": "Backend: ACASO API (directive compiler, missions CRUD, pipeline, perfect-next, Ask All AIs multi-model chat, stats)",
+    "content": "Backend: ActionLog + Chronicle models, execute-step (NEXUS sim w/ AI evidence), action-feed, chronicle endpoints; feed lessons into compile",
     "status": "completed"
   },
   {
-    "content": "Frontend: Sovereign Home dashboard + Ask All AIs view (stunning cosmic-sovereign UI)",
+    "content": "Frontend: NEXUS Action Bus feed panel + Run/Auto-run step execution on Sovereign Home",
     "status": "completed"
   },
   {
-    "content": "Test core: directive compile + chat via curl",
+    "content": "Frontend: Chronicle tab (Outcome Ledger)",
     "status": "completed"
   },
   {
-    "content": "End-to-end verified & deliver",
+    "content": "Test end-to-end via curl + screenshot",
     "status": "completed"
   }
 ]

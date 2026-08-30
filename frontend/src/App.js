@@ -4,7 +4,8 @@ import axios from "axios";
 import { Toaster } from "sonner";
 import SovereignHome from "./components/SovereignHome";
 import AskAllAIs from "./components/AskAllAIs";
-import { Sparkles, LayoutGrid, MessagesSquare } from "lucide-react";
+import Chronicle from "./components/Chronicle";
+import { Sparkles, LayoutGrid, MessagesSquare, BookOpen } from "lucide-react";
 
 const BACKEND_URL = process.env.REACT_APP_BACKEND_URL;
 export const API = `${BACKEND_URL}/api`;
@@ -41,6 +42,13 @@ function App() {
           >
             <MessagesSquare size={16} /> Ask All AIs
           </button>
+          <button
+            data-testid="tab-chronicle"
+            className={tab === "chronicle" ? "tab active" : "tab"}
+            onClick={() => setTab("chronicle")}
+          >
+            <BookOpen size={16} /> Chronicle
+          </button>
         </nav>
         <div className="owner-badge">
           <span className="dot" /> Owner · Sovereign
@@ -48,7 +56,9 @@ function App() {
       </header>
 
       <main className="stage">
-        {tab === "home" ? <SovereignHome /> : <AskAllAIs />}
+        {tab === "home" && <SovereignHome />}
+        {tab === "askai" && <AskAllAIs />}
+        {tab === "chronicle" && <Chronicle />}
       </main>
 
       <footer className="footof">

@@ -1,11 +1,11 @@
-import React, { useEffect, useState, useCallback } from "react";
+import React, { useEffect, useState, useCallback, useRef } from "react";
 import axios from "axios";
 import { toast } from "sonner";
 import { motion, AnimatePresence } from "framer-motion";
 import {
   Send, Hammer, Search, MoveRight, Banknote, Sparkles, CheckCircle2,
   Circle, Trash2, PauseCircle, PlayCircle, Compass, ShieldCheck, Loader2,
-  ScrollText, Target, Wallet
+  ScrollText, Target, Wallet, Zap, Activity, Play, AlertTriangle
 } from "lucide-react";
 import { API } from "../App";
 
@@ -25,26 +25,36 @@ const SAMPLES = [
   "Get 3 paying newsletter sponsors for my tech blog",
 ];
 
+const fmtTime = (iso) => {
+  try {
+    const d = new Date(iso);
+    return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+  } catch { return ""; }
+};
+
 export default function SovereignHome() {
   const [directive, setDirective] = useState("");
   const [mode, setMode] = useState("Move");
   const [missions, setMissions] = useState([]);
   const [stats, setStats] = useState(null);
+  const [feed, setFeed] = useState([]);
   const [compiling, setCompiling] = useState(false);
   const [nextRec, setNextRec] = useState(null);
   const [loadingNext, setLoadingNext] = useState(false);
+  const [runningId, setRunningId] = useState(null);
+  const runningRef = useRef(false);
 
   const load = useCallback(async () => {
     try {
-      const [m, s] = await Promise.all([
+      const [m, s, f] = await Promise.all([
         axios.get(`${API}/missions`),
         axios.get(`${API}/stats`),
+        axios.get(`${API}/action-feed?limit=40`),
       ]);
       setMissions(m.data);
       setStats(s.data);
-    } catch (e) {
-      console.error(e);
-    }
+      setFeed(f.data);
+    } catch (e) { console.error(e); }
   }, []);
 
   useEffect(() => { load(); }, [load]);
@@ -54,11 +64,7 @@ export default function SovereignHome() {
     try {
       const r = await axios.get(`${API}/perfect-next`);
       setNextRec(r.data);
-    } catch (e) {
-      toast.error("Soul Brain unavailable");
-    } finally {
-      setLoadingNext(false);
-    }
+    } catch (e) { /* silent */ } finally { setLoadingNext(false); }
   }, []);
 
   useEffect(() => { getPerfectNext(); }, [getPerfectNext, missions.length]);
@@ -73,8 +79,57 @@ export default function SovereignHome() {
       await load();
     } catch (e) {
       toast.error(e?.response?.data?.detail || "Compilation failed");
+    } finally { setCompiling(false); }
+  };
+
+  const executeNext = async (mid) => {
+    const r = await axios.post(`${API}/missions/${mid}/execute-step`, {});
+    return r.data; // { mission, log }
+  };
+
+  const runOne = async (mid) => {
+    setRunningId(mid);
+    try {
+      const data = await executeNext(mid);
+      if (data.log) {
+        if (data.log.status === "approval_required") {
+          toast.warning(`Owner approval required: ${data.log.step_title}`);
+        } else {
+          toast.success(`NEXUS: ${data.log.action.slice(0, 60)}`);
+        }
+      } else {
+        toast("All steps already executed");
+      }
+      await load();
+    } catch (e) {
+      toast.error("NEXUS action failed");
+    } finally { setRunningId(null); }
+  };
+
+  const autoRun = async (m) => {
+    if (runningRef.current) return;
+    runningRef.current = true;
+    setRunningId(m.id);
+    try {
+      let remaining = m.steps.filter((s) => !s.done).length;
+      while (remaining > 0) {
+        const data = await executeNext(m.id);
+        await load();
+        if (!data.log || data.log.status === "approval_required") {
+          if (data.log?.status === "approval_required") {
+            toast.warning(`Paused: owner approval required at "${data.log.step_title}"`);
+          }
+          break;
+        }
+        remaining -= 1;
+        await new Promise((res) => setTimeout(res, 650));
+      }
+      toast.success("NEXUS run complete");
+    } catch (e) {
+      toast.error("Auto-run interrupted");
     } finally {
-      setCompiling(false);
+      runningRef.current = false;
+      setRunningId(null);
     }
   };
 
@@ -186,6 +241,43 @@ export default function SovereignHome() {
         </div>
       </section>
 
+      {/* NEXUS Action Bus feed */}
+      <section className="nexus" data-testid="nexus-feed">
+        <div className="nx-head">
+          <Zap size={15} /> NEXUS Action Bus
+          <span className="nx-sub">trusted execution surface</span>
+          <span className={`nx-live ${runningId ? "on" : ""}`}>
+            <span className="pulse" /> {runningId ? "executing" : "idle"}
+          </span>
+        </div>
+        {feed.length === 0 ? (
+          <div className="nx-empty">No actions executed yet. Run a mission step and NEXUS logs verifiable evidence here.</div>
+        ) : (
+          <div className="nx-log">
+            <AnimatePresence initial={false}>
+              {feed.map((f) => (
+                <motion.div
+                  key={f.id}
+                  className={`nx-row ${f.status}`}
+                  initial={{ opacity: 0, x: -12 }}
+                  animate={{ opacity: 1, x: 0 }}
+                  layout
+                >
+                  <span className="nx-time">{fmtTime(f.timestamp)}</span>
+                  <span className={`nx-badge ${f.status}`}>
+                    {f.status === "approval_required" ? <AlertTriangle size={11} /> : <Activity size={11} />}
+                  </span>
+                  <span className="nx-body">
+                    <b>{f.mission_title}</b> · {f.action}
+                    <em> ⟶ evidence: {f.evidence}</em>
+                  </span>
+                </motion.div>
+              ))}
+            </AnimatePresence>
+          </div>
+        )}
+      </section>
+
       {/* Mission board */}
       <section className="board">
         <div className="board-head"><ScrollText size={16} /> Mission Board</div>
@@ -197,7 +289,10 @@ export default function SovereignHome() {
         ) : (
           <div className="mission-grid">
             <AnimatePresence>
-              {missions.map((m) => (
+              {missions.map((m) => {
+                const undone = m.steps.filter((s) => !s.done).length;
+                const busy = runningId === m.id;
+                return (
                 <motion.div
                   key={m.id}
                   data-testid="mission-card"
@@ -218,15 +313,26 @@ export default function SovereignHome() {
                     {m.steps.map((s) => (
                       <button
                         key={s.id}
-                        className={`step ${s.done ? "done" : ""}`}
+                        className={`step ${s.done ? "done" : ""} ${busy && !s.done ? "pending" : ""}`}
                         onClick={() => advance(m.id, s.id, !s.done)}
                         title={s.detail}
                       >
-                        {s.done ? <CheckCircle2 size={15} /> : <Circle size={15} />}
+                        {s.done ? <CheckCircle2 size={15} /> : (busy ? <Loader2 className="spin" size={15} /> : <Circle size={15} />)}
                         <span>{s.title}</span>
                       </button>
                     ))}
                   </div>
+
+                  {m.status !== "complete" && (
+                    <div className="m-run">
+                      <button data-testid="run-next-btn" className="run" onClick={() => runOne(m.id)} disabled={busy || undone === 0}>
+                        <Play size={14} /> Run Next
+                      </button>
+                      <button data-testid="autorun-btn" className="run auto" onClick={() => autoRun(m)} disabled={busy || undone === 0}>
+                        {busy ? <Loader2 className="spin" size={14} /> : <Zap size={14} />} Auto-run ({undone})
+                      </button>
+                    </div>
+                  )}
 
                   <div className="m-meta">
                     <div><Banknote size={13} /> {m.payment_path || "—"}</div>
@@ -251,7 +357,7 @@ export default function SovereignHome() {
                     </div>
                   </div>
                 </motion.div>
-              ))}
+              );})}
             </AnimatePresence>
           </div>
         )}

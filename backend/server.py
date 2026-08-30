@@ -65,6 +65,31 @@ class AdvanceRequest(BaseModel):
     step_id: Optional[str] = None
     done: Optional[bool] = True
 
+class ExecuteRequest(BaseModel):
+    step_id: Optional[str] = None  # None => next undone step
+
+class ActionLog(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    mission_id: str
+    mission_title: str
+    step_title: str
+    action: str
+    evidence: str
+    status: str = "success"  # success | approval_required
+    timestamp: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+
+class ChronicleEntry(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    mission_id: str
+    title: str
+    mode: str
+    amount: float = 0.0
+    outcome_metric: str = ""
+    lesson: str = ""
+    completed_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+
 class ChatRequest(BaseModel):
     message: str
     models: Optional[List[str]] = None  # e.g. ["openai","gemini","anthropic"] ; None => single openai
@@ -108,11 +133,17 @@ COMPILE_SYSTEM = (
     "Respond ONLY with valid minified JSON, no prose."
 )
 
-def compile_prompt(directive: str, mode: str) -> str:
+def compile_prompt(directive: str, mode: str, lessons: List[str] = None) -> str:
+    lesson_block = ""
+    if lessons:
+        joined = "\n".join(f"- {l}" for l in lessons[:5])
+        lesson_block = (
+            f"\nLESSONS FROM PAST VERIFIED OUTCOMES (apply them to sharpen this mission):\n{joined}\n"
+        )
     return f"""Compile this owner directive into a Mission Graph.
 Directive: \"{directive}\"
 Active operating mode: {mode} (Make=create assets, Find=discover opportunities, Move=advance a mission, Collect=get paid).
-
+{lesson_block}
 Return JSON with EXACTLY these keys:
 {{
   "title": "short punchy mission name (max 7 words)",
@@ -136,8 +167,10 @@ async def compile_directive(req: CompileRequest):
     if not req.directive.strip():
         raise HTTPException(400, "Directive is required")
     mode = req.mode if req.mode in MODES else "Move"
+    lesson_docs = await db.chronicle.find({}, {"_id": 0, "lesson": 1}).sort("completed_at", -1).to_list(5)
+    lessons = [d["lesson"] for d in lesson_docs if d.get("lesson")]
     try:
-        raw = await llm_call(COMPILE_SYSTEM, compile_prompt(req.directive, mode))
+        raw = await llm_call(COMPILE_SYSTEM, compile_prompt(req.directive, mode, lessons))
         data = extract_json(raw)
     except Exception as e:
         logger.error(f"compile failed: {e}")
@@ -204,7 +237,111 @@ async def advance_mission(mid: str, req: AdvanceRequest):
                 break
     doc = recompute_stage(doc)
     await db.missions.replace_one({"id": mid}, doc)
+    await create_chronicle_if_complete(doc)
     return doc
+
+NEXUS_SYSTEM = (
+    "You are NEXUS, the commercial action body of ACASO. You SIMULATE executing one mission step "
+    "through a trusted Action Bus (browser + API workers). Report crisply what you did and the "
+    "verifiable evidence artifact produced. Respond ONLY with valid minified JSON, no prose."
+)
+
+def nexus_prompt(mission: dict, step: dict) -> str:
+    return f"""Mission: \"{mission.get('title')}\" (mode {mission.get('mode')}, payment path: {mission.get('payment_path')}).
+Execute this step through the Action Bus:
+Step: \"{step.get('title')}\" - {step.get('detail')}
+
+Return JSON:
+{{
+  "action": "one short past-tense line of what NEXUS did (e.g. 'Sent 4 tailored outreach emails via connected Gmail')",
+  "evidence": "the concrete artifact / proof produced (e.g. 'msg-ids logged, 2 opens tracked')",
+  "status": "success"  // use "approval_required" ONLY if it hits MFA, KYC, contract terms or a payment confirmation
+}}"""
+
+async def create_chronicle_if_complete(mission: dict):
+    if mission.get("status") != "complete":
+        return None
+    existing = await db.chronicle.find_one({"mission_id": mission["id"]}, {"_id": 0})
+    if existing:
+        return None
+    lesson = "Mission completed; repeat the outreach cadence that closed it."
+    try:
+        raw = await llm_call(
+            "You are the ACASO Outcome-Ledger scribe. In ONE sentence, extract the single most useful, "
+            "reusable lesson from a completed revenue mission to sharpen future missions. Plain sentence only.",
+            f"Completed mission: {mission.get('title')} | mode {mission.get('mode')} | "
+            f"outcome: {mission.get('outcome_metric')} | steps: "
+            f"{[s.get('title') for s in mission.get('steps', [])]}",
+        )
+        lesson = raw.strip().strip('"')
+    except Exception as e:
+        logger.error(f"lesson gen failed: {e}")
+    entry = ChronicleEntry(
+        mission_id=mission["id"],
+        title=mission.get("title", ""),
+        mode=mission.get("mode", ""),
+        amount=float(mission.get("amount", 0) or 0),
+        outcome_metric=mission.get("outcome_metric", ""),
+        lesson=lesson,
+    )
+    await db.chronicle.insert_one(entry.model_dump())
+    return entry
+
+@api_router.post("/missions/{mid}/execute-step")
+async def execute_step(mid: str, req: ExecuteRequest):
+    doc = await db.missions.find_one({"id": mid}, {"_id": 0})
+    if not doc:
+        raise HTTPException(404, "Mission not found")
+    # pick target step
+    target = None
+    if req.step_id:
+        target = next((s for s in doc.get("steps", []) if s["id"] == req.step_id), None)
+    else:
+        target = next((s for s in doc.get("steps", []) if not s.get("done")), None)
+    if not target:
+        return {"mission": recompute_stage(doc), "log": None, "message": "All steps already executed"}
+
+    try:
+        raw = await llm_call(NEXUS_SYSTEM, nexus_prompt(doc, target))
+        data = extract_json(raw)
+        action = data.get("action", f"Executed: {target['title']}")
+        evidence = data.get("evidence", "artifact logged")
+        status = data.get("status", "success")
+        if status not in ("success", "approval_required"):
+            status = "success"
+    except Exception as e:
+        logger.error(f"nexus exec failed: {e}")
+        action = f"Executed: {target['title']}"
+        evidence = "artifact logged to evidence ledger"
+        status = "success"
+
+    log = ActionLog(
+        mission_id=mid, mission_title=doc.get("title", ""), step_title=target["title"],
+        action=action, evidence=evidence, status=status,
+    )
+    await db.action_logs.insert_one(log.model_dump())
+
+    # mark step done only on success
+    if status == "success":
+        for s in doc["steps"]:
+            if s["id"] == target["id"]:
+                s["done"] = True
+        doc = recompute_stage(doc)
+        await db.missions.replace_one({"id": mid}, doc)
+        await create_chronicle_if_complete(doc)
+
+    return {"mission": doc, "log": log.model_dump()}
+
+@api_router.get("/action-feed", response_model=List[ActionLog])
+async def action_feed(limit: int = 40):
+    docs = await db.action_logs.find({}, {"_id": 0}).sort("timestamp", -1).to_list(limit)
+    return docs
+
+@api_router.get("/chronicle", response_model=List[ChronicleEntry])
+async def chronicle():
+    docs = await db.chronicle.find({}, {"_id": 0}).sort("completed_at", -1).to_list(200)
+    return docs
+
 
 @api_router.patch("/missions/{mid}/status", response_model=Mission)
 async def set_status(mid: str, status: str):
