@@ -1,22 +1,18 @@
 [
   {
-    "content": "Backend: bug bounty compiler + security NEXUS + owner Approve & Continue",
+    "content": "Backend: Mission.soul_council field; SOULS personas mapped to different models; llm_call_failover",
     "status": "completed"
   },
   {
-    "content": "Backend: Agent Bridge — in-app API key, protected /api/agent/*, /bridge/info+regenerate+activity, call logging",
+    "content": "Backend: POST /missions/{id}/deploy-souls — 3 souls parallel + Eternal Throne synthesis + action log",
     "status": "completed"
   },
   {
-    "content": "Frontend: Bug Bounty tab (program cards, severity/CVSS, security pipeline, Run/Approve, disclosure report viewer)",
+    "content": "Frontend: Deploy Soul Council button + council panel (souls + throne verdict)",
     "status": "completed"
   },
   {
-    "content": "Frontend: Agent Bridge tab (API key, connector schemas Gemini/OpenAI/Manus, live playground, activity)",
-    "status": "completed"
-  },
-  {
-    "content": "Filter Sovereign Home to revenue missions; test end-to-end via curl + screenshots",
+    "content": "Test deploy-souls end-to-end via curl + screenshot",
     "status": "completed"
   }
 ]

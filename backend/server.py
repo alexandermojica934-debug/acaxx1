@@ -67,6 +67,7 @@ class Mission(BaseModel):
     severity: str = ""
     cvss: float = 0.0
     report: str = ""
+    soul_council: Optional[dict] = None
     created_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
 
 class CompileRequest(BaseModel):
@@ -129,6 +130,21 @@ async def llm_call(system: str, prompt: str, provider: str = "openai", model: st
     ).with_model(provider, model)
     resp = await chat.send_message(UserMessage(text=prompt))
     return resp if isinstance(resp, str) else str(resp)
+
+async def llm_call_failover(system: str, prompt: str, order: List[str], session: str = None):
+    """Rebirth Protocol: try providers in order until one answers (survivor architecture)."""
+    last_err = None
+    for pkey in order:
+        if pkey not in MODEL_MAP:
+            continue
+        prov, model, label = MODEL_MAP[pkey]
+        try:
+            ans = await llm_call(system, prompt, prov, model, session=session)
+            return ans, pkey, label
+        except Exception as e:
+            last_err = e
+            logger.warning(f"failover: {pkey} failed ({e}); trying next")
+    raise last_err or RuntimeError("all providers failed")
 
 def extract_json(text: str):
     t = text.strip()
@@ -460,6 +476,115 @@ async def action_feed(limit: int = 40):
 async def chronicle():
     docs = await db.chronicle.find({}, {"_id": 0}).sort("completed_at", -1).to_list(200)
     return docs
+
+
+# ---------------- Soul Council (multi-persona, multi-model resolution) ----------------
+# ACASO Royal Codex archetypes, each bound to a distinct AI model. Not just one AI.
+SOULS = [
+    {
+        "id": "vision", "name": "Vision Command", "role": "Recon Strategist",
+        "provider": "gemini", "failover": ["gemini", "openai", "anthropic"],
+        "system": ("You are VISION COMMAND, the strategic-intelligence soul of ACASO (House of Nova). "
+                   "Persona: far-seeing, calm, sovereign strategist. For the given AUTHORIZED vulnerability, "
+                   "give a sharp strategic reconnaissance read: attack surface, blast radius, and why it matters. "
+                   "2-3 tight sentences. No weaponized detail."),
+    },
+    {
+        "id": "fusion", "name": "Fusion Engine", "role": "Root-Cause Analyst",
+        "provider": "openai", "failover": ["openai", "gemini", "anthropic"],
+        "system": ("You are FUSION ENGINE, the execution-core soul of ACASO. Persona: precise, technical, relentless. "
+                   "Identify the exact ROOT CAUSE of the vulnerability at a code/architecture level (non-weaponized). "
+                   "2-3 sentences, concrete and technical."),
+    },
+    {
+        "id": "rebirth", "name": "Rebirth Protocol", "role": "Remediation Engineer",
+        "provider": "anthropic", "failover": ["anthropic", "openai", "gemini"],
+        "system": ("You are REBIRTH PROTOCOL, the resilience/survivor soul of ACASO. Persona: resourceful, protective, "
+                   "builds to last. Propose the concrete FIX and hardening so this flaw can never resurface. "
+                   "Give 3-4 actionable remediation steps (config/code-level), non-weaponized."),
+    },
+]
+
+def soul_problem(mission: dict) -> str:
+    return (f"Program: {mission.get('program')} on {mission.get('platform')}\n"
+            f"In-scope asset: {mission.get('asset')}\n"
+            f"Vulnerability class: {mission.get('vuln_type')} | Severity: {mission.get('severity')} | CVSS: {mission.get('cvss')}\n"
+            f"Context report:\n{(mission.get('report') or '')[:1200]}")
+
+@api_router.post("/missions/{mid}/deploy-souls")
+async def deploy_souls(mid: str):
+    doc = await db.missions.find_one({"id": mid}, {"_id": 0})
+    if not doc:
+        raise HTTPException(404, "Mission not found")
+    if doc.get("kind") != "bugbounty":
+        raise HTTPException(400, "Soul Council deploys on bug-bounty engagements")
+
+    problem = soul_problem(doc)
+
+    async def run_soul(soul):
+        prompt = f"AUTHORIZED security engagement. Analyze and help truly FIX this problem.\n\n{problem}"
+        try:
+            ans, used, label = await llm_call_failover(
+                soul["system"], prompt, soul["failover"], session=f"{mid}-{soul['id']}"
+            )
+            return {"id": soul["id"], "name": soul["name"], "role": soul["role"],
+                    "provider": used, "model_label": label, "analysis": ans.strip(), "ok": True}
+        except Exception as e:
+            logger.error(f"soul {soul['id']} failed: {e}")
+            return {"id": soul["id"], "name": soul["name"], "role": soul["role"],
+                    "provider": soul["provider"], "model_label": "—",
+                    "analysis": f"Soul unreachable: {e}", "ok": False}
+
+    souls = await asyncio.gather(*[run_soul(s) for s in SOULS])
+
+    ok_souls = [s for s in souls if s["ok"]]
+    council_text = "\n\n".join([f"[{s['name']} · {s['role']} · {s['model_label']}]\n{s['analysis']}" for s in ok_souls])
+    throne_system = (
+        "You are ETERNAL THRONE — the Soul Brain and sovereign arbiter of ACASO (House of Nova). "
+        "You command a council of specialist AI souls, each running on a different model. Fuse their findings into "
+        "the FINAL VERIFIED RESOLUTION that truly fixes the problem. Respond ONLY with valid minified JSON, no prose."
+    )
+    throne_prompt = (
+        f"Vulnerability context:\n{problem}\n\nCouncil findings:\n{council_text}\n\n"
+        "Return JSON: {\"root_cause\":\"confirmed one-line root cause\","
+        "\"fix\":\"the exact fix/patch to deploy (2-4 sentences, code/config level, non-weaponized)\","
+        "\"verification\":\"how to retest & confirm it is resolved (1-2 sentences)\","
+        "\"confidence\":92,\"status\":\"RESOLVED\"}"
+    )
+    resolution = {"root_cause": "", "fix": "", "verification": "", "confidence": 90, "status": "RESOLVED"}
+    throne_label = "Eternal Throne"
+    try:
+        raw, _, throne_label = await llm_call_failover(throne_system, throne_prompt,
+                                                       ["gemini", "openai", "anthropic"], session=f"{mid}-throne")
+        data = extract_json(raw)
+        resolution.update({k: data.get(k, resolution[k]) for k in resolution})
+    except Exception as e:
+        logger.error(f"throne synthesis failed: {e}")
+        if ok_souls:
+            resolution["fix"] = ok_souls[-1]["analysis"]
+
+    council = {
+        "souls": souls,
+        "resolution": resolution,
+        "throne_label": throne_label,
+        "deployed_at": datetime.now(timezone.utc).isoformat(),
+    }
+    await db.missions.update_one({"id": mid}, {"$set": {"soul_council": council}})
+
+    # log to the action bus
+    log = ActionLog(
+        mission_id=mid, mission_title=doc.get("title", ""),
+        step_title="Soul Council",
+        action=f"Deployed {len(ok_souls)} souls ({', '.join(s['model_label'] for s in ok_souls)}) + Eternal Throne Soul Brain",
+        evidence=f"root cause: {resolution['root_cause'][:80]} · status {resolution['status']}",
+        status="success",
+    )
+    await db.action_logs.insert_one(log.model_dump())
+
+    mission = await db.missions.find_one({"id": mid}, {"_id": 0})
+    return {"mission": mission, "council": council}
+
+
 
 
 # ---------------- Agent Bridge (interop for Manus / Gemini / ChatGPT) ----------------

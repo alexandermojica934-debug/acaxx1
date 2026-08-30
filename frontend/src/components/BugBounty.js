@@ -5,9 +5,12 @@ import { motion, AnimatePresence } from "framer-motion";
 import {
   ShieldAlert, Send, Loader2, Zap, Play, CheckCircle2, Circle, Trash2,
   Bug, Crosshair, FileText, ChevronDown, ChevronUp, ShieldCheck, Banknote,
-  Target, Activity, AlertTriangle, Radar
+  Target, Activity, AlertTriangle, Radar, Users, Crown, Eye, Cpu, Flame
 } from "lucide-react";
 import { API } from "../App";
+
+const SOUL_ICON = { vision: Eye, fusion: Cpu, rebirth: Flame };
+const SOUL_COLOR = { vision: "#4fd1ff", fusion: "#8b7cff", rebirth: "#ff7a90" };
 
 const PLATFORMS = ["Auto", "HackerOne", "Bugcrowd", "Intigriti", "Self-hosted VDP"];
 const BB_STAGES = ["Program", "Recon", "Vuln Found", "PoC", "Disclosure", "Triage", "Payout"];
@@ -46,6 +49,8 @@ export default function BugBounty() {
   const [runningId, setRunningId] = useState(null);
   const [gate, setGate] = useState({});      // mid -> step title awaiting approval
   const [openReport, setOpenReport] = useState({});
+  const [deploying, setDeploying] = useState(null);
+  const [openCouncil, setOpenCouncil] = useState({});
   const runningRef = useRef(false);
 
   const load = useCallback(async () => {
@@ -118,6 +123,18 @@ export default function BugBounty() {
   const remove = async (mid) => {
     try { await axios.delete(`${API}/missions/${mid}`); await load(); toast("Engagement archived"); }
     catch (e) { toast.error("Failed"); }
+  };
+
+  const deploySouls = async (mid) => {
+    setDeploying(mid);
+    try {
+      await axios.post(`${API}/missions/${mid}/deploy-souls`);
+      setOpenCouncil((o) => ({ ...o, [mid]: true }));
+      toast.success("Soul Council convened — Eternal Throne delivered the verdict");
+      await load();
+    } catch (e) {
+      toast.error(e?.response?.data?.detail || "Council failed");
+    } finally { setDeploying(null); }
   };
 
   const money = (n) => `$${Number(n || 0).toLocaleString()}`;
@@ -251,6 +268,58 @@ export default function BugBounty() {
                     <FileText size={14} /> Responsible Disclosure Report {openReport[m.id] ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
                   </button>
                   {openReport[m.id] && <ReportView text={m.report} />}
+
+                  {/* Soul Council */}
+                  <div className="bb-soul-bar">
+                    <button
+                      data-testid="deploy-souls"
+                      className="deploy-souls"
+                      onClick={() => deploySouls(m.id)}
+                      disabled={deploying === m.id}
+                    >
+                      {deploying === m.id ? <Loader2 className="spin" size={15} /> : <Users size={15} />}
+                      {deploying === m.id ? "Souls convening…" : (m.soul_council ? "Re-convene Soul Council" : "Deploy Soul Council")}
+                    </button>
+                    {m.soul_council && (
+                      <button className="council-toggle" onClick={() => setOpenCouncil((o) => ({ ...o, [m.id]: !o[m.id] }))}>
+                        {openCouncil[m.id] ? <ChevronUp size={15} /> : <ChevronDown size={15} />}
+                      </button>
+                    )}
+                  </div>
+
+                  {m.soul_council && openCouncil[m.id] && (
+                    <motion.div className="council" initial={{ opacity: 0, height: 0 }} animate={{ opacity: 1, height: "auto" }}>
+                      <div className="council-head"><Users size={13} /> Soul Council — {m.soul_council.souls.filter((s) => s.ok).length} souls across {new Set(m.soul_council.souls.filter((s)=>s.ok).map((s)=>s.provider)).size} AI models</div>
+                      <div className="souls-grid">
+                        {m.soul_council.souls.map((s) => {
+                          const Icon = SOUL_ICON[s.id] || Users;
+                          return (
+                            <div key={s.id} className={`soul ${s.ok ? "" : "down"}`} style={{ borderColor: SOUL_COLOR[s.id] + "55" }}>
+                              <div className="soul-h" style={{ color: SOUL_COLOR[s.id] }}>
+                                <Icon size={14} /> {s.name}
+                                <span className="soul-model">{s.model_label}</span>
+                              </div>
+                              <div className="soul-role">{s.role}</div>
+                              <p>{s.analysis}</p>
+                            </div>
+                          );
+                        })}
+                      </div>
+                      <div className="throne">
+                        <div className="throne-h"><Crown size={15} /> Eternal Throne · Soul Brain Verdict
+                          <span className="throne-status">{m.soul_council.resolution.status}</span>
+                        </div>
+                        <div className="throne-row"><b>Root cause</b><span>{m.soul_council.resolution.root_cause}</span></div>
+                        <div className="throne-row"><b>The fix</b><span>{m.soul_council.resolution.fix}</span></div>
+                        <div className="throne-row"><b>Verify</b><span>{m.soul_council.resolution.verification}</span></div>
+                        <div className="throne-conf">
+                          <span>Confidence</span>
+                          <div className="conf-bar"><div style={{ width: `${m.soul_council.resolution.confidence}%` }} /></div>
+                          <span className="conf-num">{m.soul_council.resolution.confidence}%</span>
+                        </div>
+                      </div>
+                    </motion.div>
+                  )}
 
                   <div className="m-foot">
                     <span className="m-amount">{money(m.amount)}</span>
