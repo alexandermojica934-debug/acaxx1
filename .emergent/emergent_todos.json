@@ -1,18 +1,22 @@
 [
   {
-    "content": "Backend: ActionLog + Chronicle models, execute-step (NEXUS sim w/ AI evidence), action-feed, chronicle endpoints; feed lessons into compile",
+    "content": "Backend: bug bounty compiler + security NEXUS + owner Approve & Continue",
     "status": "completed"
   },
   {
-    "content": "Frontend: NEXUS Action Bus feed panel + Run/Auto-run step execution on Sovereign Home",
+    "content": "Backend: Agent Bridge — in-app API key, protected /api/agent/*, /bridge/info+regenerate+activity, call logging",
     "status": "completed"
   },
   {
-    "content": "Frontend: Chronicle tab (Outcome Ledger)",
+    "content": "Frontend: Bug Bounty tab (program cards, severity/CVSS, security pipeline, Run/Approve, disclosure report viewer)",
     "status": "completed"
   },
   {
-    "content": "Test end-to-end via curl + screenshot",
+    "content": "Frontend: Agent Bridge tab (API key, connector schemas Gemini/OpenAI/Manus, live playground, activity)",
+    "status": "completed"
+  },
+  {
+    "content": "Filter Sovereign Home to revenue missions; test end-to-end via curl + screenshots",
     "status": "completed"
   }
 ]

@@ -1,14 +1,23 @@
-import React, { useEffect, useState, useCallback } from "react";
+import React, { useState } from "react";
 import "./App.css";
-import axios from "axios";
 import { Toaster } from "sonner";
 import SovereignHome from "./components/SovereignHome";
 import AskAllAIs from "./components/AskAllAIs";
 import Chronicle from "./components/Chronicle";
-import { Sparkles, LayoutGrid, MessagesSquare, BookOpen } from "lucide-react";
+import BugBounty from "./components/BugBounty";
+import AgentBridge from "./components/AgentBridge";
+import { Sparkles, LayoutGrid, MessagesSquare, BookOpen, ShieldAlert, Plug } from "lucide-react";
 
 const BACKEND_URL = process.env.REACT_APP_BACKEND_URL;
 export const API = `${BACKEND_URL}/api`;
+
+const TABS = [
+  { key: "home", label: "Sovereign Home", icon: LayoutGrid },
+  { key: "bounty", label: "Bug Bounty", icon: ShieldAlert },
+  { key: "askai", label: "Ask All AIs", icon: MessagesSquare },
+  { key: "chronicle", label: "Chronicle", icon: BookOpen },
+  { key: "bridge", label: "Agent Bridge", icon: Plug },
+];
 
 function App() {
   const [tab, setTab] = useState("home");
@@ -28,37 +37,29 @@ function App() {
           </div>
         </div>
         <nav className="tabs">
-          <button
-            data-testid="tab-home"
-            className={tab === "home" ? "tab active" : "tab"}
-            onClick={() => setTab("home")}
-          >
-            <LayoutGrid size={16} /> Sovereign Home
-          </button>
-          <button
-            data-testid="tab-askai"
-            className={tab === "askai" ? "tab active" : "tab"}
-            onClick={() => setTab("askai")}
-          >
-            <MessagesSquare size={16} /> Ask All AIs
-          </button>
-          <button
-            data-testid="tab-chronicle"
-            className={tab === "chronicle" ? "tab active" : "tab"}
-            onClick={() => setTab("chronicle")}
-          >
-            <BookOpen size={16} /> Chronicle
-          </button>
+          {TABS.map((t) => {
+            const Icon = t.icon;
+            return (
+              <button
+                key={t.key}
+                data-testid={`tab-${t.key}`}
+                className={tab === t.key ? "tab active" : "tab"}
+                onClick={() => setTab(t.key)}
+              >
+                <Icon size={16} /> {t.label}
+              </button>
+            );
+          })}
         </nav>
-        <div className="owner-badge">
-          <span className="dot" /> Owner · Sovereign
-        </div>
+        <div className="owner-badge"><span className="dot" /> Owner · Sovereign</div>
       </header>
 
       <main className="stage">
         {tab === "home" && <SovereignHome />}
+        {tab === "bounty" && <BugBounty />}
         {tab === "askai" && <AskAllAIs />}
         {tab === "chronicle" && <Chronicle />}
+        {tab === "bridge" && <AgentBridge />}
       </main>
 
       <footer className="footof">

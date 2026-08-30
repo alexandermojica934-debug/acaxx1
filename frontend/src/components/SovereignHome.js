@@ -47,7 +47,7 @@ export default function SovereignHome() {
   const load = useCallback(async () => {
     try {
       const [m, s, f] = await Promise.all([
-        axios.get(`${API}/missions`),
+        axios.get(`${API}/missions?kind=revenue`),
         axios.get(`${API}/stats`),
         axios.get(`${API}/action-feed?limit=40`),
       ]);

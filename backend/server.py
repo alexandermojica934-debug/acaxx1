@@ -1,4 +1,4 @@
-from fastapi import FastAPI, APIRouter, HTTPException
+from fastapi import FastAPI, APIRouter, HTTPException, Header, Depends
 from dotenv import load_dotenv
 from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
@@ -32,6 +32,8 @@ logger = logging.getLogger("acaso")
 # ---------------- Models ----------------
 MODES = ["Make", "Find", "Move", "Collect"]
 STAGES = ["Directive", "Discovery", "Deliverable", "Outreach", "Payment", "Receipt"]
+BB_STAGES = ["Program", "Recon", "Vuln Found", "PoC", "Disclosure", "Triage", "Payout"]
+SEVERITIES = ["Critical", "High", "Medium", "Low", "Info"]
 
 class Step(BaseModel):
     id: str = Field(default_factory=lambda: str(uuid.uuid4())[:8])
@@ -45,6 +47,7 @@ class Mission(BaseModel):
     directive: str
     title: str
     mode: str = "Move"
+    kind: str = "revenue"  # revenue | bugbounty
     summary: str = ""
     steps: List[Step] = []
     evidence: List[str] = []
@@ -52,14 +55,27 @@ class Mission(BaseModel):
     outcome_metric: str = ""
     authority: str = "Bounded autonomy — owner approval at MFA, contract & payment"
     stage: str = "Directive"
+    stage_set: List[str] = STAGES
     status: str = "active"  # active | paused | complete
     amount: float = 0.0
     currency: str = "USD"
+    # bug-bounty specific
+    program: str = ""
+    platform: str = ""
+    asset: str = ""
+    vuln_type: str = ""
+    severity: str = ""
+    cvss: float = 0.0
+    report: str = ""
     created_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
 
 class CompileRequest(BaseModel):
     directive: str
     mode: Optional[str] = "Move"
+
+class BountyRequest(BaseModel):
+    directive: str
+    platform: Optional[str] = None  # HackerOne | Bugcrowd | Intigriti | VDP
 
 class AdvanceRequest(BaseModel):
     step_id: Optional[str] = None
@@ -67,6 +83,7 @@ class AdvanceRequest(BaseModel):
 
 class ExecuteRequest(BaseModel):
     step_id: Optional[str] = None  # None => next undone step
+    approved: Optional[bool] = False  # owner approval to pass a stop-point
 
 class ActionLog(BaseModel):
     model_config = ConfigDict(extra="ignore")
@@ -193,9 +210,92 @@ async def compile_directive(req: CompileRequest):
     await db.missions.insert_one(mission.model_dump())
     return mission
 
+BOUNTY_SYSTEM = (
+    "You are ACASO's security-research compiler, governed by the Synarchy Aetheris constitutional plane. "
+    "You turn an owner's plain-language directive into a LAWFUL, ethical bug-bounty Mission Graph that ends in a "
+    "paid bounty. You operate strictly within authorized program scope and responsible-disclosure rules. "
+    "You NEVER produce working exploit code, real target credentials, live weaponized payloads, or instructions "
+    "to attack out-of-scope/unauthorized systems. Proof-of-concept references stay high-level and non-weaponized. "
+    "This is a realistic SIMULATION for a demo. Respond ONLY with valid minified JSON, no prose."
+)
+
+def bounty_prompt(directive: str, platform: str, lessons: List[str] = None) -> str:
+    lesson_block = ""
+    if lessons:
+        joined = "\n".join(f"- {l}" for l in lessons[:5])
+        lesson_block = f"\nLESSONS FROM PAST OUTCOMES (apply them):\n{joined}\n"
+    plat = platform or "pick the most fitting (HackerOne, Bugcrowd, Intigriti, or a self-hosted VDP)"
+    return f"""Compile this owner directive into an ethical bug-bounty Mission Graph that ends in a paid bounty.
+Directive: \"{directive}\"
+Preferred platform: {plat}
+{lesson_block}
+Design a realistic authorized engagement. Return JSON with EXACTLY these keys:
+{{
+  "title": "short mission name (max 8 words)",
+  "summary": "1-2 sentences on the target class and the payout goal",
+  "program": "plausible authorized program name (e.g. 'Acme Corp Public Bug Bounty')",
+  "platform": "HackerOne | Bugcrowd | Intigriti | Self-hosted VDP",
+  "asset": "in-scope asset targeted (e.g. 'api.acme.com')",
+  "vuln_type": "vulnerability class (e.g. 'IDOR', 'Stored XSS', 'SSRF', 'Auth bypass')",
+  "severity": "Critical | High | Medium | Low",
+  "cvss": 8.2,
+  "steps": [{{"title":"imperative action","detail":"one concrete, ethical sentence"}}],
+  // 6 steps in this order: scope & authorization check, recon/asset mapping, vulnerability hunting, non-weaponized PoC + evidence capture, write responsible-disclosure report, submit & track to payout
+  "evidence": ["proof artifact required at a handoff"],
+  "payment_path": "how the bounty is paid (e.g. 'HackerOne wallet -> PayPal', 'Bugcrowd -> bank')",
+  "outcome_metric": "the single success signal (e.g. '$2,500 bounty marked Resolved & paid')",
+  "amount": 2500,
+  "authority": "bounded-autonomy statement: auto recon/report drafting; STOP for owner approval before any submission and before payout confirmation; stay in scope only",
+  "report": "a concise responsible-disclosure report in markdown with sections: ## Summary, ## Affected Asset, ## Steps to Reproduce (HIGH-LEVEL, non-weaponized), ## Impact, ## Suggested Remediation, ## CVSS. Keep it professional and non-exploitative."
+}}"""
+
+@api_router.post("/compile-bounty", response_model=Mission)
+async def compile_bounty(req: BountyRequest):
+    if not req.directive.strip():
+        raise HTTPException(400, "Directive is required")
+    lesson_docs = await db.chronicle.find({}, {"_id": 0, "lesson": 1}).sort("completed_at", -1).to_list(5)
+    lessons = [d["lesson"] for d in lesson_docs if d.get("lesson")]
+    try:
+        raw = await llm_call(BOUNTY_SYSTEM, bounty_prompt(req.directive, req.platform, lessons))
+        data = extract_json(raw)
+    except Exception as e:
+        logger.error(f"bounty compile failed: {e}")
+        raise HTTPException(500, f"Bounty compilation failed: {e}")
+
+    sev = data.get("severity", "Medium")
+    if sev not in SEVERITIES:
+        sev = "Medium"
+    steps = [Step(title=s.get("title", "Step"), detail=s.get("detail", "")) for s in data.get("steps", [])]
+    mission = Mission(
+        directive=req.directive,
+        title=data.get("title", "Bug Bounty Mission"),
+        mode="Find",
+        kind="bugbounty",
+        summary=data.get("summary", ""),
+        steps=steps,
+        evidence=data.get("evidence", []),
+        payment_path=data.get("payment_path", ""),
+        outcome_metric=data.get("outcome_metric", ""),
+        authority=data.get("authority", "Bounded autonomy — owner approval before submission & payout; in-scope only"),
+        amount=float(data.get("amount", 0) or 0),
+        program=data.get("program", ""),
+        platform=data.get("platform", req.platform or ""),
+        asset=data.get("asset", ""),
+        vuln_type=data.get("vuln_type", ""),
+        severity=sev,
+        cvss=float(data.get("cvss", 0) or 0),
+        report=data.get("report", ""),
+        stage_set=BB_STAGES,
+        stage=BB_STAGES[1],
+    )
+    await db.missions.insert_one(mission.model_dump())
+    return mission
+
+
 @api_router.get("/missions", response_model=List[Mission])
-async def list_missions():
-    docs = await db.missions.find({}, {"_id": 0}).sort("created_at", -1).to_list(500)
+async def list_missions(kind: Optional[str] = None):
+    query = {"kind": kind} if kind else {}
+    docs = await db.missions.find(query, {"_id": 0}).sort("created_at", -1).to_list(500)
     return docs
 
 @api_router.get("/missions/{mid}", response_model=Mission)
@@ -206,16 +306,17 @@ async def get_mission(mid: str):
     return doc
 
 def recompute_stage(mission: dict) -> dict:
+    stage_set = mission.get("stage_set") or STAGES
     steps = mission.get("steps", [])
     total = len(steps) or 1
     done = sum(1 for s in steps if s.get("done"))
     ratio = done / total
-    idx = min(len(STAGES) - 1, 1 + int(ratio * (len(STAGES) - 2)))
+    idx = min(len(stage_set) - 1, 1 + int(ratio * (len(stage_set) - 2)))
     if done == total:
-        mission["stage"] = "Receipt"
+        mission["stage"] = stage_set[-1]
         mission["status"] = "complete"
     else:
-        mission["stage"] = STAGES[idx]
+        mission["stage"] = stage_set[idx]
         if mission.get("status") == "complete":
             mission["status"] = "active"
     return mission
@@ -247,6 +348,18 @@ NEXUS_SYSTEM = (
 )
 
 def nexus_prompt(mission: dict, step: dict) -> str:
+    if mission.get("kind") == "bugbounty":
+        return f"""You are NEXUS running an AUTHORIZED, ethical bug-bounty engagement (SIMULATION).
+Program: \"{mission.get('program')}\" on {mission.get('platform')} | in-scope asset: {mission.get('asset')} | target class: {mission.get('vuln_type')} | payout path: {mission.get('payment_path')}.
+Execute this step through security worker tools (recon, scanners, report drafter) staying strictly in scope. Do NOT output weaponized payloads or real credentials.
+Step: \"{step.get('title')}\" - {step.get('detail')}
+
+Return JSON:
+{{
+  "action": "one short past-tense line of what NEXUS did (e.g. 'Enumerated 42 in-scope subdomains via recon worker')",
+  "evidence": "concrete non-weaponized artifact / proof (e.g. 'assets.json logged; screenshot of 403->200 auth bypass captured')",
+  "status": "success"  // use "approval_required" for the SUBMIT step (owner sign-off before disclosure) and the PAYOUT confirmation step
+}}"""
     return f"""Mission: \"{mission.get('title')}\" (mode {mission.get('mode')}, payment path: {mission.get('payment_path')}).
 Execute this step through the Action Bus:
 Step: \"{step.get('title')}\" - {step.get('detail')}
@@ -315,6 +428,12 @@ async def execute_step(mid: str, req: ExecuteRequest):
         evidence = "artifact logged to evidence ledger"
         status = "success"
 
+    # Owner approval overrides a stop-point and lets the step complete
+    if status == "approval_required" and req.approved:
+        status = "success"
+        action = f"[Owner approved] {action}"
+        evidence = f"{evidence} · signed off by Owner (Synarchy authority)"
+
     log = ActionLog(
         mission_id=mid, mission_title=doc.get("title", ""), step_title=target["title"],
         action=action, evidence=evidence, status=status,
@@ -341,6 +460,120 @@ async def action_feed(limit: int = 40):
 async def chronicle():
     docs = await db.chronicle.find({}, {"_id": 0}).sort("completed_at", -1).to_list(200)
     return docs
+
+
+# ---------------- Agent Bridge (interop for Manus / Gemini / ChatGPT) ----------------
+import secrets
+
+async def get_or_create_key() -> str:
+    doc = await db.bridge_config.find_one({"_id": "bridge"})
+    if not doc:
+        key = "acaso_" + secrets.token_urlsafe(24)
+        await db.bridge_config.insert_one({"_id": "bridge", "api_key": key,
+                                           "created_at": datetime.now(timezone.utc).isoformat()})
+        return key
+    return doc["api_key"]
+
+async def require_key(x_acaso_key: Optional[str] = Header(None)):
+    stored = await get_or_create_key()
+    if not x_acaso_key or x_acaso_key != stored:
+        raise HTTPException(401, "Invalid or missing X-ACASO-Key. Get your key from the ACASO Agent Bridge tab.")
+    return True
+
+async def log_agent_call(agent: str, action: str, detail: str):
+    entry = {
+        "id": str(uuid.uuid4()),
+        "agent": agent or "external-agent",
+        "action": action,
+        "detail": detail,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }
+    await db.agent_calls.insert_one(entry)
+    entry.pop("_id", None)
+    return entry
+
+class BridgeDirective(BaseModel):
+    directive: str
+    kind: Optional[str] = "revenue"      # revenue | bugbounty
+    mode: Optional[str] = "Move"          # for revenue
+    platform: Optional[str] = None        # for bugbounty
+    agent: Optional[str] = "external-agent"
+
+class BridgeRun(BaseModel):
+    run: Optional[str] = "next"           # next | all
+    approved: Optional[bool] = False
+    agent: Optional[str] = "external-agent"
+
+@api_router.get("/bridge/info")
+async def bridge_info():
+    key = await get_or_create_key()
+    return {
+        "api_key": key,
+        "auth_header": "X-ACASO-Key",
+        "endpoints": {
+            "issue_directive": "POST /api/agent/directive",
+            "list_missions": "GET /api/agent/missions",
+            "get_mission": "GET /api/agent/missions/{id}",
+            "run_mission": "POST /api/agent/missions/{id}/run",
+        },
+    }
+
+@api_router.post("/bridge/regenerate")
+async def bridge_regenerate():
+    key = "acaso_" + secrets.token_urlsafe(24)
+    await db.bridge_config.update_one({"_id": "bridge"}, {"$set": {"api_key": key}}, upsert=True)
+    return {"api_key": key}
+
+@api_router.get("/bridge/activity")
+async def bridge_activity(limit: int = 25):
+    docs = await db.agent_calls.find({}, {"_id": 0}).sort("timestamp", -1).to_list(limit)
+    return docs
+
+@api_router.post("/agent/directive", response_model=Mission, dependencies=[Depends(require_key)])
+async def agent_directive(req: BridgeDirective):
+    if req.kind == "bugbounty":
+        mission = await compile_bounty(BountyRequest(directive=req.directive, platform=req.platform))
+    else:
+        mission = await compile_directive(CompileRequest(directive=req.directive, mode=req.mode or "Move"))
+    await log_agent_call(req.agent, "issue_directive",
+                         f"{req.kind}: {mission.title} (${mission.amount:g})")
+    return mission
+
+@api_router.get("/agent/missions", response_model=List[Mission], dependencies=[Depends(require_key)])
+async def agent_missions(kind: Optional[str] = None):
+    query = {"kind": kind} if kind else {}
+    return await db.missions.find(query, {"_id": 0}).sort("created_at", -1).to_list(500)
+
+@api_router.get("/agent/missions/{mid}", response_model=Mission, dependencies=[Depends(require_key)])
+async def agent_get_mission(mid: str):
+    doc = await db.missions.find_one({"id": mid}, {"_id": 0})
+    if not doc:
+        raise HTTPException(404, "Mission not found")
+    return doc
+
+@api_router.post("/agent/missions/{mid}/run", dependencies=[Depends(require_key)])
+async def agent_run_mission(mid: str, req: BridgeRun):
+    doc = await db.missions.find_one({"id": mid}, {"_id": 0})
+    if not doc:
+        raise HTTPException(404, "Mission not found")
+    logs = []
+    if req.run == "all":
+        # execute up to remaining steps, stopping at a stop-point unless approved
+        for _ in range(len(doc.get("steps", []))):
+            res = await execute_step(mid, ExecuteRequest(approved=bool(req.approved)))
+            if not res.get("log"):
+                break
+            logs.append(res["log"])
+            if res["log"]["status"] == "approval_required":
+                break
+    else:
+        res = await execute_step(mid, ExecuteRequest(approved=bool(req.approved)))
+        if res.get("log"):
+            logs.append(res["log"])
+    mission = await db.missions.find_one({"id": mid}, {"_id": 0})
+    await log_agent_call(req.agent, "run_mission",
+                         f"{mission['title']} · {len(logs)} action(s) · stage {mission['stage']}")
+    return {"mission": mission, "logs": logs}
 
 
 @api_router.patch("/missions/{mid}/status", response_model=Mission)
