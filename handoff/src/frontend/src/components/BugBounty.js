@@ -6,9 +6,112 @@ import {
   ShieldAlert, Send, Loader2, Zap, Play, CheckCircle2, Circle, Trash2,
   Bug, Crosshair, FileText, ChevronDown, ChevronUp, ShieldCheck, Banknote,
   Target, Activity, AlertTriangle, Radar, Users, Crown, Eye, Cpu, Flame,
-  GitPullRequest, Copy, Scale, MessagesSquare
+  GitPullRequest, Copy, Scale, MessagesSquare, Paperclip, Upload, Download, Image as ImageIcon
 } from "lucide-react";
 import { API } from "../App";
+
+const fmtBytes = (n) => {
+  if (!n && n !== 0) return "";
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+  return `${(n / (1024 * 1024)).toFixed(1)} MB`;
+};
+
+function AttachmentsPanel({ mid }) {
+  const [items, setItems] = useState([]);
+  const [loading, setLoading] = useState(false);
+  const [uploading, setUploading] = useState(false);
+  const inputRef = useRef(null);
+
+  const refresh = useCallback(async () => {
+    setLoading(true);
+    try {
+      const r = await axios.get(`${API}/missions/${mid}/attachments`);
+      setItems(r.data);
+    } catch (e) { console.error(e); } finally { setLoading(false); }
+  }, [mid]);
+
+  useEffect(() => { refresh(); }, [refresh]);
+
+  const onPick = async (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setUploading(true);
+    try {
+      const fd = new FormData();
+      fd.append("file", file);
+      await axios.post(`${API}/missions/${mid}/attachments`, fd, {
+        headers: { "Content-Type": "multipart/form-data" },
+      });
+      toast.success(`Uploaded ${file.name}`);
+      await refresh();
+    } catch (err) {
+      toast.error(err?.response?.data?.detail || "Upload failed");
+    } finally {
+      setUploading(false);
+      if (inputRef.current) inputRef.current.value = "";
+    }
+  };
+
+  const download = (fid) => {
+    window.open(`${API}/attachments/${fid}/download`, "_blank", "noopener");
+  };
+
+  const remove = async (fid) => {
+    try { await axios.delete(`${API}/attachments/${fid}`); await refresh(); toast("Attachment removed"); }
+    catch { toast.error("Delete failed"); }
+  };
+
+  return (
+    <div className="attach" data-testid={`attachments-${mid}`}>
+      <div className="attach-head">
+        <Paperclip size={13} /> Evidence & Media
+        <span className="attach-sub">real object storage · images · pdf · logs · text</span>
+        <button
+          className="attach-add"
+          data-testid={`attachment-upload-${mid}`}
+          onClick={() => inputRef.current?.click()}
+          disabled={uploading}
+        >
+          {uploading ? <Loader2 className="spin" size={13} /> : <Upload size={13} />}
+          {uploading ? "Uploading…" : "Upload"}
+        </button>
+        <input
+          ref={inputRef}
+          data-testid={`attachment-file-input-${mid}`}
+          type="file"
+          accept=".jpg,.jpeg,.png,.gif,.webp,.pdf,.json,.csv,.txt,.log,.har,.md"
+          style={{ display: "none" }}
+          onChange={onPick}
+        />
+      </div>
+      {loading ? (
+        <div className="attach-empty"><Loader2 className="spin" size={14} /> Loading…</div>
+      ) : items.length === 0 ? (
+        <div className="attach-empty">No files yet — attach real evidence the Soul Council can read.</div>
+      ) : (
+        <div className="attach-list">
+          {items.map((a) => {
+            const isImg = (a.content_type || "").startsWith("image/");
+            return (
+              <div key={a.id} className="attach-row" data-testid={`attachment-row-${a.id}`}>
+                <span className="attach-icon">{isImg ? <ImageIcon size={14} /> : <FileText size={14} />}</span>
+                <span className="attach-name" title={a.original_filename}>{a.original_filename}</span>
+                <span className="attach-size">{fmtBytes(a.size)}</span>
+                <button className="attach-btn" data-testid={`attachment-download-${a.id}`} onClick={() => download(a.id)} title="Download">
+                  <Download size={13} />
+                </button>
+                <button className="attach-btn danger" data-testid={`attachment-delete-${a.id}`} onClick={() => remove(a.id)} title="Delete">
+                  <Trash2 size={13} />
+                </button>
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
 
 const SOUL_ICON = { vision: Eye, fusion: Cpu, rebirth: Flame };
 const SOUL_COLOR = { vision: "#4fd1ff", fusion: "#8b7cff", rebirth: "#ff7a90" };
@@ -270,6 +373,8 @@ export default function BugBounty() {
                     <FileText size={14} /> Responsible Disclosure Report {openReport[m.id] ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
                   </button>
                   {openReport[m.id] && <ReportView text={m.report} />}
+
+                  <AttachmentsPanel mid={m.id} />
 
                   {/* Soul Council */}
                   <div className="bb-soul-bar">

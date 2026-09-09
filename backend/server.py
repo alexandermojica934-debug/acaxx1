@@ -1,5 +1,5 @@
 from fastapi import FastAPI, APIRouter, HTTPException, Header, Depends, UploadFile, File, Query, Form
-from fastapi.responses import Response
+from fastapi.responses import Response, RedirectResponse
 from dotenv import load_dotenv
 from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
@@ -13,6 +13,7 @@ import difflib
 import hashlib
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 from pydantic import BaseModel, Field, ConfigDict
 from typing import List, Optional
@@ -1198,6 +1199,71 @@ async def list_analyses(fsid: str):
     docs = await db.file_analyses.find({"fileset_id": fsid}, {"_id": 0}).sort("created_at", -1).to_list(20)
     return docs
 
+def _fileset_context(files: list, budget: int = 12000, per_file: int = 2500) -> str:
+    used = 0
+    parts = []
+    for f in files:
+        head = f"===== {f['rel_path']} ({f['content_type']}, {f['size']} bytes) ====="
+        if f.get("readable") and f.get("text_excerpt") and used < budget:
+            chunk = f["text_excerpt"][:per_file]
+            if used + len(chunk) > budget:
+                chunk = chunk[: max(0, budget - used)]
+            used += len(chunk)
+            parts.append(f"{head}\n{chunk}")
+        else:
+            parts.append(f"{head}\n[binary or empty — not included]")
+    return "\n\n".join(parts)
+
+@api_router.get("/filesets/{fsid}/chat")
+async def get_fileset_chat(fsid: str):
+    docs = await db.file_chats.find({"fileset_id": fsid}, {"_id": 0}).sort("created_at", 1).to_list(200)
+    return [{k: d.get(k) for k in ["id", "role", "content", "created_at"]} for d in docs]
+
+@api_router.post("/filesets/{fsid}/chat")
+async def post_fileset_chat(fsid: str, body: dict):
+    fs = await db.file_sets.find_one({"id": fsid}, {"_id": 0})
+    if not fs:
+        raise HTTPException(404, "File set not found")
+    message = ((body or {}).get("message") or "").strip()
+    if not message:
+        raise HTTPException(400, "Empty message")
+    files = await db.afiles.find({"fileset_id": fsid, "is_deleted": False}, {"_id": 0}).sort("rel_path", 1).to_list(500)
+    if not files:
+        raise HTTPException(400, "Upload files before chatting about them")
+
+    history = await db.file_chats.find({"fileset_id": fsid}, {"_id": 0}).sort("created_at", 1).to_list(200)
+    recent = history[-8:]
+    convo = "\n".join([f"{h['role'].upper()}: {h['content']}" for h in recent])
+    context = _fileset_context(files)
+
+    system = (
+        "You are ACASO's file analyst assistant. Answer the user's questions strictly grounded in the "
+        "provided uploaded files. Cite file names/paths in backticks. If the answer isn't in the files, say so. "
+        "Never reveal secret values you might see; flag them as '[possible secret redacted]'. Be concise and useful."
+    )
+    prompt = (
+        f"UPLOADED FILES CONTEXT:\n{context}\n\n"
+        + (f"CONVERSATION SO FAR:\n{convo}\n\n" if convo else "")
+        + f"USER: {message}\n\nAnswer as the assistant."
+    )
+    try:
+        answer, used_prov, label = await llm_call_failover(
+            system, prompt, ["openai", "gemini", "anthropic"], session=f"chat-{fsid}"
+        )
+    except Exception as e:
+        logger.error(f"fileset chat failed: {e}")
+        raise HTTPException(502, "Chat failed")
+
+    now = datetime.now(timezone.utc).isoformat()
+    user_msg = {"id": str(uuid.uuid4()), "fileset_id": fsid, "role": "user", "content": message, "created_at": now}
+    asst_msg = {"id": str(uuid.uuid4()), "fileset_id": fsid, "role": "assistant",
+                "content": answer.strip(), "model_label": label, "created_at": now}
+    await db.file_chats.insert_one(dict(user_msg))
+    await db.file_chats.insert_one(dict(asst_msg))
+    return {"id": asst_msg["id"], "role": "assistant", "content": asst_msg["content"],
+            "model_label": label, "created_at": now}
+
+
 # ==================== SELF-DIRECTIVE (preview-only, approval-gated code self-editing) ====================
 # HARD SAFETY MODEL:
 #  - Preview environment ONLY. This does NOT run after production deploy.
@@ -1367,37 +1433,60 @@ async def self_apply(body: dict):
     if doc["status"] != "proposed":
         raise HTTPException(400, f"Proposal is '{doc['status']}', not applicable")
 
+    # -------- PRE-FLIGHT VALIDATION (never touch live source until proven safe) --------
+    # For every Python change we compile it; for the live backend module we additionally
+    # execute a real import in a sibling temp file (so .env / paths resolve correctly).
+    # This guarantees a broken server.py can NEVER crash the running backend.
+    async def _fail(reason: str, http_msg: str):
+        await db.self_directives.update_one({"id": pid}, {"$set": {"status": "failed", "error": reason[:600]}})
+        raise HTTPException(422, http_msg)
+
+    for ch in doc["changes"]:
+        p = _resolve_self_path(ch["path"])
+        if p.suffix != ".py":
+            continue
+        tmp = p.parent / f".selfcheck_{pid[:8]}_{p.name}"
+        try:
+            tmp.write_text(ch["new_content"], encoding="utf-8")
+            comp = subprocess.run([sys.executable, "-m", "py_compile", str(tmp)], capture_output=True, text=True, timeout=60)
+            if comp.returncode != 0:
+                await _fail(f"py_compile failed for {ch['path']}: {comp.stderr}",
+                           f"Validation failed for {ch['path']} — not applied. {comp.stderr[:300]}")
+            # Full import smoke-test for the live backend server module
+            if str(p).endswith("backend/server.py"):
+                check = (
+                    "import importlib.util;"
+                    f"spec=importlib.util.spec_from_file_location('_sc', r'{tmp}');"
+                    "m=importlib.util.module_from_spec(spec);spec.loader.exec_module(m);print('IMPORT_OK')"
+                )
+                try:
+                    imp = subprocess.run([sys.executable, "-c", check], capture_output=True, text=True,
+                                         timeout=90, cwd=str(p.parent))
+                except subprocess.TimeoutExpired:
+                    await _fail("import validation timed out", "Backend import validation timed out — not applied.")
+                if imp.returncode != 0 or "IMPORT_OK" not in (imp.stdout or ""):
+                    await _fail(f"import failed for {ch['path']}: {imp.stderr}",
+                                f"Backend failed to import — not applied. {(imp.stderr or '')[-300:]}")
+        finally:
+            try: tmp.unlink()
+            except Exception: pass
+
+    # -------- COMMIT (validated) --------
     backup_dir = SELF_BACKUP_ROOT / pid
     backup_dir.mkdir(parents=True, exist_ok=True)
     written = []
     try:
         for i, ch in enumerate(doc["changes"]):
             p = _resolve_self_path(ch["path"])
-            # snapshot original
-            bkp = backup_dir / f"{i}.orig"
-            bkp.write_text(ch["old_content"], encoding="utf-8")
+            (backup_dir / f"{i}.orig").write_text(ch["old_content"], encoding="utf-8")
             (backup_dir / f"{i}.path").write_text(ch["path"], encoding="utf-8")
             p.write_text(ch["new_content"], encoding="utf-8")
             written.append((p, ch))
     except Exception as e:
-        # best-effort restore
         for p, ch in written:
             try: p.write_text(ch["old_content"], encoding="utf-8")
             except Exception: pass
         raise HTTPException(500, f"Apply failed, changes reverted: {e}")
-
-    # Validation: python files must compile. If not, auto-rollback.
-    for p, ch in written:
-        if p.suffix == ".py":
-            res = subprocess.run(["python", "-m", "py_compile", str(p)], capture_output=True, text=True)
-            if res.returncode != 0:
-                for pp, cc in written:
-                    try: pp.write_text(cc["old_content"], encoding="utf-8")
-                    except Exception: pass
-                await db.self_directives.update_one({"id": pid}, {"$set": {
-                    "status": "failed", "error": f"py_compile failed for {ch['path']}: {res.stderr[:500]}",
-                }})
-                raise HTTPException(422, f"Validation failed for {ch['path']} — auto-rolled back. {res.stderr[:300]}")
 
     await db.self_directives.update_one({"id": pid}, {"$set": {
         "status": "applied", "applied_at": datetime.now(timezone.utc).isoformat(),
@@ -1405,7 +1494,7 @@ async def self_apply(body: dict):
     }})
     return {"ok": True, "id": pid, "status": "applied",
             "applied_paths": [ch["path"] for ch in doc["changes"]],
-            "note": "Applied to preview source. Hot-reload will pick up changes. Use Rollback to revert."}
+            "note": "Applied to preview source (validated: compile + import). Hot-reload will pick up changes. Use Rollback to revert."}
 
 @api_router.post("/self/rollback")
 async def self_rollback(body: dict):
@@ -1429,6 +1518,230 @@ async def self_rollback(body: dict):
 async def self_history():
     docs = await db.self_directives.find({}, {"_id": 0, "changes": 0}).sort("created_at", -1).to_list(30)
     return docs
+
+
+# ==================== GOOGLE DRIVE (user-authorized OAuth ingestion) ====================
+# Single-owner model (no multi-user auth in this app): all Drive creds stored under DRIVE_OWNER.
+# Requires a Google Cloud *Web application* OAuth client with the registered redirect URI.
+from google_auth_oauthlib.flow import Flow
+from google.oauth2.credentials import Credentials
+from google.auth.transport.requests import Request as GoogleRequest
+from googleapiclient.discovery import build as gbuild
+
+DRIVE_OWNER = "owner"
+GOOGLE_CLIENT_ID = os.environ.get("GOOGLE_CLIENT_ID", "")
+GOOGLE_CLIENT_SECRET = os.environ.get("GOOGLE_CLIENT_SECRET", "")
+GOOGLE_DRIVE_REDIRECT_URI = os.environ.get("GOOGLE_DRIVE_REDIRECT_URI", "")
+GOOGLE_DRIVE_SCOPE = os.environ.get("GOOGLE_DRIVE_SCOPE", "https://www.googleapis.com/auth/drive")
+FRONTEND_URL = (os.environ.get("FRONTEND_URL", "") or "").rstrip("/")
+
+# Google Workspace native types -> export format we can analyze
+GOOGLE_EXPORT_MAP = {
+    "application/vnd.google-apps.document": ("text/plain", "txt"),
+    "application/vnd.google-apps.spreadsheet": ("text/csv", "csv"),
+    "application/vnd.google-apps.presentation": ("text/plain", "txt"),
+}
+
+def _drive_configured() -> bool:
+    return bool(GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET and GOOGLE_DRIVE_REDIRECT_URI)
+
+def _drive_client_config() -> dict:
+    return {"web": {
+        "client_id": GOOGLE_CLIENT_ID,
+        "client_secret": GOOGLE_CLIENT_SECRET,
+        "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+        "token_uri": "https://oauth2.googleapis.com/token",
+        "redirect_uris": [GOOGLE_DRIVE_REDIRECT_URI],
+    }}
+
+def _drive_flow(scopes):
+    return Flow.from_client_config(_drive_client_config(), scopes=scopes, redirect_uri=GOOGLE_DRIVE_REDIRECT_URI)
+
+async def _drive_service():
+    doc = await db.drive_credentials.find_one({"user_id": DRIVE_OWNER}, {"_id": 0})
+    if not doc:
+        raise HTTPException(400, "Google Drive not connected. Connect it first.")
+    def _build():
+        creds = Credentials(
+            token=doc["access_token"], refresh_token=doc.get("refresh_token"),
+            token_uri=doc["token_uri"], client_id=doc["client_id"],
+            client_secret=doc["client_secret"], scopes=doc["scopes"],
+        )
+        refreshed = False
+        if creds.expired and creds.refresh_token:
+            creds.refresh(GoogleRequest())
+            refreshed = True
+        svc = gbuild("drive", "v3", credentials=creds, cache_discovery=False)
+        return svc, creds, refreshed
+    svc, creds, refreshed = await asyncio.to_thread(_build)
+    if refreshed:
+        await db.drive_credentials.update_one({"user_id": DRIVE_OWNER}, {"$set": {
+            "access_token": creds.token,
+            "expiry": creds.expiry.isoformat() if creds.expiry else None,
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        }})
+    return svc
+
+async def _store_analyzer_file(fsid, fname, rel_path, data: bytes, content_type: str, ext: str, source: str = "upload"):
+    fid = str(uuid.uuid4())
+    path = f"{APP_NAME}/analyzer/{fsid}/{fid}.{ext}"
+    result = await asyncio.to_thread(storage_put, path, data, content_type)
+    readable = ext in ANALYZER_TEXT_EXT
+    text_excerpt = None
+    if readable:
+        try:
+            text_excerpt = data.decode("utf-8", errors="replace")[:8000]
+        except Exception:
+            text_excerpt = None; readable = False
+    record = {
+        "id": fid, "fileset_id": fsid, "storage_path": result["path"],
+        "original_filename": fname, "rel_path": rel_path, "content_type": content_type,
+        "size": result.get("size", len(data)), "text_excerpt": text_excerpt,
+        "readable": readable, "source": source, "is_deleted": False,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    }
+    await db.afiles.insert_one(dict(record))
+    return _public_afile(record)
+
+@api_router.get("/drive/status")
+async def drive_status():
+    doc = await db.drive_credentials.find_one({"user_id": DRIVE_OWNER}, {"_id": 0})
+    return {
+        "configured": _drive_configured(),
+        "connected": bool(doc),
+        "scopes": (doc or {}).get("scopes", []),
+        "email": (doc or {}).get("email"),
+    }
+
+@api_router.get("/drive/connect")
+async def drive_connect():
+    if not _drive_configured():
+        raise HTTPException(400, "Google Drive is not configured on the server (missing client credentials).")
+    flow = _drive_flow([GOOGLE_DRIVE_SCOPE])
+    url, _state = flow.authorization_url(
+        access_type="offline", include_granted_scopes="true", prompt="consent", state=DRIVE_OWNER,
+    )
+    return {"authorization_url": url}
+
+@api_router.get("/oauth/drive/callback")
+async def drive_callback(code: str = Query(None), state: str = Query(None), error: str = Query(None)):
+    dest = f"{FRONTEND_URL}/?tab=analyzer"
+    if error or not code:
+        return RedirectResponse(f"{dest}&drive_error={error or 'no_code'}")
+    try:
+        flow = _drive_flow(None)  # accept whatever scopes Google grants
+        def _fetch():
+            flow.fetch_token(code=code)
+            return flow.credentials
+        creds = await asyncio.to_thread(_fetch)
+        email = None
+        try:
+            svc = gbuild("drive", "v3", credentials=creds, cache_discovery=False)
+            about = await asyncio.to_thread(lambda: svc.about().get(fields="user(emailAddress)").execute())
+            email = about.get("user", {}).get("emailAddress")
+        except Exception:
+            pass
+        await db.drive_credentials.update_one(
+            {"user_id": DRIVE_OWNER},
+            {"$set": {
+                "user_id": DRIVE_OWNER, "access_token": creds.token, "refresh_token": creds.refresh_token,
+                "token_uri": creds.token_uri, "client_id": creds.client_id, "client_secret": creds.client_secret,
+                "scopes": list(creds.scopes or []), "email": email,
+                "expiry": creds.expiry.isoformat() if creds.expiry else None,
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+            }}, upsert=True,
+        )
+        return RedirectResponse(f"{dest}&drive_connected=1")
+    except Exception as e:
+        logger.error(f"drive callback failed: {e}")
+        return RedirectResponse(f"{dest}&drive_error=exchange_failed")
+
+@api_router.post("/drive/disconnect")
+async def drive_disconnect():
+    doc = await db.drive_credentials.find_one({"user_id": DRIVE_OWNER}, {"_id": 0})
+    if doc and doc.get("access_token"):
+        try:
+            await asyncio.to_thread(lambda: requests.post(
+                "https://oauth2.googleapis.com/revoke", params={"token": doc["access_token"]}, timeout=10))
+        except Exception:
+            pass
+    await db.drive_credentials.delete_one({"user_id": DRIVE_OWNER})
+    return {"ok": True}
+
+@api_router.get("/drive/list")
+async def drive_list(folder_id: str = Query("root")):
+    svc = await _drive_service()
+    def _list():
+        query = f"'{folder_id}' in parents and trashed=false"
+        res = svc.files().list(
+            q=query, pageSize=200, orderBy="folder,name",
+            fields="files(id,name,mimeType,size,modifiedTime)",
+        ).execute()
+        return res.get("files", [])
+    items = await asyncio.to_thread(_list)
+    out = []
+    for f in items:
+        is_folder = f.get("mimeType") == "application/vnd.google-apps.folder"
+        out.append({
+            "id": f["id"], "name": f.get("name"), "mimeType": f.get("mimeType"),
+            "is_folder": is_folder, "size": int(f["size"]) if f.get("size") else None,
+            "supported": is_folder or (f.get("mimeType") in GOOGLE_EXPORT_MAP)
+                         or ((f.get("name", "").rsplit(".", 1)[-1].lower() if "." in f.get("name", "") else "") in ANALYZER_EXT),
+        })
+    return {"folder_id": folder_id, "items": out}
+
+@api_router.post("/drive/import")
+async def drive_import(body: dict):
+    file_ids = (body or {}).get("file_ids") or []
+    if not file_ids:
+        raise HTTPException(400, "No files selected")
+    fileset_id = (body or {}).get("fileset_id")
+    if fileset_id:
+        fs = await db.file_sets.find_one({"id": fileset_id}, {"_id": 0})
+        if not fs:
+            raise HTTPException(404, "File set not found")
+    else:
+        fileset_id = str(uuid.uuid4())
+        await db.file_sets.insert_one({"id": fileset_id, "title": f"Drive import {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M')}",
+                                       "created_at": datetime.now(timezone.utc).isoformat()})
+
+    svc = await _drive_service()
+    imported, skipped = [], []
+    for fid in file_ids[:100]:
+        try:
+            meta = await asyncio.to_thread(lambda: svc.files().get(fileId=fid, fields="id,name,mimeType,size").execute())
+        except Exception as e:
+            skipped.append({"id": fid, "reason": "metadata fetch failed"}); continue
+        name = meta.get("name", fid)
+        mime = meta.get("mimeType", "")
+        if mime == "application/vnd.google-apps.folder":
+            skipped.append({"name": name, "reason": "folder (select files inside it)"}); continue
+        try:
+            if mime.startswith("application/vnd.google-apps."):
+                if mime not in GOOGLE_EXPORT_MAP:
+                    skipped.append({"name": name, "reason": f"unsupported Google type"}); continue
+                export_mime, ext = GOOGLE_EXPORT_MAP[mime]
+                data = await asyncio.to_thread(lambda: svc.files().export(fileId=fid, mimeType=export_mime).execute())
+                content_type = export_mime
+                fname = f"{name}.{ext}" if not name.lower().endswith(f".{ext}") else name
+            else:
+                ext = name.rsplit(".", 1)[-1].lower() if "." in name else "bin"
+                if ext not in ANALYZER_EXT:
+                    skipped.append({"name": name, "reason": f"unsupported type .{ext}"}); continue
+                data = await asyncio.to_thread(lambda: svc.files().get_media(fileId=fid).execute())
+                content_type = ANALYZER_EXT[ext]
+                fname = name
+            if not data:
+                skipped.append({"name": name, "reason": "empty"}); continue
+            if len(data) > MAX_UPLOAD_BYTES:
+                skipped.append({"name": name, "reason": "too large (>10MB)"}); continue
+            rec = await _store_analyzer_file(fileset_id, fname, name, data, content_type, ext, source="drive")
+            imported.append(rec)
+        except Exception as e:
+            logger.error(f"drive import {fid} failed: {e}")
+            skipped.append({"name": name, "reason": "download failed"})
+    return {"fileset_id": fileset_id, "imported": imported, "skipped": skipped}
+
 
 
 

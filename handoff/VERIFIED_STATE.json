@@ -1,67 +1,173 @@
 {
-  "captured_at": "2026-09-09T11:01:53.658046+00:00",
-  "backend_url": "https://contest-ready-app.preview.emergentagent.com",
-  "checks": {
-    "chat_all_models": {
-      "http": 200,
-      "providers_ok": [
-        "openai",
-        "gemini",
-        "anthropic"
-      ],
-      "synthesis_present": true
-    },
-    "compile_bounty": {
-      "http": 200,
-      "id_present": true,
-      "severity": "Critical",
-      "cvss": 8.2
-    },
-    "deploy_souls": {
-      "http": 200,
-      "souls_ok": [
-        "gemini",
-        "openai",
-        "anthropic"
-      ],
-      "status": "RESOLVED",
-      "confidence": 95,
-      "dissent_count": 1,
-      "dissent_sample_keys": [
-        "positions",
-        "reconciliation",
-        "topic"
-      ],
-      "patch_note_chars": 956,
-      "patch_note_has_sections": true
-    },
-    "bridge_noauth_POST_directive": {
-      "http": 401,
-      "expected": 401,
-      "pass": true
-    },
-    "bridge_noauth_GET_missions": {
-      "http": 401,
-      "expected": 401,
-      "pass": true
-    },
-    "bridge_info": {
-      "http": 200,
-      "endpoints_documented": [
-        "issue_directive",
-        "list_missions",
-        "get_mission",
-        "run_mission"
-      ]
-    }
+  "generated": "2026-09-09T23:55:11.572027+00:00",
+  "app": "ACASO Omniverse",
+  "stack": {
+    "backend": "FastAPI+Motor",
+    "frontend": "React (CRACO)",
+    "db": "MongoDB"
   },
-  "model_ids": {
+  "models": {
     "openai": "gpt-4o-mini",
     "gemini": "gemini-3.6-flash",
     "anthropic": "claude-haiku-4-5"
   },
-  "do_not_retry": [
-    "gemini-2.0-flash",
-    "claude-3-5-haiku-20241022"
+  "features": [
+    "Directive-to-Payment mission compiler (Make/Find/Move/Collect) with staged pipeline",
+    "Bug Bounty engagements: compile, run, owner-approval gates, disclosure report",
+    "Soul Council: 3 souls across OpenAI + Gemini + Anthropic, Round-2 debate/rebuttals, Eternal Throne synthesis, Dissent & Reconciliation, PR-ready Fix Export",
+    "Ask All AIs multi-model answers + synthesis",
+    "Agent Bridge: X-ACASO-Key protected agent API (directive/list/run)",
+    "Real object storage: mission Evidence & Media attachments (upload/list/download/delete)",
+    "File Analyzer: upload files OR a whole folder -> real object storage -> AI analysis + follow-up chat grounded in the files",
+    "Self-Directive: PREVIEW-ONLY, approval-gated self-editing (propose unified diff -> approve/apply with compile+import validation & snapshot -> rollback), audited",
+    "File Analyzer follow-up chat: ask questions grounded in the uploaded files (cites filenames)",
+    "Google Drive ingestion (user OAuth): connect Drive, browse folders, import selected files into an analysis set (requires user-supplied Web-app OAuth client)"
+  ],
+  "verified": [
+    "OpenAI gpt-4o-mini, Gemini gemini-3.6-flash, Anthropic claude-haiku-4-5 all respond",
+    "Object storage init/upload/download byte-perfect round trip",
+    "Attachments: upload/list/download/delete; .exe rejected (400)",
+    "File Analyzer: upload text/md/json/py/png, analyze (markdown), chat cites files; .exe rejected",
+    "Self-Directive: manifest/source; backend/.env blocked (403); propose->diff; apply requires approved=true (else 400); rollback restores",
+    "Self-Directive backend safety: broken syntax AND import-error server.py both rejected (422) with live file untouched; valid change applies+rolls back",
+    "Agent Bridge: missing/invalid X-ACASO-Key -> 401"
+  ],
+  "endpoints": [
+    {
+      "method": "POST",
+      "path": "/api/compile-directive",
+      "desc": "compile a revenue directive into a mission"
+    },
+    {
+      "method": "POST",
+      "path": "/api/compile-bounty",
+      "desc": "compile a bug-bounty engagement"
+    },
+    {
+      "method": "GET",
+      "path": "/api/missions?kind=bugbounty",
+      "desc": "list engagements"
+    },
+    {
+      "method": "POST",
+      "path": "/api/missions/{mid}/deploy-souls",
+      "desc": "Soul Council + debate + Throne verdict"
+    },
+    {
+      "method": "POST",
+      "path": "/api/missions/{mid}/attachments",
+      "desc": "upload real evidence file (object storage)"
+    },
+    {
+      "method": "GET",
+      "path": "/api/missions/{mid}/attachments",
+      "desc": "list attachments"
+    },
+    {
+      "method": "GET",
+      "path": "/api/attachments/{fid}/download",
+      "desc": "download attachment (backend-proxied)"
+    },
+    {
+      "method": "DELETE",
+      "path": "/api/attachments/{fid}",
+      "desc": "soft-delete attachment"
+    },
+    {
+      "method": "POST",
+      "path": "/api/filesets",
+      "desc": "create a File Analyzer set"
+    },
+    {
+      "method": "POST",
+      "path": "/api/filesets/{fsid}/files",
+      "desc": "upload a file (folder upload sends many)"
+    },
+    {
+      "method": "POST",
+      "path": "/api/filesets/{fsid}/analyze",
+      "desc": "AI analysis of the set"
+    },
+    {
+      "method": "POST",
+      "path": "/api/filesets/{fsid}/chat",
+      "desc": "follow-up chat grounded in the files"
+    },
+    {
+      "method": "GET",
+      "path": "/api/self/manifest",
+      "desc": "allowlisted source manifest (preview_only=true)"
+    },
+    {
+      "method": "POST",
+      "path": "/api/self/propose",
+      "desc": "generate a unified-diff patch proposal"
+    },
+    {
+      "method": "POST",
+      "path": "/api/self/apply",
+      "desc": "approve+apply (compile & import validated, snapshot)"
+    },
+    {
+      "method": "POST",
+      "path": "/api/self/rollback",
+      "desc": "restore snapshot"
+    },
+    {
+      "method": "GET",
+      "path": "/api/drive/status",
+      "desc": "Drive configured/connected status"
+    },
+    {
+      "method": "GET",
+      "path": "/api/drive/connect",
+      "desc": "returns Google OAuth authorization_url"
+    },
+    {
+      "method": "GET",
+      "path": "/api/oauth/drive/callback",
+      "desc": "OAuth callback -> stores tokens, redirects to app"
+    },
+    {
+      "method": "GET",
+      "path": "/api/drive/list?folder_id=root",
+      "desc": "list Drive folders/files"
+    },
+    {
+      "method": "POST",
+      "path": "/api/drive/import",
+      "desc": "import selected Drive files into an analysis set"
+    },
+    {
+      "method": "POST",
+      "path": "/api/drive/disconnect",
+      "desc": "revoke + delete stored Drive tokens"
+    },
+    {
+      "method": "GET",
+      "path": "/api/agent/info",
+      "desc": "Agent Bridge info"
+    }
+  ],
+  "real": [
+    "mongo",
+    "object_storage",
+    "llm",
+    "agent_bridge_auth",
+    "self_directive_preview"
+  ],
+  "simulated": [
+    "nexus_execution",
+    "payouts",
+    "hackerone_submission"
+  ],
+  "deferred": [
+    "github_pr",
+    "hackerone_real",
+    "google_drive_needs_web_oauth_client"
+  ],
+  "do_not_change": [
+    "frontend/.env REACT_APP_BACKEND_URL",
+    "backend/.env MONGO_URL"
   ]
 }

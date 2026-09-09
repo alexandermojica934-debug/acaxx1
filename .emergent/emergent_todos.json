@@ -1,26 +1,22 @@
 [
   {
-    "content": "A: Attachment UI on BugBounty missions",
+    "content": "Self-Directive on Server (compile+import pre-validation) — verified",
     "status": "completed"
   },
   {
-    "content": "B: Backend + Frontend File Analyzer (folder upload + AI analysis)",
+    "content": "Analyzer Chat (backend+frontend) — verified",
     "status": "completed"
   },
   {
-    "content": "C: Backend + Frontend Self-Directive (propose/approve/apply/rollback)",
+    "content": "Refresh Handoff (reproducible generator + republished, incl. Drive) — done",
     "status": "completed"
   },
   {
-    "content": "Wire tabs + CSS",
+    "content": "Google Drive: backend OAuth + frontend browser/import built; verified status+connect URL",
     "status": "completed"
   },
   {
-    "content": "Consolidated testing-agent pass (100% pass, 0 bugs)",
-    "status": "completed"
-  },
-  {
-    "content": "Defer handoff regen + Google Drive/GitHub/HackerOne (need user creds); notify credit status",
-    "status": "completed"
+    "content": "BLOCKED: user must supply a Google Cloud WEB-application OAuth client (Desktop client won't work) to complete Drive login",
+    "status": "pending"
   }
 ]

@@ -24,7 +24,12 @@ const TABS = [
 ];
 
 function App() {
-  const [tab, setTab] = useState("home");
+  const [tab, setTab] = useState(() => {
+    try {
+      const t = new URLSearchParams(window.location.search).get("tab");
+      return TABS.some((x) => x.key === t) ? t : "home";
+    } catch { return "home"; }
+  });
 
   return (
     <div className="acaso-root">

@@ -572,6 +572,9 @@ body {
 .fa-md { font-size: 13.5px; line-height: 1.62; color: var(--text); }
 .fa-md h3 { font-size: 15px; color: var(--violet2); margin: 16px 0 8px; }
 .fa-md h4 { font-size: 13.5px; color: var(--cyan); margin: 14px 0 6px; }
+.fa-md h5 { font-size: 12.5px; color: var(--violet2); margin: 10px 0 4px; font-weight: 700; }
+.fa-md code { font-family: ui-monospace, "Source Code Pro", monospace; font-size: 12px; color: var(--cyan); background: rgba(79,209,255,0.08); border-radius: 5px; padding: 1px 5px; }
+.fa-md strong { color: var(--text); font-weight: 700; }
 .fa-md p { margin: 6px 0; color: var(--text); }
 .fa-md li { margin: 4px 0 4px 18px; color: var(--muted); list-style: disc; }
 .fa-gap { height: 6px; }
@@ -652,6 +655,68 @@ body {
 .sd-hpaths { color: var(--dim); font-family: ui-monospace, monospace; font-size: 10.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 180px; }
 .sd-hroll { background: transparent; border: 1px solid var(--border); color: var(--gold); border-radius: 8px; padding: 5px; cursor: pointer; display: flex; }
 .sd-hroll:hover { border-color: rgba(245,196,81,0.5); }
+
+/* File Analyzer — Google Drive bar + modal */
+.fa-drive { display: flex; align-items: center; gap: 10px; margin-top: 12px; padding: 11px 13px; background: rgba(79,209,255,0.05); border: 1px solid var(--border); border-radius: 12px; font-size: 12.5px; }
+.fa-drive > svg { color: var(--cyan); flex-shrink: 0; }
+.fa-drive-on { color: var(--text); font-weight: 600; }
+.fa-drive-off { color: var(--muted); }
+.fa-drive-btn { display: inline-flex; align-items: center; gap: 7px; font-size: 12px; font-weight: 600; color: #06060f; background: linear-gradient(135deg, var(--violet2), var(--cyan)); border: none; border-radius: 9px; padding: 8px 13px; cursor: pointer; transition: opacity .18s; }
+.fa-drive-btn:hover { opacity: 0.92; }
+.fa-drive-btn.ghost { color: var(--muted); background: transparent; border: 1px solid var(--border); }
+.fa-drive-btn.ghost:hover { color: var(--text); border-color: var(--border-lit); opacity: 1; }
+.fa-drive .fa-drive-btn:first-of-type { margin-left: auto; }
+.fa-modal-overlay { position: fixed; inset: 0; z-index: 200; background: rgba(3,4,12,0.72); backdrop-filter: blur(6px); display: flex; align-items: center; justify-content: center; padding: 20px; }
+.fa-modal { width: min(640px, 96vw); max-height: 82vh; display: flex; flex-direction: column; background: var(--panel-solid); border: 1px solid var(--border-lit); border-radius: 16px; overflow: hidden; box-shadow: 0 30px 80px rgba(0,0,0,0.55); }
+.fa-modal-head { display: flex; align-items: center; gap: 9px; padding: 16px 18px; border-bottom: 1px solid var(--border); font-weight: 700; color: var(--cyan); }
+.fa-modal-head span { color: var(--text); }
+.fa-modal-x { margin-left: auto; background: transparent; border: none; color: var(--muted); cursor: pointer; display: flex; padding: 4px; border-radius: 7px; }
+.fa-modal-x:hover { color: var(--text); background: rgba(255,255,255,0.06); }
+.fa-crumbs { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; padding: 10px 18px; border-bottom: 1px solid var(--border); }
+.fa-crumb { display: inline-flex; align-items: center; gap: 4px; color: var(--dim); }
+.fa-crumb button { background: transparent; border: none; color: var(--muted); font-size: 12px; cursor: pointer; padding: 3px 5px; border-radius: 6px; }
+.fa-crumb button:hover { color: var(--cyan); }
+.fa-drive-list { flex: 1; overflow-y: auto; padding: 10px 14px; display: flex; flex-direction: column; gap: 5px; }
+.fa-drive-row { border-radius: 9px; }
+.fa-drive-folder { width: 100%; display: flex; align-items: center; gap: 10px; background: rgba(4,6,16,0.4); border: 1px solid var(--border); border-radius: 9px; padding: 9px 12px; cursor: pointer; color: var(--text); font-size: 13px; text-align: left; transition: border-color .15s; }
+.fa-drive-folder:hover { border-color: var(--border-lit); }
+.fa-drive-folder svg:first-child { color: var(--gold); }
+.fa-drive-folder span { flex: 1; }
+.fa-drive-folder svg:last-child { color: var(--dim); }
+.fa-drive-file { display: flex; align-items: center; gap: 10px; background: rgba(4,6,16,0.4); border: 1px solid var(--border); border-radius: 9px; padding: 9px 12px; cursor: pointer; color: var(--text); font-size: 13px; transition: border-color .15s, background .15s; }
+.fa-drive-file:hover { border-color: var(--border-lit); }
+.fa-drive-file.sel { border-color: var(--violet); background: rgba(139,124,255,0.1); }
+.fa-drive-file input { accent-color: var(--violet); }
+.fa-drive-file svg { color: var(--violet2); }
+.fa-drive-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.fa-drive-row.unsupported .fa-drive-file { opacity: 0.55; }
+.fa-modal-foot { display: flex; align-items: center; gap: 12px; padding: 14px 18px; border-top: 1px solid var(--border); }
+.fa-drive-count { font-size: 12px; color: var(--muted); }
+.fa-modal-foot .fa-analyze { margin-left: auto; padding: 10px 18px; }
+
+
+/* File Analyzer chat */
+.fa-chat { background: var(--panel); border: 1px solid var(--border); border-radius: 16px; padding: 18px; }
+.fa-chat-hint { margin-left: auto; font-size: 11px; font-weight: 400; color: var(--dim); }
+.fa-chat-log { display: flex; flex-direction: column; gap: 12px; max-height: 380px; overflow-y: auto; padding: 4px; }
+.fa-chat-empty { font-size: 12.5px; color: var(--dim); padding: 18px; text-align: center; }
+.fa-msg { display: flex; flex-direction: column; gap: 4px; max-width: 88%; }
+.fa-msg.user { align-self: flex-end; align-items: flex-end; }
+.fa-msg.assistant { align-self: flex-start; }
+.fa-msg-who { font-size: 10.5px; font-weight: 700; letter-spacing: 0.4px; color: var(--dim); text-transform: uppercase; }
+.fa-msg-body { font-size: 13px; line-height: 1.55; border-radius: 12px; padding: 10px 13px; }
+.fa-msg.user .fa-msg-body { background: linear-gradient(135deg, rgba(139,124,255,0.22), rgba(79,209,255,0.18)); border: 1px solid var(--border-lit); color: var(--text); }
+.fa-msg.assistant .fa-msg-body { background: rgba(4,6,16,0.5); border: 1px solid var(--border); color: var(--text); }
+.fa-msg-body .fa-md { font-size: 13px; }
+.fa-msg-body .fa-md p { margin: 3px 0; }
+.fa-chat-input { display: flex; gap: 10px; margin-top: 14px; }
+.fa-chat-input input { flex: 1; background: rgba(4,6,16,0.5); color: var(--text); border: 1px solid var(--border); border-radius: 11px; padding: 12px 14px; font-size: 13.5px; font-family: inherit; outline: none; transition: border-color .2s; }
+.fa-chat-input input:focus { border-color: var(--violet); box-shadow: 0 0 0 3px rgba(139,124,255,0.14); }
+.fa-chat-input input:disabled { opacity: 0.55; }
+.fa-chat-input button { display: inline-flex; align-items: center; justify-content: center; width: 46px; color: #06060f; background: linear-gradient(135deg, var(--violet2), var(--cyan)); border: none; border-radius: 11px; cursor: pointer; transition: opacity .18s; }
+.fa-chat-input button:hover:not(:disabled) { opacity: 0.92; }
+.fa-chat-input button:disabled { opacity: 0.45; cursor: default; }
+
 
 @media (max-width: 900px) {
   .fa-grid, .sd-grid { grid-template-columns: 1fr; }

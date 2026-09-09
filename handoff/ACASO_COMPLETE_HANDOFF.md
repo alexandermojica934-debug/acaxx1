@@ -1,366 +1,110 @@
-# ACASO Omniverse — Complete Replication Handoff
+# ACASO Omniverse — Complete Handoff
 
-> **Purpose of this document:** Give another AI (or developer) everything needed to rebuild
-> this app *exactly* — architecture, environment, dependencies, every line of source, API
-> contract, LLM prompts/model IDs, known caveats, and the pending roadmap.
+_Generated: 2026-09-09T23:55:11.572027+00:00_
+
+## What this is
+A contest-ready **Directive-to-Payment Operating System** (FastAPI + React + MongoDB).
+
+## Features
+- Directive-to-Payment mission compiler (Make/Find/Move/Collect) with staged pipeline
+- Bug Bounty engagements: compile, run, owner-approval gates, disclosure report
+- Soul Council: 3 souls across OpenAI + Gemini + Anthropic, Round-2 debate/rebuttals, Eternal Throne synthesis, Dissent & Reconciliation, PR-ready Fix Export
+- Ask All AIs multi-model answers + synthesis
+- Agent Bridge: X-ACASO-Key protected agent API (directive/list/run)
+- Real object storage: mission Evidence & Media attachments (upload/list/download/delete)
+- File Analyzer: upload files OR a whole folder -> real object storage -> AI analysis + follow-up chat grounded in the files
+- Self-Directive: PREVIEW-ONLY, approval-gated self-editing (propose unified diff -> approve/apply with compile+import validation & snapshot -> rollback), audited
+- File Analyzer follow-up chat: ask questions grounded in the uploaded files (cites filenames)
+- Google Drive ingestion (user OAuth): connect Drive, browse folders, import selected files into an analysis set (requires user-supplied Web-app OAuth client)
+
+## Tech & Integrations
+- Backend: FastAPI + Motor (MongoDB), Pydantic, UUID ids, timezone-aware UTC.
+- Frontend: React (CRACO), Shadcn UI, lucide-react, framer-motion, sonner.
+- LLM: `emergentintegrations` via platform `EMERGENT_LLM_KEY` (OpenAI/Gemini/Anthropic).
+- Object storage: Emergent Integration Proxy (`INTEGRATION_PROXY_URL`), backend-proxied downloads.
+
+### Models in use
+- openai: `gpt-4o-mini`
+- gemini: `gemini-3.6-flash`
+- anthropic: `claude-haiku-4-5`
+
+## Environment (DO NOT COMMIT REAL VALUES)
+```
+backend/.env: MONGO_URL, DB_NAME, EMERGENT_LLM_KEY, INTEGRATION_PROXY_URL, CORS_ORIGINS
+frontend/.env: REACT_APP_BACKEND_URL
+```
+All backend routes are prefixed `/api`. Never hardcode URLs; use env vars.
+
+## Run
+```
+sudo supervisorctl restart backend frontend
+```
+Hot-reload is enabled; restart only after dependency/.env changes.
+
+## Key API Endpoints
+- `POST /api/compile-directive` — compile a revenue directive into a mission
+- `POST /api/compile-bounty` — compile a bug-bounty engagement
+- `GET /api/missions?kind=bugbounty` — list engagements
+- `POST /api/missions/{mid}/deploy-souls` — Soul Council + debate + Throne verdict
+- `POST /api/missions/{mid}/attachments` — upload real evidence file (object storage)
+- `GET /api/missions/{mid}/attachments` — list attachments
+- `GET /api/attachments/{fid}/download` — download attachment (backend-proxied)
+- `DELETE /api/attachments/{fid}` — soft-delete attachment
+- `POST /api/filesets` — create a File Analyzer set
+- `POST /api/filesets/{fsid}/files` — upload a file (folder upload sends many)
+- `POST /api/filesets/{fsid}/analyze` — AI analysis of the set
+- `POST /api/filesets/{fsid}/chat` — follow-up chat grounded in the files
+- `GET /api/self/manifest` — allowlisted source manifest (preview_only=true)
+- `POST /api/self/propose` — generate a unified-diff patch proposal
+- `POST /api/self/apply` — approve+apply (compile & import validated, snapshot)
+- `POST /api/self/rollback` — restore snapshot
+- `GET /api/drive/status` — Drive configured/connected status
+- `GET /api/drive/connect` — returns Google OAuth authorization_url
+- `GET /api/oauth/drive/callback` — OAuth callback -> stores tokens, redirects to app
+- `GET /api/drive/list?folder_id=root` — list Drive folders/files
+- `POST /api/drive/import` — import selected Drive files into an analysis set
+- `POST /api/drive/disconnect` — revoke + delete stored Drive tokens
+- `GET /api/agent/info` — Agent Bridge info
+
+## Verified (live)
+- OpenAI gpt-4o-mini, Gemini gemini-3.6-flash, Anthropic claude-haiku-4-5 all respond
+- Object storage init/upload/download byte-perfect round trip
+- Attachments: upload/list/download/delete; .exe rejected (400)
+- File Analyzer: upload text/md/json/py/png, analyze (markdown), chat cites files; .exe rejected
+- Self-Directive: manifest/source; backend/.env blocked (403); propose->diff; apply requires approved=true (else 400); rollback restores
+- Self-Directive backend safety: broken syntax AND import-error server.py both rejected (422) with live file untouched; valid change applies+rolls back
+- Agent Bridge: missing/invalid X-ACASO-Key -> 401
+
+## Safety / Real-vs-Simulated
+- REAL: Mongo persistence, object storage, LLM calls, Agent Bridge auth, Self-Directive edits (preview only).
+- SIMULATED: NEXUS action execution/evidence, payouts, HackerOne submission.
+- Self-Directive is PREVIEW-ONLY and disabled after production deploy; every apply is compile+import validated with snapshot & rollback.
+- DEFERRED (need user creds): GitHub PR, real HackerOne submission.
+- Google Drive: implemented (backend OAuth + browse/import, frontend UI). Requires a user-created Google Cloud WEB-application OAuth client with the registered redirect URI; a Desktop/installed client will NOT work.
+
 
 ---
+## Full Source
 
-## 1. What the product is
 
-**ACASO — "Directive-to-Payment Operating System"** (branded *Synarchy Aetheris*).
-A contest-ready, demo-mode full-stack app. The owner speaks a plain-language directive
-("Land a $750 logo client this week"); ACASO compiles it with an LLM into a **Mission Graph**
-(steps, evidence, payment path, outcome metric, authority), then a simulated execution body
-(**NEXUS Action Bus**) runs each step and records timestamped evidence. Completed missions are
-inscribed in a **Chronicle / Outcome Ledger** with an AI-distilled lesson that feeds back into
-future compilations.
-
-### Modules (5 tabs)
-| Tab | Component | What it does |
-|---|---|---|
-| **Sovereign Home** | `SovereignHome.js` | Directive Console (4 modes: Make/Find/Move/Collect), metrics, "Perfect Next" (Soul Brain recommendation), 6-stage Payment Pipeline, NEXUS feed, Mission Board with Run Next / Auto-run |
-| **Bug Bounty** | `BugBounty.js` | Authorized responsible-disclosure engagements: program/platform/asset/vuln/severity/CVSS, 7-stage security pipeline, gated steps (`approval_required`) with **Approve & Continue**, disclosure report viewer, **Soul Council** (3 personas on 3 different LLMs) + **Eternal Throne** fused verdict |
-| **Ask All AIs** | `AskAllAIs.js` | Sends one question to OpenAI + Gemini + Claude in parallel, then a "Synarchy synthesis" arbiter fuses them |
-| **Chronicle** | `Chronicle.js` | Outcome Ledger timeline: completed missions, amounts, lessons learned |
-| **Agent Bridge** | `AgentBridge.js` | API-key-protected `/api/agent/*` endpoints so external agents (Manus, Gemini, ChatGPT, cURL) can issue directives & run missions; connector/tool schemas; live playground; activity ledger |
-
-### Operating model
-- **DEMO ONLY.** No real payments, accounts, or external attack tooling. NEXUS *simulates* execution via LLM.
-- All LLM calls go through the **Emergent universal LLM key** (`emergentintegrations` library).
-- Data persisted in **MongoDB** (collections: `missions`, `action_logs`, `chronicle`, `bridge_config`, `agent_calls`).
-- All IDs are **UUID strings** (never ObjectId). All datetimes are UTC ISO strings.
-
----
-
-## 2. Tech stack
-
-| Layer | Tech |
-|---|---|
-| Backend | Python 3, **FastAPI 0.110**, **Motor 3.3** (async Mongo), Pydantic v2, `emergentintegrations==0.2.0`, uvicorn on `0.0.0.0:8001` |
-| Frontend | **React 19** (Create React App + **CRACO**), axios, **framer-motion**, **sonner** toasts, **lucide-react** icons, Tailwind 3.4 (present but app styling is in plain `App.css` with CSS variables), Shadcn/UI components available under `src/components/ui/` (not heavily used) |
-| DB | MongoDB |
-| Routing | Ingress routes `/api/*` → backend :8001, everything else → frontend :3000 |
-| Process mgmt | supervisor (`supervisorctl restart backend|frontend`) |
-
----
-
-## 3. Directory layout
-
-```
-/app
-├── backend/
-│   ├── .env                     # MONGO_URL, DB_NAME, CORS_ORIGINS, EMERGENT_LLM_KEY
-│   ├── requirements.txt
-│   └── server.py                # ENTIRE backend (806 lines, single file)
-├── frontend/
-│   ├── .env                     # REACT_APP_BACKEND_URL, WDS_SOCKET_PORT, ENABLE_HEALTH_CHECK
-│   ├── package.json
-│   ├── craco.config.js          # '@' alias → src, dev-server compat
-│   ├── jsconfig.json            # '@/*' path alias
-│   ├── postcss.config.js
-│   ├── tailwind.config.js
-│   ├── components.json          # shadcn config
-│   ├── public/index.html
-│   └── src/
-│       ├── index.js             # React root + react-query provider
-│       ├── index.css            # tailwind base + shadcn CSS vars
-│       ├── App.js               # tab shell, exports `API` base URL
-│       ├── App.css              # ALL app styling (design tokens + every module)
-│       ├── lib/utils.js         # cn() helper
-│       └── components/
-│           ├── SovereignHome.js
-│           ├── BugBounty.js
-│           ├── AskAllAIs.js
-│           ├── Chronicle.js
-│           ├── AgentBridge.js
-│           └── ui/              # shadcn primitives (stock, unmodified)
-```
-
----
-
-## 4. Environment variables
-
-### `backend/.env`
-```
-MONGO_URL=mongodb://localhost:27017        # your Mongo connection string
-DB_NAME=acaso_db                           # any db name
-CORS_ORIGINS=*                             # comma-separated origins or *
-EMERGENT_LLM_KEY=sk-emergent-xxxxxxxx      # Emergent universal LLM key (get from Emergent profile → Universal Key)
-```
-
-### `frontend/.env`
-```
-REACT_APP_BACKEND_URL=https://your-host    # NO trailing slash, NO /api. Frontend appends /api itself.
-WDS_SOCKET_PORT=443                        # only needed behind HTTPS proxy
-ENABLE_HEALTH_CHECK=false
-```
-
-> If you are NOT on the Emergent platform, replace `emergentintegrations` usage in `llm_call()`
-> with direct OpenAI / Google / Anthropic SDK calls. The function signature
-> `llm_call(system, prompt, provider, model, session)` is the only seam you need to swap.
-
----
-
-## 5. Install & run
-
-```bash
-# backend
-cd /app/backend
-pip install -r requirements.txt
-# emergentintegrations needs the extra index:
-pip install emergentintegrations --extra-index-url https://d33sy5i8bnduwe.cloudfront.net/simple/
-uvicorn server:app --host 0.0.0.0 --port 8001 --reload     # (in this env: supervisorctl restart backend)
-
-# frontend
-cd /app/frontend
-yarn install            # NEVER npm
-yarn start              # port 3000     (in this env: supervisorctl restart frontend)
-
-# sanity check
-curl $REACT_APP_BACKEND_URL/api/            # {"message":"ACASO Omniverse online","modes":[...]}
-# frontend compile check
-cd /app/frontend && npx esbuild src/ --loader:.js=jsx --bundle --outfile=/dev/null
-```
-
----
-
-## 6. LLM model configuration (CRITICAL — these exact IDs work)
-
+### `backend/server.py`
 ```python
-MODEL_MAP = {
-    "openai":    ("openai",    "gpt-4o-mini",      "OmniMind · GPT-4o"),
-    "gemini":    ("gemini",    "gemini-3.6-flash", "OmniMind · Gemini 3.6"),
-    "anthropic": ("anthropic", "claude-haiku-4-5", "OmniMind · Claude Haiku 4.5"),
-}
-```
-**Do NOT use** `gemini-2.0-flash` (404, retired) or `claude-3-5-haiku-20241022` (not found).
-Those were the original values and they broke Ask All AIs until replaced.
-
-Default `llm_call()` provider/model = `openai` / `gpt-4o-mini` (used for compile, NEXUS, lessons, Perfect Next, chat synthesis).
-
-`llm_call_failover(system, prompt, order)` = "Rebirth Protocol": tries providers in order until one answers. Used by Soul Council and Eternal Throne.
-
-### Soul Council personas → models
-| Soul | Role | Primary model | Failover order |
-|---|---|---|---|
-| Vision Command | Recon Strategist | Gemini | gemini → openai → anthropic |
-| Fusion Engine | Root-Cause Analyst | OpenAI | openai → gemini → anthropic |
-| Rebirth Protocol | Remediation Engineer | Claude | anthropic → openai → gemini |
-| **Eternal Throne** (synthesis) | Soul Brain arbiter | gemini → openai → anthropic | |
-
-All system prompts are verbatim in `server.py` (see `COMPILE_SYSTEM`, `BOUNTY_SYSTEM`, `NEXUS_SYSTEM`, `SOULS`, `throne_system`).
-
----
-
-## 7. Data models (Pydantic, stored 1:1 in Mongo)
-
-```
-Mission {
-  id: uuid, directive, title, mode: Make|Find|Move|Collect, kind: revenue|bugbounty,
-  summary, steps: [Step{id(8-char), title, detail, done}], evidence: [str],
-  payment_path, outcome_metric, authority,
-  stage: str, stage_set: [str], status: active|paused|complete, amount: float, currency: "USD",
-  # bug-bounty only:
-  program, platform, asset, vuln_type, severity: Critical|High|Medium|Low|Info, cvss: float, report (markdown),
-  soul_council: {souls:[...], resolution:{root_cause,fix,verification,confidence,status}, throne_label, deployed_at} | null,
-  created_at: iso
-}
-ActionLog     { id, mission_id, mission_title, step_title, action, evidence, status: success|approval_required, timestamp }
-ChronicleEntry{ id, mission_id, title, mode, amount, outcome_metric, lesson, completed_at }
-bridge_config { _id:"bridge", api_key:"acaso_<token>", created_at }
-agent_calls   { id, agent, action, detail, timestamp }
-```
-
-**Stage sets**
-- Revenue: `["Directive","Discovery","Deliverable","Outreach","Payment","Receipt"]`
-- Bug bounty: `["Program","Recon","Vuln Found","PoC","Disclosure","Triage","Payout"]`
-
-`recompute_stage()` maps done-ratio → stage index within the mission's own `stage_set`; all steps done ⇒ last stage + `status="complete"` ⇒ Chronicle entry auto-created with an LLM lesson.
-
----
-
-## 8. API reference (all under `/api`)
-
-### Core
-| Method | Path | Body / Query | Returns |
-|---|---|---|---|
-| GET | `/` | | health message |
-| POST | `/compile-directive` | `{directive, mode?}` | `Mission` (revenue, stage=Discovery) |
-| POST | `/compile-bounty` | `{directive, platform?}` | `Mission` (kind=bugbounty, stage=Recon) |
-| GET | `/missions` | `?kind=revenue|bugbounty` | `[Mission]` newest first |
-| GET | `/missions/{id}` | | `Mission` |
-| PATCH | `/missions/{id}/advance` | `{step_id?, done?}` | `Mission` (manual toggle; no step_id ⇒ next undone) |
-| POST | `/missions/{id}/execute-step` | `{step_id?, approved?}` | `{mission, log}` — NEXUS simulated execution; `approval_required` blocks unless `approved:true` |
-| POST | `/missions/{id}/deploy-souls` | | `{mission, council}` — bugbounty only, 3 souls in parallel + Throne synthesis |
-| PATCH | `/missions/{id}/status?status=active|paused` | | `Mission` |
-| DELETE | `/missions/{id}` | | `{deleted}` |
-| GET | `/action-feed?limit=40` | | `[ActionLog]` |
-| GET | `/chronicle` | | `[ChronicleEntry]` |
-| GET | `/stats` | | `{total, active, complete, projected_revenue, collected_revenue, pipeline:{stage:count}, stages}` |
-| GET | `/perfect-next` | | `{recommendation, mission_id, mission_title}` |
-| POST | `/chat` | `{message, models?:["openai","gemini","anthropic"], session_id?}` | `{session_id, results:[{provider,label,answer,ok}], synthesis}` |
-
-### Agent Bridge
-| Method | Path | Auth | Notes |
-|---|---|---|---|
-| GET | `/bridge/info` | none | returns `api_key`, header name, endpoint map |
-| POST | `/bridge/regenerate` | none | mints new key (revokes old) |
-| GET | `/bridge/activity?limit=25` | none | external call ledger |
-| POST | `/agent/directive` | `X-ACASO-Key` | `{directive, kind?, mode?, platform?, agent?}` → `Mission` |
-| GET | `/agent/missions?kind=` | `X-ACASO-Key` | `[Mission]` |
-| GET | `/agent/missions/{id}` | `X-ACASO-Key` | `Mission` |
-| POST | `/agent/missions/{id}/run` | `X-ACASO-Key` | `{run:"next"|"all", approved?, agent?}` → `{mission, logs}` |
-
-Missing/invalid key ⇒ `401`. (Note: a POST to a GET-only path returns `405` before auth runs — test with the correct verb.)
-
-### Example calls
-```bash
-B=$REACT_APP_BACKEND_URL/api
-curl -X POST $B/compile-directive -H 'Content-Type: application/json' -d '{"directive":"Land a $750 logo client this week","mode":"Move"}'
-curl -X POST $B/compile-bounty   -H 'Content-Type: application/json' -d '{"directive":"Find and responsibly disclose an IDOR on a fintech API","platform":"HackerOne"}'
-curl -X POST $B/missions/<id>/execute-step -H 'Content-Type: application/json' -d '{"approved":false}'
-curl -X POST $B/missions/<id>/deploy-souls
-curl -X POST $B/chat -H 'Content-Type: application/json' -d '{"message":"Best way to price a logo?","models":["openai","gemini","anthropic"]}'
-KEY=$(curl -s $B/bridge/info | python3 -c 'import sys,json;print(json.load(sys.stdin)["api_key"])')
-curl -X POST $B/agent/directive -H "X-ACASO-Key: $KEY" -H 'Content-Type: application/json' -d '{"directive":"Get 3 newsletter sponsors","kind":"revenue","agent":"Gemini"}'
-```
-
----
-
-## 9. Frontend behaviour notes
-
-- `App.js` exports `API = ${REACT_APP_BACKEND_URL}/api`; every component imports it.
-- Tabs are plain state (`home | bounty | askai | chronicle | bridge`), no router.
-- **Sovereign Home** fetches `/missions?kind=revenue`, `/stats`, `/action-feed`; `/perfect-next` refreshes when mission count changes. Auto-run loops `execute-step` with 650 ms delay, stops on `approval_required`.
-- **Bug Bounty** fetches `/missions?kind=bugbounty` and filters the action feed to those mission ids. `gate[mid]` holds the step title awaiting owner approval; **Approve & Continue** re-runs with `approved:true`. Soul Council panel renders `soul_council.souls[]` cards (icon/colour by soul id) and the Throne verdict with a confidence bar.
-- **Agent Bridge** builds Gemini `function_declarations`, OpenAI `tools`, Manus/MCP action map, and a cURL snippet from the live key; playground POSTs to `/agent/directive` with `agent:"Playground"`.
-- Toasts: `sonner` `<Toaster position="top-center" theme="dark" richColors />`.
-- Every key interactive element has a `data-testid` (e.g. `directive-input`, `compile-btn`, `autorun-btn`, `bounty-compile`, `approve-btn`, `deploy-souls`, `askai-send`, `regen-key`, `pg-run`, `tab-*`, `mode-*`, `prov-*`).
-
-### Design tokens (App.css `:root`)
-```
---bg #060814 · --bg2 #0a0e22 · --panel rgba(18,22,46,.72) · --panel-solid #10142e
---border rgba(130,140,220,.16) · --border-lit rgba(150,130,255,.4)
---violet #8b7cff · --violet2 #a78bfa · --cyan #4fd1ff · --gold #f5c451 · --green #48d597
---text #eef0ff · --muted #9aa0c8 · --dim #6b708f
-Bug-bounty accent: #ff5470 → #f5843c ; Soul colours: vision #4fd1ff, fusion #8b7cff, rebirth #ff7a90
-```
-Dark, glass-morphic panels, aurora radial gradients, 48 px grid overlay, Inter font.
-
----
-
-## 10. Verification status (honest)
-
-| Feature | Status |
-|---|---|
-| Compile directive / bounty | Implemented, curl-tested — real LLM output |
-| Ask All AIs (3 models + synthesis) | Implemented, curl-tested after model-ID fix |
-| NEXUS execute-step / Auto-run / approval gates | Implemented, curl + screenshot tested |
-| Chronicle + lessons fed back into compile | Implemented, curl tested |
-| Agent Bridge authenticated flows | Implemented, curl tested (401 on missing key **not yet re-verified** — earlier test hit 405 due to wrong verb) |
-| Soul Council + Eternal Throne | Implemented, curl + screenshot tested |
-| Automated test suite (`testing_agent`) | **Never run** — all verification was manual curl/screenshot |
-| User browser confirmation | Not recorded |
-
----
-
-## 11. Pending roadmap (user's latest request — NOT started)
-
-1. **Soul Dissent View** — extend the Throne synthesis JSON with
-   `"dissent":[{topic, positions:{vision,fusion,rebirth}, reconciliation, chosen}]`
-   and render a "Dissent & Reconciliation" panel under the verdict.
-2. **Fix Export** — add `"pr_export":{title, summary, root_cause, changes:[..], tests:[..], risk_rollout}`
-   to the same Throne call; add a copy-to-clipboard "Export as PR / patch note" button that renders it as markdown.
-   Safely default both fields if the LLM omits them. Add `data-testid="dissent-panel"`, `data-testid="export-fix-btn"`.
-3. Re-verify `/api/agent/*` returns 401 without key (use POST on `/agent/directive`).
-4. Run a full automated test pass.
-
----
-
-## 12. Reproduction checklist for another AI
-
-1. Create the directory tree in §3.
-2. Copy the files in `01_backend_server.py`, `02_frontend_*` **verbatim** (they follow in this package).
-3. Fill in the two `.env` files (§4). Never commit real keys.
-4. `pip install -r requirements.txt` (+ emergentintegrations extra index) and `yarn install`.
-5. Start backend on 8001, frontend on 3000; proxy `/api/*` to backend.
-6. Hit `GET /api/` then `POST /api/compile-directive`. If LLM errors, check `EMERGENT_LLM_KEY` and model IDs in §6.
-7. Open the UI; compile a mission; Auto-run it; check Chronicle; compile a bounty; Deploy Soul Council; open Agent Bridge and run the playground.
-
-
-# PART 2 — COMPLETE SOURCE CODE (verbatim)
-
-Every application file below is the exact current content. Recreate each at the given path.
-
-## FILE: `backend/.env` (template — fill in your own values)
-
-```
-MONGO_URL=mongodb://localhost:27017
-DB_NAME=acaso_db
-CORS_ORIGINS=*
-EMERGENT_LLM_KEY=<YOUR_EMERGENT_LLM_KEY>
-```
-
-## FILE: `frontend/.env` (template — fill in your own values)
-
-```
-REACT_APP_BACKEND_URL=https://your-backend-host
-WDS_SOCKET_PORT=443
-ENABLE_HEALTH_CHECK=false
-```
-
-
----
-
-## FILE: `backend/requirements.txt`
-
-```text
-fastapi==0.110.1
-uvicorn==0.25.0
-boto3>=1.34.129
-requests-oauthlib>=2.0.0
-cryptography>=42.0.8
-python-dotenv>=1.0.1
-pymongo==4.6.3
-pydantic>=2.6.4
-email-validator>=2.2.0
-pyjwt>=2.10.1
-bcrypt==4.1.3
-passlib>=1.7.4
-tzdata>=2024.2
-motor==3.3.1
-pytest>=8.0.0
-pytest-xdist>=3.6.0
-black>=24.1.1
-isort>=5.13.2
-flake8>=7.0.0
-mypy>=1.8.0
-python-jose>=3.3.0
-requests>=2.31.0
-pandas>=2.2.0
-numpy>=1.26.0
-python-multipart>=0.0.9
-jq>=1.6.0
-typer>=0.9.0
-emergentintegrations==0.2.0
-
-```
-
-
----
-
-## FILE: `backend/server.py`
-
-```python
-from fastapi import FastAPI, APIRouter, HTTPException, Header, Depends
+from fastapi import FastAPI, APIRouter, HTTPException, Header, Depends, UploadFile, File, Query, Form
+from fastapi.responses import Response, RedirectResponse
 from dotenv import load_dotenv
 from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
 import os
+import io
 import json
 import logging
 import asyncio
+import requests
+import difflib
+import hashlib
+import shutil
+import subprocess
+import sys
 from pathlib import Path
 from pydantic import BaseModel, Field, ConfigDict
 from typing import List, Optional
@@ -377,6 +121,52 @@ client = AsyncIOMotorClient(mongo_url)
 db = client[os.environ['DB_NAME']]
 
 EMERGENT_LLM_KEY = os.environ.get('EMERGENT_LLM_KEY')
+
+# ---------------- Object Storage (real Emergent-managed object store) ----------------
+STORAGE_BASE = (os.environ.get("INTEGRATION_PROXY_URL") or "").strip() or "https://integrations.emergentagent.com"
+STORAGE_URL = STORAGE_BASE.rstrip("/") + "/objstore/api/v1/storage"
+APP_NAME = "acaso"
+_storage_key = None
+
+# What we accept for evidence/PoC uploads
+ALLOWED_MIME = {
+    "jpg": "image/jpeg", "jpeg": "image/jpeg", "png": "image/png", "gif": "image/gif",
+    "webp": "image/webp", "pdf": "application/pdf", "json": "application/json",
+    "csv": "text/csv", "txt": "text/plain", "log": "text/plain", "har": "application/json",
+    "md": "text/markdown",
+}
+MAX_UPLOAD_BYTES = 10 * 1024 * 1024  # 10 MB
+
+def init_storage(force: bool = False) -> str:
+    global _storage_key
+    if _storage_key and not force:
+        return _storage_key
+    resp = requests.post(f"{STORAGE_URL}/init", json={"emergent_key": EMERGENT_LLM_KEY}, timeout=30)
+    resp.raise_for_status()
+    _storage_key = resp.json()["storage_key"]
+    return _storage_key
+
+def storage_put(path: str, data: bytes, content_type: str) -> dict:
+    key = init_storage()
+    resp = requests.put(f"{STORAGE_URL}/objects/{path}",
+                        headers={"X-Storage-Key": key, "Content-Type": content_type},
+                        data=data, timeout=120)
+    if resp.status_code == 404:  # stale key — mint a fresh one once and retry
+        key = init_storage(force=True)
+        resp = requests.put(f"{STORAGE_URL}/objects/{path}",
+                            headers={"X-Storage-Key": key, "Content-Type": content_type},
+                            data=data, timeout=120)
+    resp.raise_for_status()
+    return resp.json()
+
+def storage_get(path: str) -> tuple:
+    key = init_storage()
+    resp = requests.get(f"{STORAGE_URL}/objects/{path}", headers={"X-Storage-Key": key}, timeout=60)
+    if resp.status_code == 404:
+        key = init_storage(force=True)
+        resp = requests.get(f"{STORAGE_URL}/objects/{path}", headers={"X-Storage-Key": key}, timeout=60)
+    resp.raise_for_status()
+    return resp.content, resp.headers.get("Content-Type", "application/octet-stream")
 
 app = FastAPI(title="ACASO Omniverse API")
 api_router = APIRouter(prefix="/api")
@@ -860,11 +650,20 @@ SOULS = [
     },
 ]
 
-def soul_problem(mission: dict) -> str:
-    return (f"Program: {mission.get('program')} on {mission.get('platform')}\n"
+def soul_problem(mission: dict, attachments: Optional[list] = None) -> str:
+    base = (f"Program: {mission.get('program')} on {mission.get('platform')}\n"
             f"In-scope asset: {mission.get('asset')}\n"
             f"Vulnerability class: {mission.get('vuln_type')} | Severity: {mission.get('severity')} | CVSS: {mission.get('cvss')}\n"
             f"Context report:\n{(mission.get('report') or '')[:1200]}")
+    if attachments:
+        lines = ["\n\nAnalyst-uploaded evidence (real files attached to this engagement):"]
+        for a in attachments:
+            desc = f"- {a['original_filename']} ({a['content_type']}, {a['size']} bytes)"
+            if a.get("text_excerpt"):
+                desc += f"\n  excerpt:\n  " + a["text_excerpt"].replace("\n", "\n  ")[:1500]
+            lines.append(desc)
+        base += "\n".join(lines)
+    return base
 
 @api_router.post("/missions/{mid}/deploy-souls")
 async def deploy_souls(mid: str):
@@ -874,7 +673,10 @@ async def deploy_souls(mid: str):
     if doc.get("kind") != "bugbounty":
         raise HTTPException(400, "Soul Council deploys on bug-bounty engagements")
 
-    problem = soul_problem(doc)
+    attachments = await db.attachments.find(
+        {"mission_id": mid, "is_deleted": False}, {"_id": 0}
+    ).sort("created_at", 1).to_list(50)
+    problem = soul_problem(doc, attachments)
 
     async def run_soul(soul):
         prompt = f"AUTHORIZED security engagement. Analyze and help truly FIX this problem.\n\n{problem}"
@@ -892,21 +694,90 @@ async def deploy_souls(mid: str):
 
     souls = await asyncio.gather(*[run_soul(s) for s in SOULS])
 
+    # ---- Round 2: Debate — each soul sees the others and rebuts ----
     ok_souls = [s for s in souls if s["ok"]]
-    council_text = "\n\n".join([f"[{s['name']} · {s['role']} · {s['model_label']}]\n{s['analysis']}" for s in ok_souls])
+    soul_by_id = {s["id"]: s for s in souls}
+    debate_context = "\n\n".join(
+        [f"[{s['name']} · {s['role']}]\n{s['analysis']}" for s in ok_souls]
+    )
+
+    async def rebut(soul):
+        if not soul.get("ok"):
+            return soul["id"], ""
+        others = [s for s in ok_souls if s["id"] != soul["id"]]
+        if not others:
+            return soul["id"], ""
+        original = next((x for x in SOULS if x["id"] == soul["id"]), None)
+        if not original:
+            return soul["id"], ""
+        peers_text = "\n\n".join([f"[{s['name']}]\n{s['analysis']}" for s in others])
+        rebut_system = (
+            original["system"]
+            + " You are now in DEBATE ROUND. Read your peers' analyses. Reply ONLY with your rebuttal: "
+              "call out where you disagree, refine your position where they made you stronger, or explicitly concede. "
+              "Stay in persona. 2-3 sentences. No weaponized detail."
+        )
+        rebut_prompt = (
+            f"Your original analysis:\n{soul['analysis']}\n\nYour peers said:\n{peers_text}\n\n"
+            "Now deliver your rebuttal."
+        )
+        try:
+            ans, _, _ = await llm_call_failover(
+                rebut_system, rebut_prompt,
+                [original["provider"]] + [p for p in ["gemini", "openai", "anthropic"] if p != original["provider"]],
+                session=f"{mid}-{soul['id']}-rebut"
+            )
+            return soul["id"], ans.strip()
+        except Exception as e:
+            logger.error(f"rebuttal {soul['id']} failed: {e}")
+            return soul["id"], ""
+
+    rebuttals = dict(await asyncio.gather(*[rebut(s) for s in ok_souls]))
+    for s in souls:
+        s["rebuttal"] = rebuttals.get(s["id"], "")
+
+    # Rebuild council text with both rounds for the Throne
+    council_text = "\n\n".join([
+        (f"[{s['name']} · {s['role']} · {s['model_label']}]\n"
+         f"Round 1 (analysis): {s['analysis']}\n"
+         + (f"Round 2 (rebuttal): {s['rebuttal']}" if s.get('rebuttal') else "Round 2: (no rebuttal)"))
+        for s in ok_souls
+    ])
     throne_system = (
         "You are ETERNAL THRONE — the Soul Brain and sovereign arbiter of ACASO (House of Nova). "
-        "You command a council of specialist AI souls, each running on a different model. Fuse their findings into "
-        "the FINAL VERIFIED RESOLUTION that truly fixes the problem. Respond ONLY with valid minified JSON, no prose."
+        "You command a council of specialist AI souls, each running on a different model. You have observed two rounds: "
+        "initial analyses AND cross-rebuttals. Fuse everything into the FINAL VERIFIED RESOLUTION that truly fixes the problem. "
+        "Respond ONLY with valid minified JSON, no prose."
     )
     throne_prompt = (
-        f"Vulnerability context:\n{problem}\n\nCouncil findings:\n{council_text}\n\n"
-        "Return JSON: {\"root_cause\":\"confirmed one-line root cause\","
+        f"Vulnerability context:\n{problem}\n\nCouncil findings (labelled by soul name and model):\n{council_text}\n\n"
+        "Return ONLY valid minified JSON with this exact shape:\n"
+        "{"
+        "\"root_cause\":\"confirmed one-line root cause\","
         "\"fix\":\"the exact fix/patch to deploy (2-4 sentences, code/config level, non-weaponized)\","
         "\"verification\":\"how to retest & confirm it is resolved (1-2 sentences)\","
-        "\"confidence\":92,\"status\":\"RESOLVED\"}"
+        "\"confidence\":92,"
+        "\"status\":\"RESOLVED\","
+        "\"dissent\":["
+          "{\"topic\":\"where the souls disagreed (e.g. root cause vs. attack vector)\","
+          "\"positions\":{\"vision\":\"Vision Command's stance in one sentence\","
+                         "\"fusion\":\"Fusion Engine's stance in one sentence\","
+                         "\"rebirth\":\"Rebirth Protocol's stance in one sentence\"},"
+          "\"reconciliation\":\"how Eternal Throne reconciled it and which stance won and why (1-2 sentences)\"}"
+        "],"
+        "\"patch_note\":\"a copy-ready PR / patch note in markdown with these sections in order: "
+                        "'# <title>', '## Summary', '## Root Cause', '## Changes' (bulleted, code/config level, non-weaponized), "
+                        "'## Verification' (bulleted retest steps), '## Risk & Rollout' (blast radius + safe rollout note). "
+                        "Use \\n for newlines inside the JSON string.\""
+        "}\n"
+        "Rules: if souls fully agreed, still return one dissent entry describing the subtlest tension you can identify "
+        "(e.g. priority, scope, timing) — never return an empty dissent array. Keep every string non-weaponized."
     )
-    resolution = {"root_cause": "", "fix": "", "verification": "", "confidence": 90, "status": "RESOLVED"}
+    resolution = {
+        "root_cause": "", "fix": "", "verification": "",
+        "confidence": 90, "status": "RESOLVED",
+        "dissent": [], "patch_note": "",
+    }
     throne_label = "Eternal Throne"
     try:
         raw, _, throne_label = await llm_call_failover(throne_system, throne_prompt,
@@ -1146,6 +1017,825 @@ async def ask_all_ais(req: ChatRequest):
             logger.error(f"synthesis failed: {e}")
     return {"session_id": session, "results": results, "synthesis": synthesis}
 
+# ---------------- Attachments (real object storage) ----------------
+class Attachment(BaseModel):
+    id: str
+    mission_id: str
+    storage_path: str
+    original_filename: str
+    content_type: str
+    size: int
+    text_excerpt: Optional[str] = None
+    created_at: str
+
+def _public_attachment(a: dict) -> dict:
+    return {k: a.get(k) for k in
+            ["id", "mission_id", "original_filename", "content_type", "size", "created_at"]}
+
+@api_router.post("/missions/{mid}/attachments")
+async def upload_attachment(mid: str, file: UploadFile = File(...)):
+    mission = await db.missions.find_one({"id": mid}, {"_id": 0})
+    if not mission:
+        raise HTTPException(404, "Mission not found")
+    ext = (file.filename.rsplit(".", 1)[-1].lower() if "." in (file.filename or "") else "bin")
+    if ext not in ALLOWED_MIME:
+        raise HTTPException(400, f"Unsupported file type '.{ext}'. Allowed: {', '.join(sorted(ALLOWED_MIME))}")
+    data = await file.read()
+    if len(data) == 0:
+        raise HTTPException(400, "Empty file")
+    if len(data) > MAX_UPLOAD_BYTES:
+        raise HTTPException(400, f"File too large ({len(data)} bytes). Max {MAX_UPLOAD_BYTES} bytes.")
+    content_type = ALLOWED_MIME[ext]
+
+    fid = str(uuid.uuid4())
+    path = f"{APP_NAME}/missions/{mid}/{fid}.{ext}"
+    try:
+        result = storage_put(path, data, content_type)
+    except Exception as e:
+        logger.error(f"storage upload failed: {e}")
+        raise HTTPException(502, "Storage upload failed")
+
+    # For text-like files, capture an excerpt so the Soul Council can actually read it
+    text_excerpt = None
+    if content_type in ("text/plain", "application/json", "text/csv", "text/markdown"):
+        try:
+            text_excerpt = data.decode("utf-8", errors="replace")[:4000]
+        except Exception:
+            text_excerpt = None
+
+    record = {
+        "id": fid, "mission_id": mid, "storage_path": result["path"],
+        "original_filename": file.filename or f"{fid}.{ext}", "content_type": content_type,
+        "size": result.get("size", len(data)), "text_excerpt": text_excerpt,
+        "is_deleted": False, "created_at": datetime.now(timezone.utc).isoformat(),
+    }
+    await db.attachments.insert_one(dict(record))
+    return _public_attachment(record)
+
+@api_router.get("/missions/{mid}/attachments")
+async def list_attachments(mid: str):
+    docs = await db.attachments.find(
+        {"mission_id": mid, "is_deleted": False}, {"_id": 0}
+    ).sort("created_at", 1).to_list(100)
+    return [_public_attachment(d) for d in docs]
+
+@api_router.get("/attachments/{fid}/download")
+async def download_attachment(fid: str, auth: str = Query(None)):
+    record = await db.attachments.find_one({"id": fid, "is_deleted": False}, {"_id": 0})
+    if not record:
+        raise HTTPException(404, "Attachment not found")
+    try:
+        data, ctype = storage_get(record["storage_path"])
+    except Exception as e:
+        logger.error(f"storage download failed: {e}")
+        raise HTTPException(502, "Storage download failed")
+    headers = {"Content-Disposition": f'inline; filename="{record["original_filename"]}"'}
+    return Response(content=data, media_type=record.get("content_type", ctype), headers=headers)
+
+@api_router.delete("/attachments/{fid}")
+async def delete_attachment(fid: str):
+    res = await db.attachments.update_one(
+        {"id": fid, "is_deleted": False}, {"$set": {"is_deleted": True}}
+    )
+    if res.matched_count == 0:
+        raise HTTPException(404, "Attachment not found")
+    return {"ok": True, "id": fid}
+
+# ==================== FILE ANALYZER (real folder/file ingestion + AI analysis) ====================
+# Hosted apps cannot read arbitrary local directories (browser/OS sandbox). The honest, real
+# equivalent is user-initiated file/folder upload into real object storage, then AI analysis.
+
+ANALYZER_TEXT_EXT = {
+    "txt": "text/plain", "md": "text/markdown", "json": "application/json", "csv": "text/csv",
+    "log": "text/plain", "py": "text/x-python", "js": "text/javascript", "jsx": "text/javascript",
+    "ts": "text/typescript", "tsx": "text/typescript", "css": "text/css", "html": "text/html",
+    "xml": "application/xml", "yaml": "text/yaml", "yml": "text/yaml", "ini": "text/plain",
+    "toml": "text/plain", "sh": "text/x-shellscript", "sql": "text/plain", "env": "text/plain",
+}
+ANALYZER_BIN_EXT = {
+    "jpg": "image/jpeg", "jpeg": "image/jpeg", "png": "image/png", "gif": "image/gif",
+    "webp": "image/webp", "pdf": "application/pdf",
+}
+ANALYZER_EXT = {**ANALYZER_TEXT_EXT, **ANALYZER_BIN_EXT}
+
+class FileSet(BaseModel):
+    id: str
+    title: str
+    created_at: str
+    file_count: int = 0
+
+def _public_fileset(fs: dict, count: int = None) -> dict:
+    return {"id": fs["id"], "title": fs["title"], "created_at": fs["created_at"],
+            "file_count": count if count is not None else fs.get("file_count", 0)}
+
+def _public_afile(f: dict) -> dict:
+    return {k: f.get(k) for k in
+            ["id", "fileset_id", "rel_path", "original_filename", "content_type", "size", "created_at", "readable"]}
+
+@api_router.post("/filesets")
+async def create_fileset(body: dict):
+    fsid = str(uuid.uuid4())
+    doc = {"id": fsid, "title": (body or {}).get("title") or "Untitled analysis",
+           "created_at": datetime.now(timezone.utc).isoformat()}
+    await db.file_sets.insert_one(dict(doc))
+    return _public_fileset(doc, 0)
+
+@api_router.get("/filesets")
+async def list_filesets():
+    out = []
+    docs = await db.file_sets.find({}, {"_id": 0}).sort("created_at", -1).to_list(50)
+    for fs in docs:
+        cnt = await db.afiles.count_documents({"fileset_id": fs["id"], "is_deleted": False})
+        out.append(_public_fileset(fs, cnt))
+    return out
+
+@api_router.delete("/filesets/{fsid}")
+async def delete_fileset(fsid: str):
+    await db.afiles.update_many({"fileset_id": fsid}, {"$set": {"is_deleted": True}})
+    await db.file_sets.delete_one({"id": fsid})
+    return {"ok": True, "id": fsid}
+
+@api_router.post("/filesets/{fsid}/files")
+async def upload_fileset_file(fsid: str, file: UploadFile = File(...), rel_path: str = Form(None)):
+    fs = await db.file_sets.find_one({"id": fsid}, {"_id": 0})
+    if not fs:
+        raise HTTPException(404, "File set not found")
+    name = file.filename or "file.bin"
+    ext = name.rsplit(".", 1)[-1].lower() if "." in name else "bin"
+    if ext not in ANALYZER_EXT:
+        raise HTTPException(400, f"Unsupported file type '.{ext}'. Allowed: {', '.join(sorted(ANALYZER_EXT))}")
+    data = await file.read()
+    if len(data) == 0:
+        raise HTTPException(400, "Empty file")
+    if len(data) > MAX_UPLOAD_BYTES:
+        raise HTTPException(400, f"File too large ({len(data)} bytes). Max {MAX_UPLOAD_BYTES} bytes.")
+    content_type = ANALYZER_EXT[ext]
+    fid = str(uuid.uuid4())
+    path = f"{APP_NAME}/analyzer/{fsid}/{fid}.{ext}"
+    try:
+        result = storage_put(path, data, content_type)
+    except Exception as e:
+        logger.error(f"analyzer storage upload failed: {e}")
+        raise HTTPException(502, "Storage upload failed")
+
+    readable = ext in ANALYZER_TEXT_EXT
+    text_excerpt = None
+    if readable:
+        try:
+            text_excerpt = data.decode("utf-8", errors="replace")[:8000]
+        except Exception:
+            text_excerpt = None
+            readable = False
+
+    record = {
+        "id": fid, "fileset_id": fsid, "storage_path": result["path"],
+        "original_filename": name, "rel_path": (rel_path or name),
+        "content_type": content_type, "size": result.get("size", len(data)),
+        "text_excerpt": text_excerpt, "readable": readable, "is_deleted": False,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    }
+    await db.afiles.insert_one(dict(record))
+    return _public_afile(record)
+
+@api_router.get("/filesets/{fsid}/files")
+async def list_fileset_files(fsid: str):
+    docs = await db.afiles.find({"fileset_id": fsid, "is_deleted": False}, {"_id": 0}).sort("rel_path", 1).to_list(500)
+    return [_public_afile(d) for d in docs]
+
+@api_router.get("/files/{fid}/download")
+async def download_fileset_file(fid: str):
+    record = await db.afiles.find_one({"id": fid, "is_deleted": False}, {"_id": 0})
+    if not record:
+        raise HTTPException(404, "File not found")
+    try:
+        data, ctype = storage_get(record["storage_path"])
+    except Exception as e:
+        logger.error(f"analyzer download failed: {e}")
+        raise HTTPException(502, "Storage download failed")
+    headers = {"Content-Disposition": f'inline; filename="{record["original_filename"]}"'}
+    return Response(content=data, media_type=record.get("content_type", ctype), headers=headers)
+
+@api_router.delete("/files/{fid}")
+async def delete_fileset_file(fid: str):
+    res = await db.afiles.update_one({"id": fid, "is_deleted": False}, {"$set": {"is_deleted": True}})
+    if res.matched_count == 0:
+        raise HTTPException(404, "File not found")
+    return {"ok": True, "id": fid}
+
+@api_router.post("/filesets/{fsid}/analyze")
+async def analyze_fileset(fsid: str, body: dict = None):
+    fs = await db.file_sets.find_one({"id": fsid}, {"_id": 0})
+    if not fs:
+        raise HTTPException(404, "File set not found")
+    files = await db.afiles.find({"fileset_id": fsid, "is_deleted": False}, {"_id": 0}).sort("rel_path", 1).to_list(500)
+    if not files:
+        raise HTTPException(400, "No files to analyze — upload files first")
+
+    question = ((body or {}).get("question") or "").strip()
+    # Build a bounded context: readable excerpts + a manifest of binaries.
+    TOTAL_BUDGET = 16000
+    PER_FILE = 3000
+    used = 0
+    ctx_parts = []
+    manifest = []
+    for f in files:
+        manifest.append(f"- {f['rel_path']} ({f['content_type']}, {f['size']} bytes)")
+        if f.get("readable") and f.get("text_excerpt") and used < TOTAL_BUDGET:
+            chunk = f["text_excerpt"][:PER_FILE]
+            if used + len(chunk) > TOTAL_BUDGET:
+                chunk = chunk[: max(0, TOTAL_BUDGET - used)]
+            used += len(chunk)
+            ctx_parts.append(f"===== FILE: {f['rel_path']} =====\n{chunk}")
+        elif not f.get("readable"):
+            ctx_parts.append(f"===== FILE: {f['rel_path']} =====\n[binary {f['content_type']} — not text-readable; excluded from text analysis]")
+
+    manifest_text = "\n".join(manifest)
+    context_text = "\n\n".join(ctx_parts)
+    truncated = used >= TOTAL_BUDGET
+
+    system = (
+        "You are a senior software/document analyst. You are given the contents of files a user uploaded "
+        "(a folder or file selection). Produce a rigorous, honest analysis in clean Markdown with these sections: "
+        "## Overview, ## Per-File Notes, ## Cross-File Insights, ## Risks & Issues, ## Recommended Actions. "
+        "Cite file names/paths in backticks. Never invent files you were not shown. If content was truncated, say so. "
+        "Do not reproduce any secret values you see; instead flag them as '[possible secret redacted]'."
+    )
+    user_prompt = (
+        f"File manifest ({len(files)} files):\n{manifest_text}\n\n"
+        + (f"User's specific question: {question}\n\n" if question else "")
+        + f"File contents:\n{context_text}\n\n"
+        + ("NOTE: content was truncated to fit context limits.\n" if truncated else "")
+        + "Now produce the analysis."
+    )
+    try:
+        answer, used_prov, label = await llm_call_failover(
+            system, user_prompt, ["openai", "gemini", "anthropic"], session=f"analyze-{fsid}"
+        )
+    except Exception as e:
+        logger.error(f"analyze failed: {e}")
+        raise HTTPException(502, "Analysis failed")
+
+    rec = {
+        "id": str(uuid.uuid4()), "fileset_id": fsid, "question": question or None,
+        "analysis": answer.strip(), "model_label": label, "provider": used_prov,
+        "file_count": len(files), "truncated": truncated,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    }
+    await db.file_analyses.insert_one(dict(rec))
+    rec.pop("_id", None)
+    return {k: rec[k] for k in ["id", "fileset_id", "question", "analysis", "model_label", "file_count", "truncated", "created_at"]}
+
+@api_router.get("/filesets/{fsid}/analyses")
+async def list_analyses(fsid: str):
+    docs = await db.file_analyses.find({"fileset_id": fsid}, {"_id": 0}).sort("created_at", -1).to_list(20)
+    return docs
+
+def _fileset_context(files: list, budget: int = 12000, per_file: int = 2500) -> str:
+    used = 0
+    parts = []
+    for f in files:
+        head = f"===== {f['rel_path']} ({f['content_type']}, {f['size']} bytes) ====="
+        if f.get("readable") and f.get("text_excerpt") and used < budget:
+            chunk = f["text_excerpt"][:per_file]
+            if used + len(chunk) > budget:
+                chunk = chunk[: max(0, budget - used)]
+            used += len(chunk)
+            parts.append(f"{head}\n{chunk}")
+        else:
+            parts.append(f"{head}\n[binary or empty — not included]")
+    return "\n\n".join(parts)
+
+@api_router.get("/filesets/{fsid}/chat")
+async def get_fileset_chat(fsid: str):
+    docs = await db.file_chats.find({"fileset_id": fsid}, {"_id": 0}).sort("created_at", 1).to_list(200)
+    return [{k: d.get(k) for k in ["id", "role", "content", "created_at"]} for d in docs]
+
+@api_router.post("/filesets/{fsid}/chat")
+async def post_fileset_chat(fsid: str, body: dict):
+    fs = await db.file_sets.find_one({"id": fsid}, {"_id": 0})
+    if not fs:
+        raise HTTPException(404, "File set not found")
+    message = ((body or {}).get("message") or "").strip()
+    if not message:
+        raise HTTPException(400, "Empty message")
+    files = await db.afiles.find({"fileset_id": fsid, "is_deleted": False}, {"_id": 0}).sort("rel_path", 1).to_list(500)
+    if not files:
+        raise HTTPException(400, "Upload files before chatting about them")
+
+    history = await db.file_chats.find({"fileset_id": fsid}, {"_id": 0}).sort("created_at", 1).to_list(200)
+    recent = history[-8:]
+    convo = "\n".join([f"{h['role'].upper()}: {h['content']}" for h in recent])
+    context = _fileset_context(files)
+
+    system = (
+        "You are ACASO's file analyst assistant. Answer the user's questions strictly grounded in the "
+        "provided uploaded files. Cite file names/paths in backticks. If the answer isn't in the files, say so. "
+        "Never reveal secret values you might see; flag them as '[possible secret redacted]'. Be concise and useful."
+    )
+    prompt = (
+        f"UPLOADED FILES CONTEXT:\n{context}\n\n"
+        + (f"CONVERSATION SO FAR:\n{convo}\n\n" if convo else "")
+        + f"USER: {message}\n\nAnswer as the assistant."
+    )
+    try:
+        answer, used_prov, label = await llm_call_failover(
+            system, prompt, ["openai", "gemini", "anthropic"], session=f"chat-{fsid}"
+        )
+    except Exception as e:
+        logger.error(f"fileset chat failed: {e}")
+        raise HTTPException(502, "Chat failed")
+
+    now = datetime.now(timezone.utc).isoformat()
+    user_msg = {"id": str(uuid.uuid4()), "fileset_id": fsid, "role": "user", "content": message, "created_at": now}
+    asst_msg = {"id": str(uuid.uuid4()), "fileset_id": fsid, "role": "assistant",
+                "content": answer.strip(), "model_label": label, "created_at": now}
+    await db.file_chats.insert_one(dict(user_msg))
+    await db.file_chats.insert_one(dict(asst_msg))
+    return {"id": asst_msg["id"], "role": "assistant", "content": asst_msg["content"],
+            "model_label": label, "created_at": now}
+
+
+# ==================== SELF-DIRECTIVE (preview-only, approval-gated code self-editing) ====================
+# HARD SAFETY MODEL:
+#  - Preview environment ONLY. This does NOT run after production deploy.
+#  - Reads only an allowlist of source files. Never .env / lockfiles / manifests / .git / infra.
+#  - Generates a PROPOSAL (unified diff). Nothing is written until an explicit approved apply call.
+#  - Every apply snapshots originals for one-click rollback. All actions audited in Mongo.
+
+APP_ROOT = Path("/app").resolve()
+SELF_ALLOWED_DIRS = [(APP_ROOT / "frontend" / "src").resolve()]
+SELF_ALLOWED_FILES = [(APP_ROOT / "backend" / "server.py").resolve()]
+SELF_DENY_NAMES = {".env", ".env.local", ".env.production", "package.json", "yarn.lock",
+                   "package-lock.json", "requirements.txt", "components.json"}
+SELF_ALLOWED_EXT = {".js", ".jsx", ".ts", ".tsx", ".css", ".scss", ".py", ".md", ".html"}
+SELF_DENY_PARTS = {"node_modules", ".git", "build", "dist", "__pycache__", ".emergent"}
+SELF_MAX_FILE_CHARS = 90000
+SELF_MAX_PATHS = 5
+SELF_BACKUP_ROOT = APP_ROOT / "backend" / ".self_backups"
+
+def _resolve_self_path(rel: str) -> Path:
+    if not rel or ".." in rel:
+        raise HTTPException(400, "Invalid path")
+    p = (APP_ROOT / rel.lstrip("/")).resolve()
+    if any(part in SELF_DENY_PARTS for part in p.parts):
+        raise HTTPException(403, f"Path not permitted: {rel}")
+    if p.name in SELF_DENY_NAMES:
+        raise HTTPException(403, f"Protected file blocked: {rel}")
+    if p.suffix not in SELF_ALLOWED_EXT:
+        raise HTTPException(403, f"File type not permitted for self-directive: {p.suffix or '(none)'}")
+    in_dir = any(str(p).startswith(str(d) + os.sep) for d in SELF_ALLOWED_DIRS)
+    is_file = p in SELF_ALLOWED_FILES
+    if not (in_dir or is_file):
+        raise HTTPException(403, f"Path outside allowlist: {rel}")
+    return p
+
+def _rel(p: Path) -> str:
+    return str(p.relative_to(APP_ROOT))
+
+@api_router.get("/self/manifest")
+async def self_manifest():
+    files = []
+    for d in SELF_ALLOWED_DIRS:
+        for root, dirs, fnames in os.walk(d):
+            dirs[:] = [x for x in dirs if x not in SELF_DENY_PARTS]
+            for fn in fnames:
+                fp = Path(root) / fn
+                if fp.suffix not in SELF_ALLOWED_EXT or fp.name in SELF_DENY_NAMES:
+                    continue
+                try:
+                    size = fp.stat().st_size
+                except Exception:
+                    continue
+                files.append({"path": _rel(fp), "size": size})
+    for f in SELF_ALLOWED_FILES:
+        if f.exists():
+            files.append({"path": _rel(f), "size": f.stat().st_size})
+    files.sort(key=lambda x: x["path"])
+    return {
+        "preview_only": True,
+        "note": "Self-directive runs ONLY in this preview environment. It is disabled after production deployment.",
+        "allowlist": [_rel(d) + "/**" for d in SELF_ALLOWED_DIRS] + [_rel(f) for f in SELF_ALLOWED_FILES],
+        "denylist": sorted(list(SELF_DENY_NAMES)) + [".env*", ".git", "node_modules", "infra/deploy configs"],
+        "files": files,
+    }
+
+@api_router.get("/self/source")
+async def self_source(path: str = Query(...)):
+    p = _resolve_self_path(path)
+    if not p.exists():
+        raise HTTPException(404, "File not found")
+    content = p.read_text(encoding="utf-8", errors="replace")
+    return {"path": _rel(p), "content": content, "lines": content.count("\n") + 1, "size": len(content)}
+
+def _unified_diff(path: str, old: str, new: str) -> dict:
+    old_lines = old.splitlines(keepends=True)
+    new_lines = new.splitlines(keepends=True)
+    diff = list(difflib.unified_diff(old_lines, new_lines, fromfile=f"a/{path}", tofile=f"b/{path}", n=3))
+    added = sum(1 for l in diff if l.startswith("+") and not l.startswith("+++"))
+    removed = sum(1 for l in diff if l.startswith("-") and not l.startswith("---"))
+    return {"path": path, "diff": "".join(diff), "added": added, "removed": removed}
+
+@api_router.post("/self/propose")
+async def self_propose(body: dict):
+    instruction = (body or {}).get("instruction", "").strip()
+    paths = (body or {}).get("paths") or []
+    if not instruction:
+        raise HTTPException(400, "Provide an instruction")
+    if not paths:
+        raise HTTPException(400, "Select at least one file to modify")
+    if len(paths) > SELF_MAX_PATHS:
+        raise HTTPException(400, f"Too many files (max {SELF_MAX_PATHS}) for one directive")
+
+    sources = {}
+    for rel in paths:
+        p = _resolve_self_path(rel)
+        if not p.exists():
+            raise HTTPException(404, f"File not found: {rel}")
+        content = p.read_text(encoding="utf-8", errors="replace")
+        if len(content) > SELF_MAX_FILE_CHARS:
+            raise HTTPException(400, f"File too large for self-directive MVP: {rel}")
+        sources[_rel(p)] = content
+
+    src_blocks = "\n\n".join([f"===== FILE: {rp} =====\n{c}" for rp, c in sources.items()])
+    system = (
+        "You are ACASO's Self-Directive engineer operating in a sandboxed PREVIEW environment. "
+        "You are given the FULL current contents of one or more source files and a natural-language instruction. "
+        "Return ONLY strict JSON (no prose, no markdown fences) with this exact shape: "
+        '{"explanation": string, "test_plan": string, "files": [{"path": string, "new_content": string}]}. '
+        "Rules: (1) 'path' MUST be one of the exact file paths you were given; do not invent new files. "
+        "(2) 'new_content' MUST be the COMPLETE new file content (not a diff, not a fragment). "
+        "(3) Preserve everything unrelated to the instruction. (4) Never introduce secrets or hardcoded credentials. "
+        "(5) Keep changes minimal and correct. If a file needs no change, omit it from 'files'."
+    )
+    user_prompt = f"INSTRUCTION:\n{instruction}\n\nCURRENT SOURCE FILES:\n{src_blocks}\n\nReturn the JSON now."
+    try:
+        raw, used_prov, label = await llm_call_failover(
+            system, user_prompt, ["openai", "anthropic", "gemini"], session=f"selfdir-{uuid.uuid4().hex[:8]}"
+        )
+    except Exception as e:
+        logger.error(f"self propose LLM failed: {e}")
+        raise HTTPException(502, "Proposal generation failed")
+
+    parsed = extract_json(raw)
+    if not parsed or not isinstance(parsed.get("files"), list):
+        raise HTTPException(502, "Model returned an unusable proposal")
+
+    diffs = []
+    changes = []
+    for item in parsed["files"]:
+        rp = item.get("path")
+        new_content = item.get("new_content")
+        if rp not in sources or not isinstance(new_content, str):
+            continue
+        # Re-validate the returned path against allowlist (defense in depth)
+        _resolve_self_path(rp)
+        d = _unified_diff(rp, sources[rp], new_content)
+        if d["added"] == 0 and d["removed"] == 0:
+            continue
+        diffs.append(d)
+        changes.append({"path": rp, "old_content": sources[rp], "new_content": new_content})
+
+    if not changes:
+        raise HTTPException(422, "The proposal contained no applicable changes to the selected files")
+
+    pid = str(uuid.uuid4())
+    doc = {
+        "id": pid, "instruction": instruction, "paths": list(sources.keys()),
+        "explanation": parsed.get("explanation", ""), "test_plan": parsed.get("test_plan", ""),
+        "changes": changes, "diffs": diffs, "model_label": label, "provider": used_prov,
+        "status": "proposed", "created_at": datetime.now(timezone.utc).isoformat(),
+        "applied_at": None, "rolled_back_at": None, "backup_dir": None, "error": None,
+    }
+    await db.self_directives.insert_one(dict(doc))
+    return {
+        "id": pid, "instruction": instruction, "explanation": doc["explanation"],
+        "test_plan": doc["test_plan"], "diffs": diffs, "model_label": label,
+        "status": "proposed", "created_at": doc["created_at"],
+    }
+
+@api_router.post("/self/apply")
+async def self_apply(body: dict):
+    pid = (body or {}).get("id")
+    if not (body or {}).get("approved"):
+        raise HTTPException(400, "Explicit approval flag required to apply a self-directive")
+    doc = await db.self_directives.find_one({"id": pid}, {"_id": 0})
+    if not doc:
+        raise HTTPException(404, "Proposal not found")
+    if doc["status"] != "proposed":
+        raise HTTPException(400, f"Proposal is '{doc['status']}', not applicable")
+
+    # -------- PRE-FLIGHT VALIDATION (never touch live source until proven safe) --------
+    # For every Python change we compile it; for the live backend module we additionally
+    # execute a real import in a sibling temp file (so .env / paths resolve correctly).
+    # This guarantees a broken server.py can NEVER crash the running backend.
+    async def _fail(reason: str, http_msg: str):
+        await db.self_directives.update_one({"id": pid}, {"$set": {"status": "failed", "error": reason[:600]}})
+        raise HTTPException(422, http_msg)
+
+    for ch in doc["changes"]:
+        p = _resolve_self_path(ch["path"])
+        if p.suffix != ".py":
+            continue
+        tmp = p.parent / f".selfcheck_{pid[:8]}_{p.name}"
+        try:
+            tmp.write_text(ch["new_content"], encoding="utf-8")
+            comp = subprocess.run([sys.executable, "-m", "py_compile", str(tmp)], capture_output=True, text=True, timeout=60)
+            if comp.returncode != 0:
+                await _fail(f"py_compile failed for {ch['path']}: {comp.stderr}",
+                           f"Validation failed for {ch['path']} — not applied. {comp.stderr[:300]}")
+            # Full import smoke-test for the live backend server module
+            if str(p).endswith("backend/server.py"):
+                check = (
+                    "import importlib.util;"
+                    f"spec=importlib.util.spec_from_file_location('_sc', r'{tmp}');"
+                    "m=importlib.util.module_from_spec(spec);spec.loader.exec_module(m);print('IMPORT_OK')"
+                )
+                try:
+                    imp = subprocess.run([sys.executable, "-c", check], capture_output=True, text=True,
+                                         timeout=90, cwd=str(p.parent))
+                except subprocess.TimeoutExpired:
+                    await _fail("import validation timed out", "Backend import validation timed out — not applied.")
+                if imp.returncode != 0 or "IMPORT_OK" not in (imp.stdout or ""):
+                    await _fail(f"import failed for {ch['path']}: {imp.stderr}",
+                                f"Backend failed to import — not applied. {(imp.stderr or '')[-300:]}")
+        finally:
+            try: tmp.unlink()
+            except Exception: pass
+
+    # -------- COMMIT (validated) --------
+    backup_dir = SELF_BACKUP_ROOT / pid
+    backup_dir.mkdir(parents=True, exist_ok=True)
+    written = []
+    try:
+        for i, ch in enumerate(doc["changes"]):
+            p = _resolve_self_path(ch["path"])
+            (backup_dir / f"{i}.orig").write_text(ch["old_content"], encoding="utf-8")
+            (backup_dir / f"{i}.path").write_text(ch["path"], encoding="utf-8")
+            p.write_text(ch["new_content"], encoding="utf-8")
+            written.append((p, ch))
+    except Exception as e:
+        for p, ch in written:
+            try: p.write_text(ch["old_content"], encoding="utf-8")
+            except Exception: pass
+        raise HTTPException(500, f"Apply failed, changes reverted: {e}")
+
+    await db.self_directives.update_one({"id": pid}, {"$set": {
+        "status": "applied", "applied_at": datetime.now(timezone.utc).isoformat(),
+        "backup_dir": str(backup_dir),
+    }})
+    return {"ok": True, "id": pid, "status": "applied",
+            "applied_paths": [ch["path"] for ch in doc["changes"]],
+            "note": "Applied to preview source (validated: compile + import). Hot-reload will pick up changes. Use Rollback to revert."}
+
+@api_router.post("/self/rollback")
+async def self_rollback(body: dict):
+    pid = (body or {}).get("id")
+    doc = await db.self_directives.find_one({"id": pid}, {"_id": 0})
+    if not doc:
+        raise HTTPException(404, "Proposal not found")
+    if doc["status"] != "applied":
+        raise HTTPException(400, f"Proposal is '{doc['status']}', cannot rollback")
+    restored = []
+    for ch in doc["changes"]:
+        p = _resolve_self_path(ch["path"])
+        p.write_text(ch["old_content"], encoding="utf-8")
+        restored.append(ch["path"])
+    await db.self_directives.update_one({"id": pid}, {"$set": {
+        "status": "rolled_back", "rolled_back_at": datetime.now(timezone.utc).isoformat(),
+    }})
+    return {"ok": True, "id": pid, "status": "rolled_back", "restored_paths": restored}
+
+@api_router.get("/self/history")
+async def self_history():
+    docs = await db.self_directives.find({}, {"_id": 0, "changes": 0}).sort("created_at", -1).to_list(30)
+    return docs
+
+
+# ==================== GOOGLE DRIVE (user-authorized OAuth ingestion) ====================
+# Single-owner model (no multi-user auth in this app): all Drive creds stored under DRIVE_OWNER.
+# Requires a Google Cloud *Web application* OAuth client with the registered redirect URI.
+from google_auth_oauthlib.flow import Flow
+from google.oauth2.credentials import Credentials
+from google.auth.transport.requests import Request as GoogleRequest
+from googleapiclient.discovery import build as gbuild
+
+DRIVE_OWNER = "owner"
+GOOGLE_CLIENT_ID = os.environ.get("GOOGLE_CLIENT_ID", "")
+GOOGLE_CLIENT_SECRET = os.environ.get("GOOGLE_CLIENT_SECRET", "")
+GOOGLE_DRIVE_REDIRECT_URI = os.environ.get("GOOGLE_DRIVE_REDIRECT_URI", "")
+GOOGLE_DRIVE_SCOPE = os.environ.get("GOOGLE_DRIVE_SCOPE", "https://www.googleapis.com/auth/drive")
+FRONTEND_URL = (os.environ.get("FRONTEND_URL", "") or "").rstrip("/")
+
+# Google Workspace native types -> export format we can analyze
+GOOGLE_EXPORT_MAP = {
+    "application/vnd.google-apps.document": ("text/plain", "txt"),
+    "application/vnd.google-apps.spreadsheet": ("text/csv", "csv"),
+    "application/vnd.google-apps.presentation": ("text/plain", "txt"),
+}
+
+def _drive_configured() -> bool:
+    return bool(GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET and GOOGLE_DRIVE_REDIRECT_URI)
+
+def _drive_client_config() -> dict:
+    return {"web": {
+        "client_id": GOOGLE_CLIENT_ID,
+        "client_secret": GOOGLE_CLIENT_SECRET,
+        "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+        "token_uri": "https://oauth2.googleapis.com/token",
+        "redirect_uris": [GOOGLE_DRIVE_REDIRECT_URI],
+    }}
+
+def _drive_flow(scopes):
+    return Flow.from_client_config(_drive_client_config(), scopes=scopes, redirect_uri=GOOGLE_DRIVE_REDIRECT_URI)
+
+async def _drive_service():
+    doc = await db.drive_credentials.find_one({"user_id": DRIVE_OWNER}, {"_id": 0})
+    if not doc:
+        raise HTTPException(400, "Google Drive not connected. Connect it first.")
+    def _build():
+        creds = Credentials(
+            token=doc["access_token"], refresh_token=doc.get("refresh_token"),
+            token_uri=doc["token_uri"], client_id=doc["client_id"],
+            client_secret=doc["client_secret"], scopes=doc["scopes"],
+        )
+        refreshed = False
+        if creds.expired and creds.refresh_token:
+            creds.refresh(GoogleRequest())
+            refreshed = True
+        svc = gbuild("drive", "v3", credentials=creds, cache_discovery=False)
+        return svc, creds, refreshed
+    svc, creds, refreshed = await asyncio.to_thread(_build)
+    if refreshed:
+        await db.drive_credentials.update_one({"user_id": DRIVE_OWNER}, {"$set": {
+            "access_token": creds.token,
+            "expiry": creds.expiry.isoformat() if creds.expiry else None,
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        }})
+    return svc
+
+async def _store_analyzer_file(fsid, fname, rel_path, data: bytes, content_type: str, ext: str, source: str = "upload"):
+    fid = str(uuid.uuid4())
+    path = f"{APP_NAME}/analyzer/{fsid}/{fid}.{ext}"
+    result = await asyncio.to_thread(storage_put, path, data, content_type)
+    readable = ext in ANALYZER_TEXT_EXT
+    text_excerpt = None
+    if readable:
+        try:
+            text_excerpt = data.decode("utf-8", errors="replace")[:8000]
+        except Exception:
+            text_excerpt = None; readable = False
+    record = {
+        "id": fid, "fileset_id": fsid, "storage_path": result["path"],
+        "original_filename": fname, "rel_path": rel_path, "content_type": content_type,
+        "size": result.get("size", len(data)), "text_excerpt": text_excerpt,
+        "readable": readable, "source": source, "is_deleted": False,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    }
+    await db.afiles.insert_one(dict(record))
+    return _public_afile(record)
+
+@api_router.get("/drive/status")
+async def drive_status():
+    doc = await db.drive_credentials.find_one({"user_id": DRIVE_OWNER}, {"_id": 0})
+    return {
+        "configured": _drive_configured(),
+        "connected": bool(doc),
+        "scopes": (doc or {}).get("scopes", []),
+        "email": (doc or {}).get("email"),
+    }
+
+@api_router.get("/drive/connect")
+async def drive_connect():
+    if not _drive_configured():
+        raise HTTPException(400, "Google Drive is not configured on the server (missing client credentials).")
+    flow = _drive_flow([GOOGLE_DRIVE_SCOPE])
+    url, _state = flow.authorization_url(
+        access_type="offline", include_granted_scopes="true", prompt="consent", state=DRIVE_OWNER,
+    )
+    return {"authorization_url": url}
+
+@api_router.get("/oauth/drive/callback")
+async def drive_callback(code: str = Query(None), state: str = Query(None), error: str = Query(None)):
+    dest = f"{FRONTEND_URL}/?tab=analyzer"
+    if error or not code:
+        return RedirectResponse(f"{dest}&drive_error={error or 'no_code'}")
+    try:
+        flow = _drive_flow(None)  # accept whatever scopes Google grants
+        def _fetch():
+            flow.fetch_token(code=code)
+            return flow.credentials
+        creds = await asyncio.to_thread(_fetch)
+        email = None
+        try:
+            svc = gbuild("drive", "v3", credentials=creds, cache_discovery=False)
+            about = await asyncio.to_thread(lambda: svc.about().get(fields="user(emailAddress)").execute())
+            email = about.get("user", {}).get("emailAddress")
+        except Exception:
+            pass
+        await db.drive_credentials.update_one(
+            {"user_id": DRIVE_OWNER},
+            {"$set": {
+                "user_id": DRIVE_OWNER, "access_token": creds.token, "refresh_token": creds.refresh_token,
+                "token_uri": creds.token_uri, "client_id": creds.client_id, "client_secret": creds.client_secret,
+                "scopes": list(creds.scopes or []), "email": email,
+                "expiry": creds.expiry.isoformat() if creds.expiry else None,
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+            }}, upsert=True,
+        )
+        return RedirectResponse(f"{dest}&drive_connected=1")
+    except Exception as e:
+        logger.error(f"drive callback failed: {e}")
+        return RedirectResponse(f"{dest}&drive_error=exchange_failed")
+
+@api_router.post("/drive/disconnect")
+async def drive_disconnect():
+    doc = await db.drive_credentials.find_one({"user_id": DRIVE_OWNER}, {"_id": 0})
+    if doc and doc.get("access_token"):
+        try:
+            await asyncio.to_thread(lambda: requests.post(
+                "https://oauth2.googleapis.com/revoke", params={"token": doc["access_token"]}, timeout=10))
+        except Exception:
+            pass
+    await db.drive_credentials.delete_one({"user_id": DRIVE_OWNER})
+    return {"ok": True}
+
+@api_router.get("/drive/list")
+async def drive_list(folder_id: str = Query("root")):
+    svc = await _drive_service()
+    def _list():
+        query = f"'{folder_id}' in parents and trashed=false"
+        res = svc.files().list(
+            q=query, pageSize=200, orderBy="folder,name",
+            fields="files(id,name,mimeType,size,modifiedTime)",
+        ).execute()
+        return res.get("files", [])
+    items = await asyncio.to_thread(_list)
+    out = []
+    for f in items:
+        is_folder = f.get("mimeType") == "application/vnd.google-apps.folder"
+        out.append({
+            "id": f["id"], "name": f.get("name"), "mimeType": f.get("mimeType"),
+            "is_folder": is_folder, "size": int(f["size"]) if f.get("size") else None,
+            "supported": is_folder or (f.get("mimeType") in GOOGLE_EXPORT_MAP)
+                         or ((f.get("name", "").rsplit(".", 1)[-1].lower() if "." in f.get("name", "") else "") in ANALYZER_EXT),
+        })
+    return {"folder_id": folder_id, "items": out}
+
+@api_router.post("/drive/import")
+async def drive_import(body: dict):
+    file_ids = (body or {}).get("file_ids") or []
+    if not file_ids:
+        raise HTTPException(400, "No files selected")
+    fileset_id = (body or {}).get("fileset_id")
+    if fileset_id:
+        fs = await db.file_sets.find_one({"id": fileset_id}, {"_id": 0})
+        if not fs:
+            raise HTTPException(404, "File set not found")
+    else:
+        fileset_id = str(uuid.uuid4())
+        await db.file_sets.insert_one({"id": fileset_id, "title": f"Drive import {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M')}",
+                                       "created_at": datetime.now(timezone.utc).isoformat()})
+
+    svc = await _drive_service()
+    imported, skipped = [], []
+    for fid in file_ids[:100]:
+        try:
+            meta = await asyncio.to_thread(lambda: svc.files().get(fileId=fid, fields="id,name,mimeType,size").execute())
+        except Exception as e:
+            skipped.append({"id": fid, "reason": "metadata fetch failed"}); continue
+        name = meta.get("name", fid)
+        mime = meta.get("mimeType", "")
+        if mime == "application/vnd.google-apps.folder":
+            skipped.append({"name": name, "reason": "folder (select files inside it)"}); continue
+        try:
+            if mime.startswith("application/vnd.google-apps."):
+                if mime not in GOOGLE_EXPORT_MAP:
+                    skipped.append({"name": name, "reason": f"unsupported Google type"}); continue
+                export_mime, ext = GOOGLE_EXPORT_MAP[mime]
+                data = await asyncio.to_thread(lambda: svc.files().export(fileId=fid, mimeType=export_mime).execute())
+                content_type = export_mime
+                fname = f"{name}.{ext}" if not name.lower().endswith(f".{ext}") else name
+            else:
+                ext = name.rsplit(".", 1)[-1].lower() if "." in name else "bin"
+                if ext not in ANALYZER_EXT:
+                    skipped.append({"name": name, "reason": f"unsupported type .{ext}"}); continue
+                data = await asyncio.to_thread(lambda: svc.files().get_media(fileId=fid).execute())
+                content_type = ANALYZER_EXT[ext]
+                fname = name
+            if not data:
+                skipped.append({"name": name, "reason": "empty"}); continue
+            if len(data) > MAX_UPLOAD_BYTES:
+                skipped.append({"name": name, "reason": "too large (>10MB)"}); continue
+            rec = await _store_analyzer_file(fileset_id, fname, name, data, content_type, ext, source="drive")
+            imported.append(rec)
+        except Exception as e:
+            logger.error(f"drive import {fid} failed: {e}")
+            skipped.append({"name": name, "reason": "download failed"})
+    return {"fileset_id": fileset_id, "imported": imported, "skipped": skipped}
+
+
+
+
 app.include_router(api_router)
 
 app.add_middleware(
@@ -1156,6 +1846,14 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+@app.on_event("startup")
+async def _startup_storage():
+    try:
+        init_storage()
+        logger.info("Object storage initialized")
+    except Exception as e:
+        logger.error(f"Storage init failed at startup (will retry on first use): {e}")
+
 @app.on_event("shutdown")
 async def shutdown_db_client():
     client.close()
@@ -1163,10 +1861,46 @@ async def shutdown_db_client():
 ```
 
 
----
+### `backend/requirements.txt`
+```text
+fastapi==0.110.1
+uvicorn==0.25.0
+boto3>=1.34.129
+requests-oauthlib>=2.0.0
+cryptography>=42.0.8
+python-dotenv>=1.0.1
+pymongo==4.6.3
+pydantic>=2.6.4
+email-validator>=2.2.0
+pyjwt>=2.10.1
+bcrypt==4.1.3
+passlib>=1.7.4
+tzdata>=2024.2
+motor==3.3.1
+pytest>=8.0.0
+pytest-xdist>=3.6.0
+black>=24.1.1
+isort>=5.13.2
+flake8>=7.0.0
+mypy>=1.8.0
+python-jose>=3.3.0
+requests>=2.31.0
+pandas>=2.2.0
+numpy>=1.26.0
+python-multipart>=0.0.9
+jq>=1.6.0
+typer>=0.9.0
+emergentintegrations==0.2.0
+google-api-python-client==2.199.0
+google-auth==2.57.0
+google-auth-httplib2==0.4.2
+google-auth-oauthlib==1.4.1
+uritemplate==4.2.0
 
-## FILE: `frontend/package.json`
+```
 
+
+### `frontend/package.json`
 ```json
 {
   "name": "frontend",
@@ -1314,10 +2048,7 @@ async def shutdown_db_client():
 ```
 
 
----
-
-## FILE: `frontend/craco.config.js`
-
+### `frontend/craco.config.js`
 ```javascript
 // craco.config.js
 const path = require("path");
@@ -1474,42 +2205,7 @@ module.exports = webpackConfig;
 ```
 
 
----
-
-## FILE: `frontend/jsconfig.json`
-
-```json
-{
-  "compilerOptions": {
-    "baseUrl": ".",
-    "paths": {
-      "@/*": ["src/*"]
-    }
-  },
-  "include": ["src"]
-}
-```
-
-
----
-
-## FILE: `frontend/postcss.config.js`
-
-```javascript
-module.exports = {
-  plugins: {
-    tailwindcss: {},
-    autoprefixer: {},
-  },
-}
-
-```
-
-
----
-
-## FILE: `frontend/tailwind.config.js`
-
+### `frontend/tailwind.config.js`
 ```javascript
 /** @type {import('tailwindcss').Config} */
 module.exports = {
@@ -1596,162 +2292,34 @@ module.exports = {
 ```
 
 
----
+### `frontend/postcss.config.js`
+```javascript
+module.exports = {
+  plugins: {
+    tailwindcss: {},
+    autoprefixer: {},
+  },
+}
 
-## FILE: `frontend/components.json`
+```
 
+
+### `frontend/jsconfig.json`
 ```json
 {
-  "$schema": "https://ui.shadcn.com/schema.json",
-  "style": "new-york",
-  "rsc": false,
-  "tsx": false,
-  "tailwind": {
-    "config": "tailwind.config.js",
-    "css": "src/index.css",
-    "baseColor": "neutral",
-    "cssVariables": true,
-    "prefix": ""
+  "compilerOptions": {
+    "baseUrl": ".",
+    "paths": {
+      "@/*": ["src/*"]
+    }
   },
-  "aliases": {
-    "components": "@/components",
-    "utils": "@/lib/utils",
-    "ui": "@/components/ui",
-    "lib": "@/lib",
-    "hooks": "@/hooks"
-  },
-  "iconLibrary": "lucide"
+  "include": ["src"]
 }
 ```
 
 
----
-
-## FILE: `frontend/public/index.html`
-
-```html
-<!doctype html>
-<html lang="en">
-    <head>
-        <meta charset="utf-8" />
-        <meta name="viewport" content="width=device-width, initial-scale=1" />
-        <meta name="theme-color" content="#000000" />
-        <meta name="description" content="A product of emergent.sh" />
-        <link rel="preconnect" href="https://fonts.googleapis.com" />
-        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-        <link href="https://fonts.googleapis.com/css2?family=Inter:wght@600&display=swap" rel="stylesheet" />
-        <!--
-        manifest.json provides metadata used when your web app is installed on a
-        user's mobile device or desktop. See https://developers.google.com/web/fundamentals/web-app-manifest/
-        -->
-        <!--
-        Notice the use of %PUBLIC_URL% in the tags above.
-        It will be replaced with the URL of the `public` folder during the build.
-        Only files inside the `public` folder can be referenced from the HTML.
-
-        Unlike "/favicon.ico" or "favicon.ico", "%PUBLIC_URL%/favicon.ico" will
-        work correctly both with client-side routing and a non-root public URL.
-        Learn how to configure a non-root public URL by running `npm run build`.
-        -->
-        <title>Emergent | Fullstack App</title>
-        <script>window.addEventListener("error",function(e){if(e.error instanceof DOMException&&e.error.name==="DataCloneError"&&e.message&&e.message.includes("PerformanceServerTiming")){e.stopImmediatePropagation();e.preventDefault()}},true);</script>
-        <script src="https://assets.emergent.sh/scripts/emergent-main.js"></script>
-    </head>
-    <body>
-        <noscript>You need to enable JavaScript to run this app.</noscript>
-        <div id="root"></div>
-        <!--
-      This HTML file is a template.
-      If you open it directly in the browser, you will see an empty page.
-
-      You can add webfonts, meta tags, or analytics to this file.
-      The build step will place the bundled scripts into the <body> tag.
-
-      To begin the development, run `npm start` or `yarn start`.
-      To create a production bundle, use `npm run build` or `yarn build`.
-    -->
-        <script>
-            !(function (t, e) {
-                var o, n, p, r;
-                e.__SV ||
-                    ((window.posthog = e),
-                    (e._i = []),
-                    (e.init = function (i, s, a) {
-                        function g(t, e) {
-                            var o = e.split(".");
-                            2 == o.length && ((t = t[o[0]]), (e = o[1])),
-                                (t[e] = function () {
-                                    t.push(
-                                        [e].concat(
-                                            Array.prototype.slice.call(
-                                                arguments,
-                                                0,
-                                            ),
-                                        ),
-                                    );
-                                });
-                        }
-                        ((p = t.createElement("script")).type =
-                            "text/javascript"),
-                            (p.crossOrigin = "anonymous"),
-                            (p.async = !0),
-                            (p.src =
-                                s.api_host.replace(
-                                    ".i.posthog.com",
-                                    "-assets.i.posthog.com",
-                                ) + "/static/array.js"),
-                            (r =
-                                t.getElementsByTagName(
-                                    "script",
-                                )[0]).parentNode.insertBefore(p, r);
-                        var u = e;
-                        for (
-                            void 0 !== a ? (u = e[a] = []) : (a = "posthog"),
-                                u.people = u.people || [],
-                                u.toString = function (t) {
-                                    var e = "posthog";
-                                    return (
-                                        "posthog" !== a && (e += "." + a),
-                                        t || (e += " (stub)"),
-                                        e
-                                    );
-                                },
-                                u.people.toString = function () {
-                                    return u.toString(1) + ".people (stub)";
-                                },
-                                o =
-                                    "init me ws ys ps bs capture je Di ks register register_once register_for_session unregister unregister_for_session Ps getFeatureFlag getFeatureFlagPayload isFeatureEnabled reloadFeatureFlags updateEarlyAccessFeatureEnrollment getEarlyAccessFeatures on onFeatureFlags onSurveysLoaded onSessionId getSurveys getActiveMatchingSurveys renderSurvey canRenderSurvey canRenderSurveyAsync identify setPersonProperties group resetGroups setPersonPropertiesForFlags resetPersonPropertiesForFlags setGroupPropertiesForFlags resetGroupPropertiesForFlags reset get_distinct_id getGroups get_session_id get_session_replay_url alias set_config startSessionRecording stopSessionRecording sessionRecordingStarted captureException loadToolbar get_property getSessionProperty Es $s createPersonProfile Is opt_in_capturing opt_out_capturing has_opted_in_capturing has_opted_out_capturing clear_opt_in_out_capturing Ss debug xs getPageViewId captureTraceFeedback captureTraceMetric".split(
-                                        " ",
-                                    ),
-                                n = 0;
-                            n < o.length;
-                            n++
-                        )
-                            g(u, o[n]);
-                        e._i.push([i, s, a]);
-                    }),
-                    (e.__SV = 1));
-            })(document, window.posthog || []);
-            posthog.init("phc_DbsPb39SRc8z3EiQ6Dhj6ikv4H4rTKcht9d4sZSesceP", {
-                api_host: "https://ap.emergent.sh",
-                person_profiles: "identified_only", // or 'always' to create profiles for anonymous users as well,
-                session_recording: {
-                    recordCrossOriginIframes: true,
-                    capturePerformance: false,
-                },
-            });
-        </script>
-    </body>
-</html>
-
-```
-
-
----
-
-## FILE: `frontend/src/index.js`
-
-```jsx
+### `frontend/src/index.js`
+```javascript
 import React from "react";
 import ReactDOM from "react-dom/client";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
@@ -1779,10 +2347,7 @@ root.render(
 ```
 
 
----
-
-## FILE: `frontend/src/index.css`
-
+### `frontend/src/index.css`
 ```css
 @tailwind base;
 @tailwind components;
@@ -1903,11 +2468,8 @@ code {
 ```
 
 
----
-
-## FILE: `frontend/src/App.js`
-
-```jsx
+### `frontend/src/App.js`
+```javascript
 import React, { useState } from "react";
 import "./App.css";
 import { Toaster } from "sonner";
@@ -1916,7 +2478,9 @@ import AskAllAIs from "./components/AskAllAIs";
 import Chronicle from "./components/Chronicle";
 import BugBounty from "./components/BugBounty";
 import AgentBridge from "./components/AgentBridge";
-import { Sparkles, LayoutGrid, MessagesSquare, BookOpen, ShieldAlert, Plug } from "lucide-react";
+import FileAnalyzer from "./components/FileAnalyzer";
+import SelfDirective from "./components/SelfDirective";
+import { Sparkles, LayoutGrid, MessagesSquare, BookOpen, ShieldAlert, Plug, Boxes, Wand2 } from "lucide-react";
 
 const BACKEND_URL = process.env.REACT_APP_BACKEND_URL;
 export const API = `${BACKEND_URL}/api`;
@@ -1925,12 +2489,19 @@ const TABS = [
   { key: "home", label: "Sovereign Home", icon: LayoutGrid },
   { key: "bounty", label: "Bug Bounty", icon: ShieldAlert },
   { key: "askai", label: "Ask All AIs", icon: MessagesSquare },
+  { key: "analyzer", label: "File Analyzer", icon: Boxes },
+  { key: "self", label: "Self-Directive", icon: Wand2 },
   { key: "chronicle", label: "Chronicle", icon: BookOpen },
   { key: "bridge", label: "Agent Bridge", icon: Plug },
 ];
 
 function App() {
-  const [tab, setTab] = useState("home");
+  const [tab, setTab] = useState(() => {
+    try {
+      const t = new URLSearchParams(window.location.search).get("tab");
+      return TABS.some((x) => x.key === t) ? t : "home";
+    } catch { return "home"; }
+  });
 
   return (
     <div className="acaso-root">
@@ -1968,6 +2539,8 @@ function App() {
         {tab === "home" && <SovereignHome />}
         {tab === "bounty" && <BugBounty />}
         {tab === "askai" && <AskAllAIs />}
+        {tab === "analyzer" && <FileAnalyzer />}
+        {tab === "self" && <SelfDirective />}
         {tab === "chronicle" && <Chronicle />}
         {tab === "bridge" && <AgentBridge />}
       </main>
@@ -1984,10 +2557,7 @@ export default App;
 ```
 
 
----
-
-## FILE: `frontend/src/App.css`
-
+### `frontend/src/App.css`
 ```css
 :root {
   --bg: #060814;
@@ -2398,6 +2968,44 @@ body {
 .conf-bar > div { height: 100%; background: linear-gradient(90deg, var(--green), var(--cyan)); border-radius: 6px; }
 .conf-num { font-size: 12px; font-weight: 700; color: var(--green); }
 
+/* ===== Soul Debate (Round 2 rebuttal + transcript) ===== */
+.soul-rebut { margin-top: 10px; padding-top: 10px; border-top: 1px dashed rgba(255,255,255,0.08); }
+.soul-rebut-tag { display: inline-flex; align-items: center; gap: 5px; font-size: 9.5px; font-weight: 700; letter-spacing: 0.5px; text-transform: uppercase; padding: 3px 8px; border: 1px solid; border-radius: 999px; margin-bottom: 6px; }
+.soul-rebut p { margin: 0; font-size: 12px; line-height: 1.55; color: var(--text); font-style: italic; white-space: pre-wrap; }
+
+.debate { margin-top: 12px; }
+.debate-toggle { display: flex; align-items: center; gap: 8px; width: 100%; background: rgba(139,124,255,0.08); border: 1px solid rgba(139,124,255,0.3); color: var(--violet2); padding: 9px 14px; border-radius: 10px; font-size: 12px; font-weight: 700; letter-spacing: 0.3px; text-transform: uppercase; cursor: pointer; transition: background 160ms; }
+.debate-toggle:hover { background: rgba(139,124,255,0.16); }
+.debate-count { margin-left: auto; margin-right: 6px; font-size: 10.5px; font-weight: 700; color: var(--muted); background: rgba(255,255,255,0.05); padding: 2px 8px; border-radius: 999px; letter-spacing: 0.2px; text-transform: none; }
+.debate-body { margin-top: 10px; background: rgba(4,6,16,0.55); border: 1px solid var(--border); border-radius: 12px; padding: 13px 14px; }
+.debate-round + .debate-round { margin-top: 14px; padding-top: 14px; border-top: 1px dashed var(--border); }
+.debate-round-h { font-size: 11px; font-weight: 700; letter-spacing: 0.5px; text-transform: uppercase; color: var(--violet2); margin-bottom: 9px; }
+.debate-msg { padding: 8px 12px; margin-bottom: 8px; background: rgba(255,255,255,0.03); border-left: 3px solid var(--border); border-radius: 6px; }
+.debate-msg:last-child { margin-bottom: 0; }
+.debate-who { font-size: 11px; font-weight: 700; letter-spacing: 0.3px; text-transform: uppercase; margin-right: 8px; }
+.debate-model { font-size: 10px; color: var(--dim); }
+.debate-msg p { margin: 6px 0 0; font-size: 12.2px; line-height: 1.55; color: var(--text); white-space: pre-wrap; }
+
+/* ===== Soul Dissent & Fix Export ===== */
+.dissent { margin-top: 14px; background: rgba(4,6,16,0.55); border: 1px solid var(--border); border-radius: 12px; padding: 13px 14px; }
+.dissent-h { display: flex; align-items: center; gap: 8px; font-size: 11.5px; font-weight: 700; letter-spacing: 0.4px; color: var(--cyan); text-transform: uppercase; margin-bottom: 10px; }
+.dissent-item { padding: 10px 0; border-top: 1px dashed var(--border); }
+.dissent-item:first-of-type { border-top: none; padding-top: 2px; }
+.dissent-topic { font-size: 12.5px; font-weight: 700; color: var(--text); margin-bottom: 8px; }
+.dissent-positions { display: flex; flex-direction: column; gap: 6px; margin-bottom: 8px; }
+.dissent-pos { display: flex; gap: 10px; align-items: baseline; padding: 6px 10px; background: rgba(255,255,255,0.03); border-left: 3px solid var(--border); border-radius: 6px; font-size: 12.2px; line-height: 1.5; color: var(--muted); }
+.dissent-soul { flex: 0 0 130px; font-size: 11px; font-weight: 700; letter-spacing: 0.3px; text-transform: uppercase; }
+.dissent-reco { display: flex; gap: 8px; align-items: flex-start; padding: 8px 10px; background: rgba(245,196,81,0.08); border: 1px solid rgba(245,196,81,0.28); border-radius: 8px; font-size: 12.2px; line-height: 1.5; color: var(--text); }
+.dissent-reco svg { color: var(--gold); flex-shrink: 0; margin-top: 2px; }
+.dissent-reco b { color: var(--gold); font-weight: 700; }
+
+.fix-export { margin-top: 12px; background: rgba(4,6,16,0.55); border: 1px solid rgba(72,213,151,0.32); border-radius: 12px; padding: 13px 14px; }
+.fx-h { display: flex; align-items: center; gap: 8px; font-size: 11.5px; font-weight: 700; letter-spacing: 0.4px; color: var(--green); text-transform: uppercase; margin-bottom: 10px; }
+.fx-copy { margin-left: auto; display: flex; align-items: center; gap: 6px; background: rgba(72,213,151,0.12); border: 1px solid rgba(72,213,151,0.4); color: var(--green); padding: 5px 10px; border-radius: 8px; font-size: 11px; font-weight: 700; letter-spacing: 0.3px; text-transform: uppercase; cursor: pointer; transition: background 160ms, transform 160ms; }
+.fx-copy:hover { background: rgba(72,213,151,0.22); transform: translateY(-1px); }
+.fx-copy:active { transform: translateY(0); }
+.fx-body { margin: 0; max-height: 320px; overflow-y: auto; padding: 12px; background: rgba(0,0,0,0.35); border: 1px solid var(--border); border-radius: 8px; font-family: 'Source Code Pro', ui-monospace, monospace; font-size: 12px; line-height: 1.55; color: var(--text); white-space: pre-wrap; word-break: break-word; }
+
 /* ===== Agent Bridge ===== */
 .bridge-wrap { max-width: 1120px; margin: 0 auto; }
 .br-hero { display: flex; justify-content: space-between; align-items: center; gap: 20px; background: linear-gradient(160deg, rgba(79,209,255,0.12), rgba(139,124,255,0.06)); border: 1px solid var(--border-lit); border-radius: 18px; padding: 22px 24px; flex-wrap: wrap; }
@@ -2449,6 +3057,25 @@ body {
 .br-foot-note { display: flex; align-items: center; gap: 8px; justify-content: center; margin-top: 18px; font-size: 11.5px; color: var(--dim); }
 .br-foot-note svg { color: var(--green); }
 
+/* ---------------- Attachments panel (Bug Bounty) ---------------- */
+.attach { margin-top: 12px; background: rgba(4,6,16,0.45); border: 1px solid var(--border); border-radius: 12px; padding: 12px 13px; }
+.attach-head { display: flex; align-items: center; gap: 8px; font-size: 12.5px; font-weight: 700; color: var(--cyan); }
+.attach-head svg { flex-shrink: 0; }
+.attach-sub { font-weight: 400; color: var(--dim); font-size: 10.5px; margin-left: 2px; }
+.attach-add { margin-left: auto; display: inline-flex; align-items: center; gap: 6px; font-size: 11.5px; font-weight: 600; color: var(--text); background: rgba(79,209,255,0.1); border: 1px solid var(--border-lit); border-radius: 9px; padding: 6px 11px; cursor: pointer; transition: background .18s, border-color .18s; }
+.attach-add:hover:not(:disabled) { background: rgba(79,209,255,0.2); border-color: var(--cyan); }
+.attach-add:disabled { opacity: 0.6; cursor: default; }
+.attach-empty { margin-top: 10px; font-size: 11.5px; color: var(--dim); display: flex; align-items: center; gap: 7px; }
+.attach-list { margin-top: 10px; display: flex; flex-direction: column; gap: 7px; }
+.attach-row { display: grid; grid-template-columns: auto 1fr auto auto auto; gap: 9px; align-items: center; background: rgba(18,22,46,0.6); border: 1px solid var(--border); border-radius: 9px; padding: 8px 11px; }
+.attach-icon { color: var(--violet2); display: flex; }
+.attach-name { font-size: 12px; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.attach-size { font-size: 10.5px; color: var(--dim); font-variant-numeric: tabular-nums; }
+.attach-btn { background: transparent; border: 1px solid var(--border); color: var(--muted); border-radius: 8px; padding: 5px; cursor: pointer; display: flex; transition: color .16s, border-color .16s, background .16s; }
+.attach-btn:hover { color: var(--cyan); border-color: var(--border-lit); background: rgba(79,209,255,0.08); }
+.attach-btn.danger:hover { color: #ff7a90; border-color: rgba(255,122,144,0.5); background: rgba(255,122,144,0.08); }
+
+
 @media (max-width: 900px) {
   .br-grid { grid-template-columns: 1fr; }
   .bb-grid { grid-template-columns: 1fr; }
@@ -2461,29 +3088,207 @@ body {
   .pl-stage span { font-size: 9px; }
 }
 
-```
+/* ==================== File Analyzer ==================== */
+.fa-wrap { display: flex; flex-direction: column; gap: 16px; }
+.fa-console { background: var(--panel); border: 1px solid var(--border-lit); border-radius: 16px; padding: 20px; }
+.fa-head { display: flex; align-items: center; gap: 9px; color: var(--violet2); font-weight: 700; font-size: 15px; }
+.fa-head svg { flex-shrink: 0; }
+.fa-head em { color: var(--muted); font-style: normal; font-weight: 400; font-size: 12.5px; margin-left: auto; }
+.fa-note { margin-top: 12px; font-size: 12.5px; line-height: 1.55; color: var(--muted); background: rgba(79,209,255,0.05); border: 1px solid var(--border); border-radius: 11px; padding: 11px 13px; }
+.fa-actions { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 14px; }
+.fa-btn { display: inline-flex; align-items: center; gap: 8px; font-size: 13px; font-weight: 600; color: var(--text); background: rgba(255,255,255,0.03); border: 1px solid var(--border); border-radius: 11px; padding: 10px 16px; cursor: pointer; transition: background .18s, border-color .18s, transform .12s; }
+.fa-btn:hover:not(:disabled) { border-color: var(--border-lit); transform: translateY(-1px); }
+.fa-btn:disabled { opacity: 0.55; cursor: default; }
+.fa-btn.primary { color: #06060f; background: linear-gradient(135deg, var(--violet), var(--cyan)); border-color: transparent; }
+.fa-btn.ghost { color: var(--muted); }
+.fa-prog { display: flex; align-items: center; gap: 9px; margin-top: 14px; font-size: 12.5px; color: var(--cyan); }
+.fa-prog-bar { flex: 1; height: 6px; background: rgba(255,255,255,0.06); border-radius: 4px; overflow: hidden; }
+.fa-prog-bar div { height: 100%; background: linear-gradient(90deg, var(--violet), var(--cyan)); transition: width .2s; }
+.fa-sets { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 14px; }
+.fa-set { display: inline-flex; align-items: center; gap: 6px; font-size: 11.5px; color: var(--muted); background: rgba(255,255,255,0.03); border: 1px solid var(--border); border-radius: 20px; padding: 6px 12px; cursor: pointer; }
+.fa-set span { background: rgba(139,124,255,0.2); color: var(--text); border-radius: 8px; padding: 1px 7px; font-size: 10.5px; }
+.fa-set.active { color: var(--text); border-color: var(--violet); background: rgba(139,124,255,0.12); }
+.fa-grid { display: grid; grid-template-columns: 0.9fr 1.1fr; gap: 16px; align-items: start; }
+.fa-files, .fa-result { background: var(--panel); border: 1px solid var(--border); border-radius: 16px; padding: 18px; }
+.fa-sub-head { display: flex; align-items: center; gap: 8px; font-size: 13px; font-weight: 700; color: var(--muted); margin-bottom: 14px; }
+.fa-count, .fa-model { margin-left: auto; font-size: 11px; font-weight: 600; color: var(--cyan); background: rgba(79,209,255,0.1); border: 1px solid var(--border); border-radius: 10px; padding: 2px 9px; }
+.fa-model { color: var(--violet2); }
+.fa-empty { display: flex; flex-direction: column; align-items: center; gap: 10px; padding: 34px 16px; color: var(--dim); text-align: center; font-size: 12.5px; }
+.fa-empty svg { color: var(--border-lit); }
+.fa-list { display: flex; flex-direction: column; gap: 7px; max-height: 340px; overflow-y: auto; }
+.fa-row { display: grid; grid-template-columns: auto 1fr auto auto auto auto; gap: 9px; align-items: center; background: rgba(4,6,16,0.4); border: 1px solid var(--border); border-radius: 9px; padding: 8px 11px; }
+.fa-fic { color: var(--violet2); display: flex; }
+.fa-fname { font-size: 12px; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.fa-bin { font-size: 9.5px; color: var(--gold); border: 1px solid rgba(245,196,81,0.4); border-radius: 8px; padding: 1px 6px; }
+.fa-fsize { font-size: 10.5px; color: var(--dim); font-variant-numeric: tabular-nums; }
+.fa-ic { background: transparent; border: 1px solid var(--border); color: var(--muted); border-radius: 8px; padding: 5px; cursor: pointer; display: flex; transition: color .16s, border-color .16s; }
+.fa-ic:hover { color: var(--cyan); border-color: var(--border-lit); }
+.fa-ic.danger:hover { color: #ff7a90; border-color: rgba(255,122,144,0.5); }
+.fa-ask { margin-top: 14px; display: flex; flex-direction: column; gap: 10px; }
+.fa-ask textarea { width: 100%; resize: vertical; background: rgba(4,6,16,0.5); color: var(--text); border: 1px solid var(--border); border-radius: 11px; padding: 12px 13px; font-size: 13px; font-family: inherit; outline: none; transition: border-color .2s; }
+.fa-ask textarea:focus { border-color: var(--violet); box-shadow: 0 0 0 3px rgba(139,124,255,0.14); }
+.fa-analyze { display: inline-flex; align-items: center; justify-content: center; gap: 8px; font-size: 13.5px; font-weight: 700; color: #06060f; background: linear-gradient(135deg, var(--violet2), var(--cyan)); border: none; border-radius: 11px; padding: 12px; cursor: pointer; transition: opacity .18s; }
+.fa-analyze:hover:not(:disabled) { opacity: 0.92; }
+.fa-analyze:disabled { opacity: 0.5; cursor: default; }
+.fa-md { font-size: 13.5px; line-height: 1.62; color: var(--text); }
+.fa-md h3 { font-size: 15px; color: var(--violet2); margin: 16px 0 8px; }
+.fa-md h4 { font-size: 13.5px; color: var(--cyan); margin: 14px 0 6px; }
+.fa-md h5 { font-size: 12.5px; color: var(--violet2); margin: 10px 0 4px; font-weight: 700; }
+.fa-md code { font-family: ui-monospace, "Source Code Pro", monospace; font-size: 12px; color: var(--cyan); background: rgba(79,209,255,0.08); border-radius: 5px; padding: 1px 5px; }
+.fa-md strong { color: var(--text); font-weight: 700; }
+.fa-md p { margin: 6px 0; color: var(--text); }
+.fa-md li { margin: 4px 0 4px 18px; color: var(--muted); list-style: disc; }
+.fa-gap { height: 6px; }
+.fa-code { background: #05060f; border: 1px solid var(--border); border-radius: 9px; padding: 12px; font-family: ui-monospace, "Source Code Pro", monospace; font-size: 12px; color: var(--cyan); overflow-x: auto; white-space: pre-wrap; }
+.fa-q { font-size: 12.5px; color: var(--cyan); margin-bottom: 10px; font-weight: 600; }
+.fa-trunc { font-size: 11.5px; color: var(--gold); margin-bottom: 10px; }
+.fa-skeleton { display: flex; flex-direction: column; gap: 10px; padding: 8px 0; }
+.fa-sk-line { height: 12px; border-radius: 6px; background: linear-gradient(90deg, rgba(255,255,255,0.04), rgba(255,255,255,0.1), rgba(255,255,255,0.04)); background-size: 200% 100%; animation: fa-shimmer 1.3s infinite; }
+@keyframes fa-shimmer { 0% { background-position: 200% 0; } 100% { background-position: -200% 0; } }
+
+/* ==================== Self-Directive ==================== */
+.sd-wrap { display: flex; flex-direction: column; gap: 16px; }
+.sd-console { background: var(--panel); border: 1px solid var(--border-lit); border-radius: 16px; padding: 20px; }
+.sd-head { display: flex; align-items: center; gap: 9px; color: var(--violet2); font-weight: 700; font-size: 15px; }
+.sd-head svg { flex-shrink: 0; }
+.sd-head em { color: var(--muted); font-style: normal; font-weight: 400; font-size: 12.5px; margin-left: auto; }
+.sd-warn { display: flex; gap: 11px; align-items: flex-start; margin-top: 14px; font-size: 12.5px; line-height: 1.55; color: var(--muted); background: rgba(245,196,81,0.06); border: 1px solid rgba(245,196,81,0.28); border-radius: 11px; padding: 12px 14px; }
+.sd-warn svg { color: var(--gold); flex-shrink: 0; margin-top: 2px; }
+.sd-warn b { color: var(--text); }
+.sd-grid { display: grid; grid-template-columns: 0.8fr 1.2fr; gap: 16px; align-items: start; }
+.sd-picker, .sd-main { display: flex; flex-direction: column; gap: 12px; }
+.sd-picker { background: var(--panel); border: 1px solid var(--border); border-radius: 16px; padding: 18px; }
+.sd-sub-head { display: flex; align-items: center; gap: 8px; font-size: 13px; font-weight: 700; color: var(--muted); }
+.sd-count { margin-left: auto; font-size: 11px; color: var(--violet2); background: rgba(139,124,255,0.12); border-radius: 10px; padding: 2px 9px; }
+.sd-search { display: flex; align-items: center; gap: 8px; background: rgba(4,6,16,0.5); border: 1px solid var(--border); border-radius: 10px; padding: 8px 11px; }
+.sd-search svg { color: var(--dim); }
+.sd-search input { flex: 1; background: transparent; border: none; outline: none; color: var(--text); font-size: 12.5px; }
+.sd-files { display: flex; flex-direction: column; gap: 5px; max-height: 360px; overflow-y: auto; }
+.sd-file { display: grid; grid-template-columns: auto 1fr auto; gap: 9px; align-items: center; background: rgba(4,6,16,0.4); border: 1px solid var(--border); border-radius: 8px; padding: 7px 10px; cursor: pointer; transition: border-color .15s, background .15s; }
+.sd-file:hover { border-color: var(--border-lit); }
+.sd-file.sel { border-color: var(--violet); background: rgba(139,124,255,0.1); }
+.sd-file input { accent-color: var(--violet); }
+.sd-fpath { font-size: 11.5px; color: var(--text); font-family: ui-monospace, monospace; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sd-fsize { font-size: 10px; color: var(--dim); }
+.sd-empty-sm { font-size: 12px; color: var(--dim); padding: 12px; text-align: center; }
+.sd-deny { display: flex; align-items: center; gap: 7px; font-size: 10.5px; color: var(--dim); }
+.sd-deny svg { color: #ff7a90; }
+.sd-instruction { width: 100%; resize: vertical; background: rgba(4,6,16,0.5); color: var(--text); border: 1px solid var(--border); border-radius: 12px; padding: 13px 14px; font-size: 13.5px; font-family: inherit; outline: none; transition: border-color .2s; }
+.sd-instruction:focus { border-color: var(--violet); box-shadow: 0 0 0 3px rgba(139,124,255,0.14); }
+.sd-propose { display: inline-flex; align-items: center; justify-content: center; gap: 8px; font-size: 13.5px; font-weight: 700; color: #06060f; background: linear-gradient(135deg, var(--violet), var(--cyan)); border: none; border-radius: 11px; padding: 12px; cursor: pointer; transition: opacity .18s; }
+.sd-propose:hover:not(:disabled) { opacity: 0.92; }
+.sd-propose:disabled { opacity: 0.5; cursor: default; }
+.sd-skeleton { display: flex; flex-direction: column; gap: 9px; }
+.sd-sk { height: 11px; border-radius: 6px; background: linear-gradient(90deg, rgba(255,255,255,0.04), rgba(255,255,255,0.1), rgba(255,255,255,0.04)); background-size: 200% 100%; animation: fa-shimmer 1.3s infinite; }
+.sd-proposal { background: var(--panel); border: 1px solid var(--border-lit); border-radius: 14px; padding: 16px; }
+.sd-prop-head { display: flex; align-items: center; gap: 8px; font-size: 13px; font-weight: 700; color: var(--text); }
+.sd-status { font-size: 10px; text-transform: uppercase; letter-spacing: 0.5px; border-radius: 8px; padding: 2px 8px; font-weight: 700; }
+.sd-status.s-proposed { color: var(--cyan); background: rgba(79,209,255,0.12); }
+.sd-status.s-applied { color: var(--green); background: rgba(72,213,151,0.14); }
+.sd-status.s-rolled_back { color: var(--muted); background: rgba(255,255,255,0.06); }
+.sd-status.s-failed { color: #ff7a90; background: rgba(255,122,144,0.12); }
+.sd-model { margin-left: auto; font-size: 10.5px; color: var(--violet2); }
+.sd-expl { font-size: 13px; color: var(--text); margin: 10px 0; line-height: 1.55; }
+.sd-testplan { display: flex; gap: 7px; align-items: flex-start; font-size: 12px; color: var(--muted); background: rgba(79,209,255,0.05); border: 1px solid var(--border); border-radius: 9px; padding: 9px 11px; margin-bottom: 12px; }
+.sd-testplan svg { color: var(--cyan); flex-shrink: 0; margin-top: 2px; }
+.sd-diff-block { margin-bottom: 12px; }
+.sd-diff-head { display: flex; align-items: center; gap: 8px; font-size: 11.5px; font-family: ui-monospace, monospace; color: var(--muted); margin-bottom: 6px; }
+.sd-add { color: var(--green); }
+.sd-del { color: #ff7a90; }
+.sd-diff { background: #05060f; border: 1px solid var(--border); border-radius: 9px; padding: 10px; overflow-x: auto; font-family: ui-monospace, "Source Code Pro", monospace; font-size: 11.5px; line-height: 1.5; max-height: 360px; overflow-y: auto; }
+.sd-dl { white-space: pre; color: var(--muted); }
+.sd-dl.meta { color: var(--dim); }
+.sd-dl.hunk { color: var(--cyan); }
+.sd-dl.add { color: var(--green); background: rgba(72,213,151,0.08); }
+.sd-dl.del { color: #ff7a90; background: rgba(255,122,144,0.08); }
+.sd-prop-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin-top: 14px; }
+.sd-apply { display: inline-flex; align-items: center; gap: 7px; font-size: 13px; font-weight: 700; color: #06060f; background: var(--green); border: none; border-radius: 10px; padding: 10px 16px; cursor: pointer; transition: opacity .18s; }
+.sd-apply:hover:not(:disabled) { opacity: 0.9; }
+.sd-apply:disabled { opacity: 0.5; cursor: default; }
+.sd-applied { display: inline-flex; align-items: center; gap: 7px; font-size: 12.5px; font-weight: 600; color: var(--green); }
+.sd-rollback, .sd-rolled { display: inline-flex; align-items: center; gap: 7px; font-size: 12.5px; font-weight: 600; color: var(--gold); background: rgba(245,196,81,0.1); border: 1px solid rgba(245,196,81,0.35); border-radius: 10px; padding: 9px 14px; cursor: pointer; }
+.sd-rolled { color: var(--muted); background: transparent; border-color: var(--border); cursor: default; }
+.sd-discard { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--muted); background: transparent; border: 1px solid var(--border); border-radius: 10px; padding: 9px 13px; cursor: pointer; margin-left: auto; }
+.sd-discard:hover { color: var(--text); border-color: var(--border-lit); }
+.sd-history { margin-top: 6px; background: var(--panel); border: 1px solid var(--border); border-radius: 14px; padding: 16px; }
+.sd-hrow { display: grid; grid-template-columns: auto 1fr auto auto; gap: 10px; align-items: center; padding: 8px 0; border-top: 1px solid var(--border); font-size: 12px; }
+.sd-hinstr { color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sd-hpaths { color: var(--dim); font-family: ui-monospace, monospace; font-size: 10.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 180px; }
+.sd-hroll { background: transparent; border: 1px solid var(--border); color: var(--gold); border-radius: 8px; padding: 5px; cursor: pointer; display: flex; }
+.sd-hroll:hover { border-color: rgba(245,196,81,0.5); }
+
+/* File Analyzer — Google Drive bar + modal */
+.fa-drive { display: flex; align-items: center; gap: 10px; margin-top: 12px; padding: 11px 13px; background: rgba(79,209,255,0.05); border: 1px solid var(--border); border-radius: 12px; font-size: 12.5px; }
+.fa-drive > svg { color: var(--cyan); flex-shrink: 0; }
+.fa-drive-on { color: var(--text); font-weight: 600; }
+.fa-drive-off { color: var(--muted); }
+.fa-drive-btn { display: inline-flex; align-items: center; gap: 7px; font-size: 12px; font-weight: 600; color: #06060f; background: linear-gradient(135deg, var(--violet2), var(--cyan)); border: none; border-radius: 9px; padding: 8px 13px; cursor: pointer; transition: opacity .18s; }
+.fa-drive-btn:hover { opacity: 0.92; }
+.fa-drive-btn.ghost { color: var(--muted); background: transparent; border: 1px solid var(--border); }
+.fa-drive-btn.ghost:hover { color: var(--text); border-color: var(--border-lit); opacity: 1; }
+.fa-drive .fa-drive-btn:first-of-type { margin-left: auto; }
+.fa-modal-overlay { position: fixed; inset: 0; z-index: 200; background: rgba(3,4,12,0.72); backdrop-filter: blur(6px); display: flex; align-items: center; justify-content: center; padding: 20px; }
+.fa-modal { width: min(640px, 96vw); max-height: 82vh; display: flex; flex-direction: column; background: var(--panel-solid); border: 1px solid var(--border-lit); border-radius: 16px; overflow: hidden; box-shadow: 0 30px 80px rgba(0,0,0,0.55); }
+.fa-modal-head { display: flex; align-items: center; gap: 9px; padding: 16px 18px; border-bottom: 1px solid var(--border); font-weight: 700; color: var(--cyan); }
+.fa-modal-head span { color: var(--text); }
+.fa-modal-x { margin-left: auto; background: transparent; border: none; color: var(--muted); cursor: pointer; display: flex; padding: 4px; border-radius: 7px; }
+.fa-modal-x:hover { color: var(--text); background: rgba(255,255,255,0.06); }
+.fa-crumbs { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; padding: 10px 18px; border-bottom: 1px solid var(--border); }
+.fa-crumb { display: inline-flex; align-items: center; gap: 4px; color: var(--dim); }
+.fa-crumb button { background: transparent; border: none; color: var(--muted); font-size: 12px; cursor: pointer; padding: 3px 5px; border-radius: 6px; }
+.fa-crumb button:hover { color: var(--cyan); }
+.fa-drive-list { flex: 1; overflow-y: auto; padding: 10px 14px; display: flex; flex-direction: column; gap: 5px; }
+.fa-drive-row { border-radius: 9px; }
+.fa-drive-folder { width: 100%; display: flex; align-items: center; gap: 10px; background: rgba(4,6,16,0.4); border: 1px solid var(--border); border-radius: 9px; padding: 9px 12px; cursor: pointer; color: var(--text); font-size: 13px; text-align: left; transition: border-color .15s; }
+.fa-drive-folder:hover { border-color: var(--border-lit); }
+.fa-drive-folder svg:first-child { color: var(--gold); }
+.fa-drive-folder span { flex: 1; }
+.fa-drive-folder svg:last-child { color: var(--dim); }
+.fa-drive-file { display: flex; align-items: center; gap: 10px; background: rgba(4,6,16,0.4); border: 1px solid var(--border); border-radius: 9px; padding: 9px 12px; cursor: pointer; color: var(--text); font-size: 13px; transition: border-color .15s, background .15s; }
+.fa-drive-file:hover { border-color: var(--border-lit); }
+.fa-drive-file.sel { border-color: var(--violet); background: rgba(139,124,255,0.1); }
+.fa-drive-file input { accent-color: var(--violet); }
+.fa-drive-file svg { color: var(--violet2); }
+.fa-drive-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.fa-drive-row.unsupported .fa-drive-file { opacity: 0.55; }
+.fa-modal-foot { display: flex; align-items: center; gap: 12px; padding: 14px 18px; border-top: 1px solid var(--border); }
+.fa-drive-count { font-size: 12px; color: var(--muted); }
+.fa-modal-foot .fa-analyze { margin-left: auto; padding: 10px 18px; }
 
 
----
+/* File Analyzer chat */
+.fa-chat { background: var(--panel); border: 1px solid var(--border); border-radius: 16px; padding: 18px; }
+.fa-chat-hint { margin-left: auto; font-size: 11px; font-weight: 400; color: var(--dim); }
+.fa-chat-log { display: flex; flex-direction: column; gap: 12px; max-height: 380px; overflow-y: auto; padding: 4px; }
+.fa-chat-empty { font-size: 12.5px; color: var(--dim); padding: 18px; text-align: center; }
+.fa-msg { display: flex; flex-direction: column; gap: 4px; max-width: 88%; }
+.fa-msg.user { align-self: flex-end; align-items: flex-end; }
+.fa-msg.assistant { align-self: flex-start; }
+.fa-msg-who { font-size: 10.5px; font-weight: 700; letter-spacing: 0.4px; color: var(--dim); text-transform: uppercase; }
+.fa-msg-body { font-size: 13px; line-height: 1.55; border-radius: 12px; padding: 10px 13px; }
+.fa-msg.user .fa-msg-body { background: linear-gradient(135deg, rgba(139,124,255,0.22), rgba(79,209,255,0.18)); border: 1px solid var(--border-lit); color: var(--text); }
+.fa-msg.assistant .fa-msg-body { background: rgba(4,6,16,0.5); border: 1px solid var(--border); color: var(--text); }
+.fa-msg-body .fa-md { font-size: 13px; }
+.fa-msg-body .fa-md p { margin: 3px 0; }
+.fa-chat-input { display: flex; gap: 10px; margin-top: 14px; }
+.fa-chat-input input { flex: 1; background: rgba(4,6,16,0.5); color: var(--text); border: 1px solid var(--border); border-radius: 11px; padding: 12px 14px; font-size: 13.5px; font-family: inherit; outline: none; transition: border-color .2s; }
+.fa-chat-input input:focus { border-color: var(--violet); box-shadow: 0 0 0 3px rgba(139,124,255,0.14); }
+.fa-chat-input input:disabled { opacity: 0.55; }
+.fa-chat-input button { display: inline-flex; align-items: center; justify-content: center; width: 46px; color: #06060f; background: linear-gradient(135deg, var(--violet2), var(--cyan)); border: none; border-radius: 11px; cursor: pointer; transition: opacity .18s; }
+.fa-chat-input button:hover:not(:disabled) { opacity: 0.92; }
+.fa-chat-input button:disabled { opacity: 0.45; cursor: default; }
 
-## FILE: `frontend/src/lib/utils.js`
 
-```javascript
-import { clsx } from "clsx";
-import { twMerge } from "tailwind-merge"
-
-export function cn(...inputs) {
-  return twMerge(clsx(inputs));
+@media (max-width: 900px) {
+  .fa-grid, .sd-grid { grid-template-columns: 1fr; }
 }
 
+
 ```
 
 
----
-
-## FILE: `frontend/src/components/SovereignHome.js`
-
-```jsx
+### `frontend/src/components/SovereignHome.js`
+```javascript
 import React, { useEffect, useState, useCallback, useRef } from "react";
 import axios from "axios";
 import { toast } from "sonner";
@@ -2867,11 +3672,208 @@ function Metric({ icon: Icon, label, value, accent, gold }) {
 ```
 
 
----
+### `frontend/src/components/AskAllAIs.js`
+```javascript
+import React, { useState, useRef, useEffect } from "react";
+import axios from "axios";
+import { toast } from "sonner";
+import { motion } from "framer-motion";
+import { Send, Loader2, Sparkles, Layers, Bot } from "lucide-react";
+import { API } from "../App";
 
-## FILE: `frontend/src/components/BugBounty.js`
+const PROVIDERS = [
+  { key: "openai", label: "GPT-4o", color: "#10a37f" },
+  { key: "gemini", label: "Gemini", color: "#4285f4" },
+  { key: "anthropic", label: "Claude", color: "#d97757" },
+];
 
-```jsx
+export default function AskAllAIs() {
+  const [msg, setMsg] = useState("");
+  const [selected, setSelected] = useState(["openai", "gemini", "anthropic"]);
+  const [loading, setLoading] = useState(false);
+  const [thread, setThread] = useState([]);
+  const scroller = useRef(null);
+
+  useEffect(() => {
+    scroller.current?.scrollTo({ top: scroller.current.scrollHeight, behavior: "smooth" });
+  }, [thread, loading]);
+
+  const toggle = (k) => {
+    setSelected((prev) => prev.includes(k) ? prev.filter((p) => p !== k) : [...prev, k]);
+  };
+
+  const send = async () => {
+    if (!msg.trim()) return;
+    if (selected.length === 0) { toast.error("Select at least one mind"); return; }
+    const question = msg;
+    setThread((t) => [...t, { role: "user", text: question }]);
+    setMsg("");
+    setLoading(true);
+    try {
+      const r = await axios.post(`${API}/chat`, { message: question, models: selected });
+      setThread((t) => [...t, { role: "assistant", ...r.data }]);
+    } catch (e) {
+      toast.error("Ask All AIs failed");
+      setThread((t) => t.slice(0, -1));
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <div className="askai-wrap">
+      <div className="askai-head">
+        <div className="ah-title"><Sparkles size={16} /> Ask All AIs <em>· plural reasoning field</em></div>
+        <div className="prov-picker">
+          {PROVIDERS.map((p) => (
+            <button
+              key={p.key}
+              data-testid={`prov-${p.key}`}
+              className={selected.includes(p.key) ? "prov on" : "prov"}
+              style={selected.includes(p.key) ? { borderColor: p.color, color: p.color } : {}}
+              onClick={() => toggle(p.key)}
+            >
+              <Bot size={14} /> {p.label}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      <div className="thread" ref={scroller}>
+        {thread.length === 0 && (
+          <div className="askai-empty">
+            <Layers size={28} />
+            <p>Ask one question. OmniMind queries every selected mind in parallel, then the Synarchy arbiter fuses them into one superior answer.</p>
+          </div>
+        )}
+        {thread.map((item, i) => item.role === "user" ? (
+          <div key={i} className="bubble user">{item.text}</div>
+        ) : (
+          <motion.div key={i} className="answer-block" initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }}>
+            {item.synthesis && (
+              <div className="synthesis">
+                <div className="syn-head"><Sparkles size={14} /> Synarchy Synthesis</div>
+                <p>{item.synthesis}</p>
+              </div>
+            )}
+            <div className="models-grid">
+              {item.results?.map((r) => (
+                <div key={r.provider} className={`model-card ${r.ok ? "" : "failed"}`}>
+                  <div className="mc-head">{r.label}</div>
+                  <p>{r.answer}</p>
+                </div>
+              ))}
+            </div>
+          </motion.div>
+        ))}
+        {loading && <div className="bubble thinking"><Loader2 className="spin" size={15} /> The minds are reasoning…</div>}
+      </div>
+
+      <div className="askai-input">
+        <input
+          data-testid="askai-input"
+          value={msg}
+          onChange={(e) => setMsg(e.target.value)}
+          placeholder="Ask all the AIs anything…"
+          onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); } }}
+        />
+        <button data-testid="askai-send" onClick={send} disabled={loading}>
+          {loading ? <Loader2 className="spin" size={18} /> : <Send size={18} />}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+```
+
+
+### `frontend/src/components/Chronicle.js`
+```javascript
+import React, { useEffect, useState, useCallback } from "react";
+import axios from "axios";
+import { motion } from "framer-motion";
+import { ScrollText, BookOpen, Banknote, Target, Sparkles, Loader2, TrendingUp } from "lucide-react";
+import { API } from "../App";
+
+const fmtDate = (iso) => {
+  try { return new Date(iso).toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" }); }
+  catch { return ""; }
+};
+
+export default function Chronicle() {
+  const [entries, setEntries] = useState([]);
+  const [loading, setLoading] = useState(true);
+
+  const load = useCallback(async () => {
+    try {
+      const r = await axios.get(`${API}/chronicle`);
+      setEntries(r.data);
+    } catch (e) { /* silent */ } finally { setLoading(false); }
+  }, []);
+
+  useEffect(() => { load(); }, [load]);
+
+  const totalCollected = entries.reduce((a, e) => a + Number(e.amount || 0), 0);
+
+  return (
+    <div className="chronicle-wrap">
+      <div className="chr-hero">
+        <div className="chr-hero-left">
+          <div className="chr-title"><BookOpen size={18} /> Outcome Ledger</div>
+          <p>Every completed mission is recorded here as verified proof. The Chronicle distils a reusable lesson from each win — and ACASO feeds these lessons back into every new directive it compiles.</p>
+        </div>
+        <div className="chr-hero-stats">
+          <div className="chr-stat"><span className="v">{entries.length}</span><span className="l">Missions Closed</span></div>
+          <div className="chr-stat gold"><span className="v">${totalCollected.toLocaleString()}</span><span className="l">Total Collected</span></div>
+        </div>
+      </div>
+
+      {loading ? (
+        <div className="chr-loading"><Loader2 className="spin" size={20} /> Reading the Chronicle…</div>
+      ) : entries.length === 0 ? (
+        <div className="chr-empty">
+          <ScrollText size={28} />
+          <p>No completed missions yet. Finish a mission on the Sovereign Home board (run every step) and its outcome + learned lesson will be inscribed here.</p>
+        </div>
+      ) : (
+        <div className="chr-timeline">
+          {entries.map((e, i) => (
+            <motion.div
+              key={e.id}
+              className="chr-entry"
+              initial={{ opacity: 0, y: 14 }}
+              animate={{ opacity: 1, y: 0 }}
+              transition={{ delay: i * 0.05 }}
+            >
+              <div className="chr-node"><TrendingUp size={14} /></div>
+              <div className="chr-card">
+                <div className="chr-card-top">
+                  <span className={`m-mode mode-${e.mode}`}>{e.mode}</span>
+                  <span className="chr-date">{fmtDate(e.completed_at)}</span>
+                </div>
+                <h3>{e.title}</h3>
+                <div className="chr-metrics">
+                  <span><Banknote size={13} /> ${Number(e.amount).toLocaleString()}</span>
+                  <span><Target size={13} /> {e.outcome_metric || "outcome verified"}</span>
+                </div>
+                <div className="chr-lesson">
+                  <Sparkles size={13} /> <b>Lesson learned:</b> {e.lesson}
+                </div>
+              </div>
+            </motion.div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+```
+
+
+### `frontend/src/components/BugBounty.js`
+```javascript
 import React, { useEffect, useState, useCallback, useRef } from "react";
 import axios from "axios";
 import { toast } from "sonner";
@@ -2879,9 +3881,113 @@ import { motion, AnimatePresence } from "framer-motion";
 import {
   ShieldAlert, Send, Loader2, Zap, Play, CheckCircle2, Circle, Trash2,
   Bug, Crosshair, FileText, ChevronDown, ChevronUp, ShieldCheck, Banknote,
-  Target, Activity, AlertTriangle, Radar, Users, Crown, Eye, Cpu, Flame
+  Target, Activity, AlertTriangle, Radar, Users, Crown, Eye, Cpu, Flame,
+  GitPullRequest, Copy, Scale, MessagesSquare, Paperclip, Upload, Download, Image as ImageIcon
 } from "lucide-react";
 import { API } from "../App";
+
+const fmtBytes = (n) => {
+  if (!n && n !== 0) return "";
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+  return `${(n / (1024 * 1024)).toFixed(1)} MB`;
+};
+
+function AttachmentsPanel({ mid }) {
+  const [items, setItems] = useState([]);
+  const [loading, setLoading] = useState(false);
+  const [uploading, setUploading] = useState(false);
+  const inputRef = useRef(null);
+
+  const refresh = useCallback(async () => {
+    setLoading(true);
+    try {
+      const r = await axios.get(`${API}/missions/${mid}/attachments`);
+      setItems(r.data);
+    } catch (e) { console.error(e); } finally { setLoading(false); }
+  }, [mid]);
+
+  useEffect(() => { refresh(); }, [refresh]);
+
+  const onPick = async (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setUploading(true);
+    try {
+      const fd = new FormData();
+      fd.append("file", file);
+      await axios.post(`${API}/missions/${mid}/attachments`, fd, {
+        headers: { "Content-Type": "multipart/form-data" },
+      });
+      toast.success(`Uploaded ${file.name}`);
+      await refresh();
+    } catch (err) {
+      toast.error(err?.response?.data?.detail || "Upload failed");
+    } finally {
+      setUploading(false);
+      if (inputRef.current) inputRef.current.value = "";
+    }
+  };
+
+  const download = (fid) => {
+    window.open(`${API}/attachments/${fid}/download`, "_blank", "noopener");
+  };
+
+  const remove = async (fid) => {
+    try { await axios.delete(`${API}/attachments/${fid}`); await refresh(); toast("Attachment removed"); }
+    catch { toast.error("Delete failed"); }
+  };
+
+  return (
+    <div className="attach" data-testid={`attachments-${mid}`}>
+      <div className="attach-head">
+        <Paperclip size={13} /> Evidence & Media
+        <span className="attach-sub">real object storage · images · pdf · logs · text</span>
+        <button
+          className="attach-add"
+          data-testid={`attachment-upload-${mid}`}
+          onClick={() => inputRef.current?.click()}
+          disabled={uploading}
+        >
+          {uploading ? <Loader2 className="spin" size={13} /> : <Upload size={13} />}
+          {uploading ? "Uploading…" : "Upload"}
+        </button>
+        <input
+          ref={inputRef}
+          data-testid={`attachment-file-input-${mid}`}
+          type="file"
+          accept=".jpg,.jpeg,.png,.gif,.webp,.pdf,.json,.csv,.txt,.log,.har,.md"
+          style={{ display: "none" }}
+          onChange={onPick}
+        />
+      </div>
+      {loading ? (
+        <div className="attach-empty"><Loader2 className="spin" size={14} /> Loading…</div>
+      ) : items.length === 0 ? (
+        <div className="attach-empty">No files yet — attach real evidence the Soul Council can read.</div>
+      ) : (
+        <div className="attach-list">
+          {items.map((a) => {
+            const isImg = (a.content_type || "").startsWith("image/");
+            return (
+              <div key={a.id} className="attach-row" data-testid={`attachment-row-${a.id}`}>
+                <span className="attach-icon">{isImg ? <ImageIcon size={14} /> : <FileText size={14} />}</span>
+                <span className="attach-name" title={a.original_filename}>{a.original_filename}</span>
+                <span className="attach-size">{fmtBytes(a.size)}</span>
+                <button className="attach-btn" data-testid={`attachment-download-${a.id}`} onClick={() => download(a.id)} title="Download">
+                  <Download size={13} />
+                </button>
+                <button className="attach-btn danger" data-testid={`attachment-delete-${a.id}`} onClick={() => remove(a.id)} title="Delete">
+                  <Trash2 size={13} />
+                </button>
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
 
 const SOUL_ICON = { vision: Eye, fusion: Cpu, rebirth: Flame };
 const SOUL_COLOR = { vision: "#4fd1ff", fusion: "#8b7cff", rebirth: "#ff7a90" };
@@ -2925,6 +4031,7 @@ export default function BugBounty() {
   const [openReport, setOpenReport] = useState({});
   const [deploying, setDeploying] = useState(null);
   const [openCouncil, setOpenCouncil] = useState({});
+  const [openDebate, setOpenDebate] = useState({});
   const runningRef = useRef(false);
 
   const load = useCallback(async () => {
@@ -3143,6 +4250,8 @@ export default function BugBounty() {
                   </button>
                   {openReport[m.id] && <ReportView text={m.report} />}
 
+                  <AttachmentsPanel mid={m.id} />
+
                   {/* Soul Council */}
                   <div className="bb-soul-bar">
                     <button
@@ -3175,10 +4284,58 @@ export default function BugBounty() {
                               </div>
                               <div className="soul-role">{s.role}</div>
                               <p>{s.analysis}</p>
+                              {s.rebuttal && (
+                                <div className="soul-rebut">
+                                  <span className="soul-rebut-tag" style={{ color: SOUL_COLOR[s.id], borderColor: SOUL_COLOR[s.id] + "88" }}>
+                                    <MessagesSquare size={10} /> Round 2 · Rebuttal
+                                  </span>
+                                  <p>{s.rebuttal}</p>
+                                </div>
+                              )}
                             </div>
                           );
                         })}
                       </div>
+
+                      {m.soul_council.souls.some((s) => s.rebuttal) && (
+                        <div className="debate" data-testid={`soul-debate-${m.id}`}>
+                          <button
+                            className="debate-toggle"
+                            data-testid={`soul-debate-toggle-${m.id}`}
+                            onClick={() => setOpenDebate((o) => ({ ...o, [m.id]: !o[m.id] }))}
+                          >
+                            <MessagesSquare size={13} />
+                            {openDebate[m.id] ? "Hide Debate Transcript" : "Show Debate Transcript"}
+                            <span className="debate-count">
+                              {m.soul_council.souls.filter((s) => s.rebuttal).length} rebuttals
+                            </span>
+                            {openDebate[m.id] ? <ChevronUp size={13} /> : <ChevronDown size={13} />}
+                          </button>
+                          {openDebate[m.id] && (
+                            <div className="debate-body">
+                              {["round-1", "round-2"].map((round) => (
+                                <div key={round} className="debate-round">
+                                  <div className="debate-round-h">
+                                    {round === "round-1" ? "Round 1 · Opening Analyses" : "Round 2 · Cross-Rebuttals"}
+                                  </div>
+                                  {m.soul_council.souls.filter((s) => s.ok).map((s) => {
+                                    const text = round === "round-1" ? s.analysis : s.rebuttal;
+                                    if (!text) return null;
+                                    return (
+                                      <div key={s.id + round} className="debate-msg" style={{ borderLeftColor: SOUL_COLOR[s.id] }}>
+                                        <span className="debate-who" style={{ color: SOUL_COLOR[s.id] }}>{s.name}</span>
+                                        <span className="debate-model">{s.model_label}</span>
+                                        <p>{text}</p>
+                                      </div>
+                                    );
+                                  })}
+                                </div>
+                              ))}
+                            </div>
+                          )}
+                        </div>
+                      )}
+
                       <div className="throne">
                         <div className="throne-h"><Crown size={15} /> Eternal Throne · Soul Brain Verdict
                           <span className="throne-status">{m.soul_council.resolution.status}</span>
@@ -3192,6 +4349,56 @@ export default function BugBounty() {
                           <span className="conf-num">{m.soul_council.resolution.confidence}%</span>
                         </div>
                       </div>
+
+                      {Array.isArray(m.soul_council.resolution.dissent) && m.soul_council.resolution.dissent.length > 0 && (
+                        <div className="dissent" data-testid={`soul-dissent-${m.id}`}>
+                          <div className="dissent-h"><Scale size={14} /> Soul Dissent & Reconciliation</div>
+                          {m.soul_council.resolution.dissent.map((d, i) => {
+                            const positions = d.positions || {};
+                            return (
+                              <div key={i} className="dissent-item">
+                                <div className="dissent-topic">{d.topic || "Point of tension"}</div>
+                                <div className="dissent-positions">
+                                  {["vision", "fusion", "rebirth"].map((sid) => positions[sid] ? (
+                                    <div key={sid} className="dissent-pos" style={{ borderLeftColor: SOUL_COLOR[sid] }}>
+                                      <span className="dissent-soul" style={{ color: SOUL_COLOR[sid] }}>
+                                        {sid === "vision" ? "Vision Command" : sid === "fusion" ? "Fusion Engine" : "Rebirth Protocol"}
+                                      </span>
+                                      <span>{positions[sid]}</span>
+                                    </div>
+                                  ) : null)}
+                                </div>
+                                {d.reconciliation && (
+                                  <div className="dissent-reco"><Crown size={12} /> <span><b>Throne reconciled:</b> {d.reconciliation}</span></div>
+                                )}
+                              </div>
+                            );
+                          })}
+                        </div>
+                      )}
+
+                      {m.soul_council.resolution.patch_note && (
+                        <div className="fix-export" data-testid={`fix-export-${m.id}`}>
+                          <div className="fx-h">
+                            <GitPullRequest size={14} /> Fix Export · PR-Ready Patch Note
+                            <button
+                              className="fx-copy"
+                              data-testid={`fix-export-copy-${m.id}`}
+                              onClick={async () => {
+                                try {
+                                  await navigator.clipboard.writeText(m.soul_council.resolution.patch_note);
+                                  toast.success("Patch note copied — paste into your PR");
+                                } catch {
+                                  toast.error("Copy failed — select and copy manually");
+                                }
+                              }}
+                            >
+                              <Copy size={12} /> Copy
+                            </button>
+                          </div>
+                          <pre className="fx-body">{m.soul_council.resolution.patch_note}</pre>
+                        </div>
+                      )}
                     </motion.div>
                   )}
 
@@ -3213,217 +4420,8 @@ export default function BugBounty() {
 ```
 
 
----
-
-## FILE: `frontend/src/components/AskAllAIs.js`
-
-```jsx
-import React, { useState, useRef, useEffect } from "react";
-import axios from "axios";
-import { toast } from "sonner";
-import { motion } from "framer-motion";
-import { Send, Loader2, Sparkles, Layers, Bot } from "lucide-react";
-import { API } from "../App";
-
-const PROVIDERS = [
-  { key: "openai", label: "GPT-4o", color: "#10a37f" },
-  { key: "gemini", label: "Gemini", color: "#4285f4" },
-  { key: "anthropic", label: "Claude", color: "#d97757" },
-];
-
-export default function AskAllAIs() {
-  const [msg, setMsg] = useState("");
-  const [selected, setSelected] = useState(["openai", "gemini", "anthropic"]);
-  const [loading, setLoading] = useState(false);
-  const [thread, setThread] = useState([]);
-  const scroller = useRef(null);
-
-  useEffect(() => {
-    scroller.current?.scrollTo({ top: scroller.current.scrollHeight, behavior: "smooth" });
-  }, [thread, loading]);
-
-  const toggle = (k) => {
-    setSelected((prev) => prev.includes(k) ? prev.filter((p) => p !== k) : [...prev, k]);
-  };
-
-  const send = async () => {
-    if (!msg.trim()) return;
-    if (selected.length === 0) { toast.error("Select at least one mind"); return; }
-    const question = msg;
-    setThread((t) => [...t, { role: "user", text: question }]);
-    setMsg("");
-    setLoading(true);
-    try {
-      const r = await axios.post(`${API}/chat`, { message: question, models: selected });
-      setThread((t) => [...t, { role: "assistant", ...r.data }]);
-    } catch (e) {
-      toast.error("Ask All AIs failed");
-      setThread((t) => t.slice(0, -1));
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  return (
-    <div className="askai-wrap">
-      <div className="askai-head">
-        <div className="ah-title"><Sparkles size={16} /> Ask All AIs <em>· plural reasoning field</em></div>
-        <div className="prov-picker">
-          {PROVIDERS.map((p) => (
-            <button
-              key={p.key}
-              data-testid={`prov-${p.key}`}
-              className={selected.includes(p.key) ? "prov on" : "prov"}
-              style={selected.includes(p.key) ? { borderColor: p.color, color: p.color } : {}}
-              onClick={() => toggle(p.key)}
-            >
-              <Bot size={14} /> {p.label}
-            </button>
-          ))}
-        </div>
-      </div>
-
-      <div className="thread" ref={scroller}>
-        {thread.length === 0 && (
-          <div className="askai-empty">
-            <Layers size={28} />
-            <p>Ask one question. OmniMind queries every selected mind in parallel, then the Synarchy arbiter fuses them into one superior answer.</p>
-          </div>
-        )}
-        {thread.map((item, i) => item.role === "user" ? (
-          <div key={i} className="bubble user">{item.text}</div>
-        ) : (
-          <motion.div key={i} className="answer-block" initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }}>
-            {item.synthesis && (
-              <div className="synthesis">
-                <div className="syn-head"><Sparkles size={14} /> Synarchy Synthesis</div>
-                <p>{item.synthesis}</p>
-              </div>
-            )}
-            <div className="models-grid">
-              {item.results?.map((r) => (
-                <div key={r.provider} className={`model-card ${r.ok ? "" : "failed"}`}>
-                  <div className="mc-head">{r.label}</div>
-                  <p>{r.answer}</p>
-                </div>
-              ))}
-            </div>
-          </motion.div>
-        ))}
-        {loading && <div className="bubble thinking"><Loader2 className="spin" size={15} /> The minds are reasoning…</div>}
-      </div>
-
-      <div className="askai-input">
-        <input
-          data-testid="askai-input"
-          value={msg}
-          onChange={(e) => setMsg(e.target.value)}
-          placeholder="Ask all the AIs anything…"
-          onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); } }}
-        />
-        <button data-testid="askai-send" onClick={send} disabled={loading}>
-          {loading ? <Loader2 className="spin" size={18} /> : <Send size={18} />}
-        </button>
-      </div>
-    </div>
-  );
-}
-
-```
-
-
----
-
-## FILE: `frontend/src/components/Chronicle.js`
-
-```jsx
-import React, { useEffect, useState, useCallback } from "react";
-import axios from "axios";
-import { motion } from "framer-motion";
-import { ScrollText, BookOpen, Banknote, Target, Sparkles, Loader2, TrendingUp } from "lucide-react";
-import { API } from "../App";
-
-const fmtDate = (iso) => {
-  try { return new Date(iso).toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" }); }
-  catch { return ""; }
-};
-
-export default function Chronicle() {
-  const [entries, setEntries] = useState([]);
-  const [loading, setLoading] = useState(true);
-
-  const load = useCallback(async () => {
-    try {
-      const r = await axios.get(`${API}/chronicle`);
-      setEntries(r.data);
-    } catch (e) { /* silent */ } finally { setLoading(false); }
-  }, []);
-
-  useEffect(() => { load(); }, [load]);
-
-  const totalCollected = entries.reduce((a, e) => a + Number(e.amount || 0), 0);
-
-  return (
-    <div className="chronicle-wrap">
-      <div className="chr-hero">
-        <div className="chr-hero-left">
-          <div className="chr-title"><BookOpen size={18} /> Outcome Ledger</div>
-          <p>Every completed mission is recorded here as verified proof. The Chronicle distils a reusable lesson from each win — and ACASO feeds these lessons back into every new directive it compiles.</p>
-        </div>
-        <div className="chr-hero-stats">
-          <div className="chr-stat"><span className="v">{entries.length}</span><span className="l">Missions Closed</span></div>
-          <div className="chr-stat gold"><span className="v">${totalCollected.toLocaleString()}</span><span className="l">Total Collected</span></div>
-        </div>
-      </div>
-
-      {loading ? (
-        <div className="chr-loading"><Loader2 className="spin" size={20} /> Reading the Chronicle…</div>
-      ) : entries.length === 0 ? (
-        <div className="chr-empty">
-          <ScrollText size={28} />
-          <p>No completed missions yet. Finish a mission on the Sovereign Home board (run every step) and its outcome + learned lesson will be inscribed here.</p>
-        </div>
-      ) : (
-        <div className="chr-timeline">
-          {entries.map((e, i) => (
-            <motion.div
-              key={e.id}
-              className="chr-entry"
-              initial={{ opacity: 0, y: 14 }}
-              animate={{ opacity: 1, y: 0 }}
-              transition={{ delay: i * 0.05 }}
-            >
-              <div className="chr-node"><TrendingUp size={14} /></div>
-              <div className="chr-card">
-                <div className="chr-card-top">
-                  <span className={`m-mode mode-${e.mode}`}>{e.mode}</span>
-                  <span className="chr-date">{fmtDate(e.completed_at)}</span>
-                </div>
-                <h3>{e.title}</h3>
-                <div className="chr-metrics">
-                  <span><Banknote size={13} /> ${Number(e.amount).toLocaleString()}</span>
-                  <span><Target size={13} /> {e.outcome_metric || "outcome verified"}</span>
-                </div>
-                <div className="chr-lesson">
-                  <Sparkles size={13} /> <b>Lesson learned:</b> {e.lesson}
-                </div>
-              </div>
-            </motion.div>
-          ))}
-        </div>
-      )}
-    </div>
-  );
-}
-
-```
-
-
----
-
-## FILE: `frontend/src/components/AgentBridge.js`
-
-```jsx
+### `frontend/src/components/AgentBridge.js`
+```javascript
 import React, { useEffect, useState, useCallback } from "react";
 import axios from "axios";
 import { toast } from "sonner";
@@ -3629,8 +4627,680 @@ export default function AgentBridge() {
 ```
 
 
----
+### `frontend/src/components/FileAnalyzer.js`
+```javascript
+import React, { useCallback, useEffect, useRef, useState } from "react";
+import axios from "axios";
+import { toast } from "sonner";
+import { motion, AnimatePresence } from "framer-motion";
+import {
+  FolderUp, FilePlus, Loader2, Sparkles, Trash2, Download, FileText,
+  Image as ImageIcon, Play, X, Plus, HardDriveUpload, Files, Boxes,
+  MessagesSquare, Send, Cloud, FolderOpen, ChevronRight, Check, Unplug, Folder
+} from "lucide-react";
+import { API } from "../App";
 
-## NOTE on `frontend/src/components/ui/`
+const fmtBytes = (n) => {
+  if (!n && n !== 0) return "";
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+  return `${(n / (1024 * 1024)).toFixed(1)} MB`;
+};
 
-These are stock, unmodified **shadcn/ui** primitives (accordion, button, card, dialog, ... toast, tooltip). They are included in the ZIP. If rebuilding from this markdown alone, generate them with `npx shadcn@latest add <component>` using the `components.json` above — the app currently only imports `sonner` directly, so they are not required for the app to compile.
+function Markdown({ text }) {
+  if (!text) return null;
+  const inline = (t) => {
+    const nodes = [];
+    const re = /(\*\*([^*]+)\*\*|`([^`]+)`)/g;
+    let last = 0, m, i = 0;
+    while ((m = re.exec(t)) !== null) {
+      if (m.index > last) nodes.push(t.slice(last, m.index));
+      if (m[2] !== undefined) nodes.push(<strong key={`b${i++}`}>{m[2]}</strong>);
+      else if (m[3] !== undefined) nodes.push(<code key={`c${i++}`}>{m[3]}</code>);
+      last = m.index + m[0].length;
+    }
+    if (last < t.length) nodes.push(t.slice(last));
+    return nodes;
+  };
+  const blocks = text.split(/```/);
+  return (
+    <div className="fa-md">
+      {blocks.map((blk, bi) => {
+        if (bi % 2 === 1) return <pre key={bi} className="fa-code">{blk.replace(/^\w+\n/, "")}</pre>;
+        return blk.split("\n").map((ln, i) => {
+          const t = ln.trim();
+          const k = `${bi}-${i}`;
+          if (!t) return <div key={k} className="fa-gap" />;
+          if (t.startsWith("### ")) return <h5 key={k}>{inline(t.replace(/^###\s*/, ""))}</h5>;
+          if (t.startsWith("## ")) return <h4 key={k}>{inline(t.replace(/^##\s*/, ""))}</h4>;
+          if (t.startsWith("# ")) return <h3 key={k}>{inline(t.replace(/^#\s*/, ""))}</h3>;
+          if (t.startsWith("- ") || t.startsWith("* ")) return <li key={k}>{inline(t.replace(/^[-*]\s*/, ""))}</li>;
+          return <p key={k}>{inline(t)}</p>;
+        });
+      })}
+    </div>
+  );
+}
+
+export default function FileAnalyzer() {
+  const [sets, setSets] = useState([]);
+  const [activeId, setActiveId] = useState(null);
+  const [files, setFiles] = useState([]);
+  const [question, setQuestion] = useState("");
+  const [uploading, setUploading] = useState(false);
+  const [progress, setProgress] = useState({ done: 0, total: 0 });
+  const [analyzing, setAnalyzing] = useState(false);
+  const [analysis, setAnalysis] = useState(null);
+  const [chat, setChat] = useState([]);
+  const [chatInput, setChatInput] = useState("");
+  const [chatSending, setChatSending] = useState(false);
+  // Google Drive
+  const [drive, setDrive] = useState({ configured: false, connected: false, email: null });
+  const [driveOpen, setDriveOpen] = useState(false);
+  const [driveItems, setDriveItems] = useState([]);
+  const [driveCrumbs, setDriveCrumbs] = useState([{ id: "root", name: "My Drive" }]);
+  const [driveSel, setDriveSel] = useState([]);
+  const [driveLoading, setDriveLoading] = useState(false);
+  const [driveImporting, setDriveImporting] = useState(false);
+  const filesInput = useRef(null);
+  const folderInput = useRef(null);
+
+  const loadSets = useCallback(async () => {
+    try {
+      const r = await axios.get(`${API}/filesets`);
+      setSets(r.data);
+      if (!activeId && r.data.length) setActiveId(r.data[0].id);
+    } catch (e) { console.error(e); }
+  }, [activeId]);
+
+  useEffect(() => { loadSets(); }, [loadSets]);
+
+  const loadFiles = useCallback(async (id) => {
+    if (!id) { setFiles([]); return; }
+    try {
+      const [f, a] = await Promise.all([
+        axios.get(`${API}/filesets/${id}/files`),
+        axios.get(`${API}/filesets/${id}/analyses`),
+      ]);
+      setFiles(f.data);
+      setAnalysis(a.data?.[0] || null);
+      try { const c = await axios.get(`${API}/filesets/${id}/chat`); setChat(c.data || []); }
+      catch { setChat([]); }
+    } catch (e) { console.error(e); }
+  }, []);
+
+  useEffect(() => { loadFiles(activeId); }, [activeId, loadFiles]);
+
+  const ensureSet = async () => {
+    if (activeId) return activeId;
+    const r = await axios.post(`${API}/filesets`, { title: `Analysis ${new Date().toLocaleString()}` });
+    setActiveId(r.data.id);
+    await loadSets();
+    return r.data.id;
+  };
+
+  const newSet = async () => {
+    const r = await axios.post(`${API}/filesets`, { title: `Analysis ${new Date().toLocaleString()}` });
+    setActiveId(r.data.id);
+    setAnalysis(null);
+    setFiles([]);
+    setChat([]);
+    await loadSets();
+    toast.success("New analysis set created");
+  };
+
+  const handlePicked = async (fileList) => {
+    const arr = Array.from(fileList || []);
+    if (!arr.length) return;
+    const id = await ensureSet();
+    setUploading(true);
+    setProgress({ done: 0, total: arr.length });
+    let ok = 0, fail = 0;
+    for (let i = 0; i < arr.length; i++) {
+      const file = arr[i];
+      const rel = file.webkitRelativePath || file.name;
+      try {
+        const fd = new FormData();
+        fd.append("file", file);
+        fd.append("rel_path", rel);
+        await axios.post(`${API}/filesets/${id}/files`, fd, { headers: { "Content-Type": "multipart/form-data" } });
+        ok += 1;
+      } catch (e) { fail += 1; }
+      setProgress({ done: i + 1, total: arr.length });
+    }
+    setUploading(false);
+    await loadFiles(id);
+    await loadSets();
+    if (ok) toast.success(`Imported ${ok} file${ok > 1 ? "s" : ""}${fail ? ` · ${fail} skipped` : ""}`);
+    else toast.error("No files imported (unsupported types or too large)");
+  };
+
+  const remove = async (fid) => {
+    try { await axios.delete(`${API}/files/${fid}`); await loadFiles(activeId); await loadSets(); toast("File removed"); }
+    catch { toast.error("Delete failed"); }
+  };
+
+  const download = (fid) => window.open(`${API}/files/${fid}/download`, "_blank", "noopener");
+
+  const analyze = async () => {
+    if (!activeId || !files.length) { toast.error("Upload files first"); return; }
+    setAnalyzing(true);
+    try {
+      const r = await axios.post(`${API}/filesets/${activeId}/analyze`, { question: question.trim() || null });
+      setAnalysis(r.data);
+      toast.success(`Analysis complete · ${r.data.model_label}`);
+    } catch (e) {
+      toast.error(e?.response?.data?.detail || "Analysis failed");
+    } finally { setAnalyzing(false); }
+  };
+
+  const sendChat = async () => {
+    const msg = chatInput.trim();
+    if (!msg) return;
+    if (!activeId || !files.length) { toast.error("Upload files first"); return; }
+    setChatInput("");
+    const now = new Date().toISOString();
+    setChat((c) => [...c, { id: `tmp-${now}`, role: "user", content: msg, created_at: now }]);
+    setChatSending(true);
+    try {
+      const r = await axios.post(`${API}/filesets/${activeId}/chat`, { message: msg });
+      setChat((c) => [...c, r.data]);
+    } catch (e) {
+      toast.error(e?.response?.data?.detail || "Chat failed");
+    } finally { setChatSending(false); }
+  };
+
+  const loadDriveStatus = useCallback(async () => {
+    try { const r = await axios.get(`${API}/drive/status`); setDrive(r.data); }
+    catch (e) { console.error(e); }
+  }, []);
+
+  useEffect(() => {
+    loadDriveStatus();
+    const params = new URLSearchParams(window.location.search);
+    if (params.get("drive_connected")) {
+      toast.success("Google Drive connected");
+      loadDriveStatus();
+      window.history.replaceState({}, "", window.location.pathname);
+    } else if (params.get("drive_error")) {
+      toast.error(`Drive connection failed: ${params.get("drive_error")}`);
+      window.history.replaceState({}, "", window.location.pathname);
+    }
+  }, [loadDriveStatus]);
+
+  const connectDrive = async () => {
+    try {
+      const r = await axios.get(`${API}/drive/connect`);
+      window.location.href = r.data.authorization_url;
+    } catch (e) { toast.error(e?.response?.data?.detail || "Cannot start Drive connect"); }
+  };
+
+  const disconnectDrive = async () => {
+    try { await axios.post(`${API}/drive/disconnect`); await loadDriveStatus(); toast("Google Drive disconnected"); }
+    catch { toast.error("Disconnect failed"); }
+  };
+
+  const browseFolder = async (folderId, crumbs) => {
+    setDriveLoading(true);
+    try {
+      const r = await axios.get(`${API}/drive/list?folder_id=${encodeURIComponent(folderId)}`);
+      setDriveItems(r.data.items || []);
+      if (crumbs) setDriveCrumbs(crumbs);
+    } catch (e) {
+      toast.error(e?.response?.data?.detail || "Failed to list Drive");
+    } finally { setDriveLoading(false); }
+  };
+
+  const openDrive = async () => {
+    setDriveOpen(true);
+    setDriveSel([]);
+    setDriveCrumbs([{ id: "root", name: "My Drive" }]);
+    await browseFolder("root", [{ id: "root", name: "My Drive" }]);
+  };
+
+  const enterFolder = (item) => {
+    const crumbs = [...driveCrumbs, { id: item.id, name: item.name }];
+    browseFolder(item.id, crumbs);
+  };
+
+  const gotoCrumb = (idx) => {
+    const crumbs = driveCrumbs.slice(0, idx + 1);
+    browseFolder(crumbs[crumbs.length - 1].id, crumbs);
+  };
+
+  const toggleDriveSel = (id) => setDriveSel((s) => s.includes(id) ? s.filter((x) => x !== id) : [...s, id]);
+
+  const importDrive = async () => {
+    if (!driveSel.length) { toast.error("Select at least one file"); return; }
+    setDriveImporting(true);
+    try {
+      const r = await axios.post(`${API}/drive/import`, { file_ids: driveSel, fileset_id: activeId });
+      setActiveId(r.data.fileset_id);
+      await loadSets();
+      await loadFiles(r.data.fileset_id);
+      const imp = r.data.imported?.length || 0;
+      const skp = r.data.skipped?.length || 0;
+      toast.success(`Imported ${imp} file${imp !== 1 ? "s" : ""} from Drive${skp ? ` · ${skp} skipped` : ""}`);
+      setDriveOpen(false);
+      setDriveSel([]);
+    } catch (e) {
+      toast.error(e?.response?.data?.detail || "Drive import failed");
+    } finally { setDriveImporting(false); }
+  };
+
+  return (
+    <div className="fa-wrap" data-testid="file-analyzer">
+      <section className="fa-console">
+        <div className="fa-head">
+          <Boxes size={17} /> <span>File Analyzer</span>
+          <em>Upload files or a whole folder — real object storage, then AI analysis.</em>
+        </div>
+        <div className="fa-note">
+          A hosted app can’t read your local drive directly (browser sandbox). Pick files or an entire folder below and ACASO imports them into real storage, then the AI reads and analyzes them.
+        </div>
+
+        <div className="fa-actions">
+          <button className="fa-btn primary" data-testid="analyzer-add-files" onClick={() => filesInput.current?.click()} disabled={uploading}>
+            <FilePlus size={16} /> Add Files
+          </button>
+          <button className="fa-btn" data-testid="analyzer-add-folder" onClick={() => folderInput.current?.click()} disabled={uploading}>
+            <FolderUp size={16} /> Add Folder
+          </button>
+          <button className="fa-btn ghost" data-testid="analyzer-new-set" onClick={newSet} disabled={uploading}>
+            <Plus size={16} /> New Set
+          </button>
+          <input ref={filesInput} type="file" multiple style={{ display: "none" }}
+            data-testid="analyzer-files-input"
+            onChange={(e) => { handlePicked(e.target.files); e.target.value = ""; }} />
+          <input ref={folderInput} type="file" multiple webkitdirectory="" directory="" style={{ display: "none" }}
+            data-testid="analyzer-folder-input"
+            onChange={(e) => { handlePicked(e.target.files); e.target.value = ""; }} />
+        </div>
+
+        {drive.configured && (
+          <div className="fa-drive" data-testid="analyzer-drive-bar">
+            <Cloud size={15} />
+            {drive.connected ? (
+              <>
+                <span className="fa-drive-on">Google Drive connected{drive.email ? ` · ${drive.email}` : ""}</span>
+                <button className="fa-drive-btn" data-testid="drive-browse" onClick={openDrive}><FolderOpen size={14} /> Browse Drive</button>
+                <button className="fa-drive-btn ghost" data-testid="drive-disconnect" onClick={disconnectDrive}><Unplug size={14} /> Disconnect</button>
+              </>
+            ) : (
+              <>
+                <span className="fa-drive-off">Import files straight from your Google Drive</span>
+                <button className="fa-drive-btn" data-testid="drive-connect" onClick={connectDrive}><Cloud size={14} /> Connect Google Drive</button>
+              </>
+            )}
+          </div>
+        )}
+
+        {uploading && (
+          <div className="fa-prog" data-testid="analyzer-progress">
+            <Loader2 className="spin" size={14} /> Importing {progress.done}/{progress.total}…
+            <div className="fa-prog-bar"><div style={{ width: `${progress.total ? (progress.done / progress.total) * 100 : 0}%` }} /></div>
+          </div>
+        )}
+
+        {sets.length > 1 && (
+          <div className="fa-sets">
+            {sets.map((s) => (
+              <button key={s.id} className={s.id === activeId ? "fa-set active" : "fa-set"} onClick={() => setActiveId(s.id)}>
+                <Files size={12} /> {s.title} <span>{s.file_count}</span>
+              </button>
+            ))}
+          </div>
+        )}
+      </section>
+
+      <div className="fa-grid">
+        <section className="fa-files" data-testid="analyzer-file-list">
+          <div className="fa-sub-head"><HardDriveUpload size={14} /> Imported Files <span className="fa-count">{files.length}</span></div>
+          {files.length === 0 ? (
+            <div className="fa-empty"><FolderUp size={24} /><p>No files yet. Add files or a folder to begin.</p></div>
+          ) : (
+            <div className="fa-list">
+              {files.map((f) => {
+                const isImg = (f.content_type || "").startsWith("image/");
+                return (
+                  <div key={f.id} className="fa-row" data-testid={`analyzer-file-${f.id}`}>
+                    <span className="fa-fic">{isImg ? <ImageIcon size={14} /> : <FileText size={14} />}</span>
+                    <span className="fa-fname" title={f.rel_path}>{f.rel_path}</span>
+                    {!f.readable && <span className="fa-bin">binary</span>}
+                    <span className="fa-fsize">{fmtBytes(f.size)}</span>
+                    <button className="fa-ic" onClick={() => download(f.id)} title="Download"><Download size={13} /></button>
+                    <button className="fa-ic danger" data-testid={`analyzer-delete-${f.id}`} onClick={() => remove(f.id)} title="Delete"><Trash2 size={13} /></button>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+
+          <div className="fa-ask">
+            <textarea
+              data-testid="analyzer-question"
+              value={question}
+              onChange={(e) => setQuestion(e.target.value)}
+              placeholder="Optional: ask a specific question about these files (e.g. 'find security risks' or 'summarize the API')"
+              rows={2}
+            />
+            <button className="fa-analyze" data-testid="analyzer-run" onClick={analyze} disabled={analyzing || !files.length}>
+              {analyzing ? <Loader2 className="spin" size={16} /> : <Sparkles size={16} />}
+              {analyzing ? "Analyzing…" : "Analyze with AI"}
+            </button>
+          </div>
+        </section>
+
+        <section className="fa-result" data-testid="analyzer-result">
+          <div className="fa-sub-head"><Sparkles size={14} /> AI Analysis {analysis?.model_label && <span className="fa-model">{analysis.model_label}</span>}</div>
+          {analyzing ? (
+            <div className="fa-skeleton">
+              {[...Array(5)].map((_, i) => <div key={i} className="fa-sk-line" style={{ width: `${90 - i * 9}%` }} />)}
+            </div>
+          ) : analysis ? (
+            <>
+              {analysis.truncated && <div className="fa-trunc">Note: content was truncated to fit the model context window.</div>}
+              {analysis.question && <div className="fa-q">Q: {analysis.question}</div>}
+              <Markdown text={analysis.analysis} />
+            </>
+          ) : (
+            <div className="fa-empty"><Play size={24} /><p>Run an analysis to see per-file notes, cross-file insights, risks and recommended actions.</p></div>
+          )}
+        </section>
+      </div>
+
+      <section className="fa-chat" data-testid="analyzer-chat">
+        <div className="fa-sub-head"><MessagesSquare size={14} /> Follow-up Chat <span className="fa-chat-hint">ask anything about these files</span></div>
+        <div className="fa-chat-log" data-testid="analyzer-chat-log">
+          {chat.length === 0 ? (
+            <div className="fa-chat-empty">Upload files, then ask follow-up questions here. Answers are grounded in your files.</div>
+          ) : (
+            chat.map((m) => (
+              <div key={m.id} className={`fa-msg ${m.role}`} data-testid={`analyzer-chat-msg-${m.role}`}>
+                <span className="fa-msg-who">{m.role === "user" ? "You" : "ACASO"}</span>
+                <div className="fa-msg-body"><Markdown text={m.content} /></div>
+              </div>
+            ))
+          )}
+          {chatSending && <div className="fa-msg assistant"><span className="fa-msg-who">ACASO</span><div className="fa-msg-body"><Loader2 className="spin" size={14} /> thinking...</div></div>}
+        </div>
+        <div className="fa-chat-input">
+          <input
+            data-testid="analyzer-chat-input"
+            value={chatInput}
+            onChange={(e) => setChatInput(e.target.value)}
+            onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendChat(); } }}
+            placeholder="Ask a follow-up about your files..."
+            disabled={chatSending || !files.length}
+          />
+          <button data-testid="analyzer-chat-send" onClick={sendChat} disabled={chatSending || !files.length || !chatInput.trim()}>
+            {chatSending ? <Loader2 className="spin" size={15} /> : <Send size={15} />}
+          </button>
+        </div>
+      </section>
+
+      <AnimatePresence>
+        {driveOpen && (
+          <motion.div className="fa-modal-overlay" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} onClick={() => setDriveOpen(false)}>
+            <motion.div className="fa-modal" data-testid="drive-modal" initial={{ opacity: 0, y: 14 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: 14 }} onClick={(e) => e.stopPropagation()}>
+              <div className="fa-modal-head">
+                <Cloud size={16} /> <span>Google Drive</span>
+                <button className="fa-modal-x" onClick={() => setDriveOpen(false)}><X size={16} /></button>
+              </div>
+              <div className="fa-crumbs">
+                {driveCrumbs.map((c, i) => (
+                  <span key={c.id} className="fa-crumb">
+                    {i > 0 && <ChevronRight size={12} />}
+                    <button onClick={() => gotoCrumb(i)}>{c.name}</button>
+                  </span>
+                ))}
+              </div>
+              <div className="fa-drive-list" data-testid="drive-list">
+                {driveLoading ? (
+                  <div className="fa-empty"><Loader2 className="spin" size={18} /><p>Loading Drive…</p></div>
+                ) : driveItems.length === 0 ? (
+                  <div className="fa-empty"><Folder size={22} /><p>This folder is empty.</p></div>
+                ) : (
+                  driveItems.map((it) => (
+                    <div key={it.id} className={`fa-drive-row ${!it.supported && !it.is_folder ? "unsupported" : ""}`} data-testid={`drive-item-${it.id}`}>
+                      {it.is_folder ? (
+                        <button className="fa-drive-folder" onClick={() => enterFolder(it)}>
+                          <Folder size={15} /> <span>{it.name}</span> <ChevronRight size={14} />
+                        </button>
+                      ) : (
+                        <label className={`fa-drive-file ${driveSel.includes(it.id) ? "sel" : ""}`}>
+                          <input type="checkbox" disabled={!it.supported} checked={driveSel.includes(it.id)} onChange={() => toggleDriveSel(it.id)} />
+                          <FileText size={14} />
+                          <span className="fa-drive-name">{it.name}</span>
+                          {!it.supported && <span className="fa-bin">unsupported</span>}
+                        </label>
+                      )}
+                    </div>
+                  ))
+                )}
+              </div>
+              <div className="fa-modal-foot">
+                <span className="fa-drive-count">{driveSel.length} selected</span>
+                <button className="fa-analyze" data-testid="drive-import" onClick={importDrive} disabled={driveImporting || !driveSel.length}>
+                  {driveImporting ? <Loader2 className="spin" size={15} /> : <Check size={15} />}
+                  {driveImporting ? "Importing…" : "Import to analysis"}
+                </button>
+              </div>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+    </div>
+  );
+}
+
+```
+
+
+### `frontend/src/components/SelfDirective.js`
+```javascript
+import React, { useCallback, useEffect, useState } from "react";
+import axios from "axios";
+import { toast } from "sonner";
+import { motion, AnimatePresence } from "framer-motion";
+import {
+  Wand2, Loader2, ShieldAlert, Lock, FileCode, Check, X, RotateCcw,
+  Search, History, AlertTriangle, GitCommitHorizontal, CheckCircle2, ScrollText
+} from "lucide-react";
+import { API } from "../App";
+
+function DiffView({ diff }) {
+  const lines = (diff || "").split("\n");
+  return (
+    <pre className="sd-diff">
+      {lines.map((ln, i) => {
+        let cls = "sd-dl";
+        if (ln.startsWith("+++") || ln.startsWith("---")) cls = "sd-dl meta";
+        else if (ln.startsWith("@@")) cls = "sd-dl hunk";
+        else if (ln.startsWith("+")) cls = "sd-dl add";
+        else if (ln.startsWith("-")) cls = "sd-dl del";
+        return <div key={i} className={cls}>{ln || " "}</div>;
+      })}
+    </pre>
+  );
+}
+
+export default function SelfDirective() {
+  const [manifest, setManifest] = useState(null);
+  const [filter, setFilter] = useState("");
+  const [selected, setSelected] = useState([]);
+  const [instruction, setInstruction] = useState("");
+  const [proposing, setProposing] = useState(false);
+  const [proposal, setProposal] = useState(null);
+  const [applying, setApplying] = useState(false);
+  const [rolling, setRolling] = useState(false);
+  const [history, setHistory] = useState([]);
+
+  const loadManifest = useCallback(async () => {
+    try { const r = await axios.get(`${API}/self/manifest`); setManifest(r.data); }
+    catch (e) { console.error(e); }
+  }, []);
+  const loadHistory = useCallback(async () => {
+    try { const r = await axios.get(`${API}/self/history`); setHistory(r.data); }
+    catch (e) { console.error(e); }
+  }, []);
+
+  useEffect(() => { loadManifest(); loadHistory(); }, [loadManifest, loadHistory]);
+
+  const toggle = (path) => {
+    setSelected((s) => s.includes(path) ? s.filter((x) => x !== path) : (s.length >= 5 ? (toast.warning("Max 5 files per directive"), s) : [...s, path]));
+  };
+
+  const propose = async () => {
+    if (!instruction.trim()) { toast.error("Describe what you want changed"); return; }
+    if (!selected.length) { toast.error("Select at least one file"); return; }
+    setProposing(true);
+    setProposal(null);
+    try {
+      const r = await axios.post(`${API}/self/propose`, { instruction: instruction.trim(), paths: selected });
+      setProposal(r.data);
+      toast.success("Patch proposal ready — review the diff");
+    } catch (e) {
+      toast.error(e?.response?.data?.detail || "Proposal failed");
+    } finally { setProposing(false); }
+  };
+
+  const apply = async () => {
+    if (!proposal) return;
+    setApplying(true);
+    try {
+      const r = await axios.post(`${API}/self/apply`, { id: proposal.id, approved: true });
+      setProposal((p) => ({ ...p, status: r.data.status }));
+      toast.success("Applied to preview source — hot-reload will pick it up");
+      await loadHistory();
+    } catch (e) {
+      toast.error(e?.response?.data?.detail || "Apply failed");
+    } finally { setApplying(false); }
+  };
+
+  const rollback = async (id) => {
+    setRolling(true);
+    try {
+      await axios.post(`${API}/self/rollback`, { id });
+      if (proposal?.id === id) setProposal((p) => ({ ...p, status: "rolled_back" }));
+      toast.success("Rolled back — original source restored");
+      await loadHistory();
+    } catch (e) {
+      toast.error(e?.response?.data?.detail || "Rollback failed");
+    } finally { setRolling(false); }
+  };
+
+  const files = (manifest?.files || []).filter((f) => f.path.toLowerCase().includes(filter.toLowerCase()));
+
+  return (
+    <div className="sd-wrap" data-testid="self-directive">
+      <section className="sd-console">
+        <div className="sd-head">
+          <Wand2 size={17} /> <span>Self-Directive</span>
+          <em>Instruct ACASO to modify its own source — reviewed, approved, reversible.</em>
+        </div>
+        <div className="sd-warn" data-testid="self-preview-warning">
+          <Lock size={14} />
+          <div>
+            <b>Preview-only & approval-gated.</b> This edits source in the live preview workspace and is <b>disabled after production deployment</b>. Every change is shown as a diff first, applied only on your approval, and can be rolled back.
+          </div>
+        </div>
+      </section>
+
+      <div className="sd-grid">
+        <section className="sd-picker">
+          <div className="sd-sub-head"><FileCode size={14} /> Source Allowlist <span className="sd-count">{selected.length}/5</span></div>
+          <div className="sd-search"><Search size={13} /><input value={filter} onChange={(e) => setFilter(e.target.value)} placeholder="Filter files…" data-testid="self-file-filter" /></div>
+          <div className="sd-files" data-testid="self-file-list">
+            {files.map((f) => (
+              <label key={f.path} className={selected.includes(f.path) ? "sd-file sel" : "sd-file"} data-testid={`self-file-${f.path}`}>
+                <input type="checkbox" checked={selected.includes(f.path)} onChange={() => toggle(f.path)} />
+                <span className="sd-fpath">{f.path}</span>
+                <span className="sd-fsize">{(f.size / 1024).toFixed(1)}k</span>
+              </label>
+            ))}
+            {files.length === 0 && <div className="sd-empty-sm">No files match.</div>}
+          </div>
+          {manifest && (
+            <div className="sd-deny"><ShieldAlert size={12} /> Blocked: {manifest.denylist.slice(0, 6).join(", ")}…</div>
+          )}
+        </section>
+
+        <section className="sd-main">
+          <textarea
+            data-testid="self-instruction"
+            className="sd-instruction"
+            value={instruction}
+            onChange={(e) => setInstruction(e.target.value)}
+            placeholder="Describe the change in plain English. e.g. 'On the Bug Bounty tab, rename the Run Engagement button to Launch Engagement' or 'Add a subtitle under the ACASO title in the header'"
+            rows={3}
+          />
+          <button className="sd-propose" data-testid="self-propose" onClick={propose} disabled={proposing}>
+            {proposing ? <Loader2 className="spin" size={16} /> : <Wand2 size={16} />}
+            {proposing ? "Generating patch…" : "Generate Patch Proposal"}
+          </button>
+
+          {proposing && (
+            <div className="sd-skeleton">{[...Array(6)].map((_, i) => <div key={i} className="sd-sk" style={{ width: `${88 - i * 7}%` }} />)}</div>
+          )}
+
+          <AnimatePresence>
+            {proposal && (
+              <motion.div className="sd-proposal" data-testid="self-proposal" initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }}>
+                <div className="sd-prop-head">
+                  <GitCommitHorizontal size={15} /> Patch Proposal
+                  <span className={`sd-status s-${proposal.status}`}>{proposal.status}</span>
+                  <span className="sd-model">{proposal.model_label}</span>
+                </div>
+                {proposal.explanation && <p className="sd-expl">{proposal.explanation}</p>}
+                {proposal.test_plan && <div className="sd-testplan"><ScrollText size={12} /> <span><b>Test plan:</b> {proposal.test_plan}</span></div>}
+                {proposal.diffs?.map((d) => (
+                  <div key={d.path} className="sd-diff-block">
+                    <div className="sd-diff-head"><FileCode size={12} /> {d.path} <span className="sd-add">+{d.added}</span> <span className="sd-del">-{d.removed}</span></div>
+                    <DiffView diff={d.diff} />
+                  </div>
+                ))}
+
+                <div className="sd-prop-actions">
+                  {proposal.status === "proposed" && (
+                    <button className="sd-apply" data-testid="self-apply" onClick={apply} disabled={applying}>
+                      {applying ? <Loader2 className="spin" size={15} /> : <Check size={15} />} Approve & Apply
+                    </button>
+                  )}
+                  {proposal.status === "applied" && (
+                    <>
+                      <span className="sd-applied"><CheckCircle2 size={15} /> Applied to preview</span>
+                      <button className="sd-rollback" data-testid="self-rollback" onClick={() => rollback(proposal.id)} disabled={rolling}>
+                        {rolling ? <Loader2 className="spin" size={15} /> : <RotateCcw size={15} />} Rollback
+                      </button>
+                    </>
+                  )}
+                  {proposal.status === "rolled_back" && <span className="sd-rolled"><RotateCcw size={15} /> Rolled back</span>}
+                  <button className="sd-discard" onClick={() => setProposal(null)}><X size={14} /> Dismiss</button>
+                </div>
+              </motion.div>
+            )}
+          </AnimatePresence>
+
+          {history.length > 0 && (
+            <div className="sd-history" data-testid="self-history">
+              <div className="sd-sub-head"><History size={14} /> Directive History</div>
+              {history.map((h) => (
+                <div key={h.id} className="sd-hrow">
+                  <span className={`sd-status s-${h.status}`}>{h.status}</span>
+                  <span className="sd-hinstr" title={h.instruction}>{h.instruction}</span>
+                  <span className="sd-hpaths">{(h.paths || []).join(", ")}</span>
+                  {h.status === "applied" && (
+                    <button className="sd-hroll" onClick={() => rollback(h.id)} disabled={rolling} title="Rollback"><RotateCcw size={12} /></button>
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
+        </section>
+      </div>
+    </div>
+  );
+}
+
+```

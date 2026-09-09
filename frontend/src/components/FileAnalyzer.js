@@ -4,7 +4,8 @@ import { toast } from "sonner";
 import { motion, AnimatePresence } from "framer-motion";
 import {
   FolderUp, FilePlus, Loader2, Sparkles, Trash2, Download, FileText,
-  Image as ImageIcon, Play, X, Plus, HardDriveUpload, Files, Boxes
+  Image as ImageIcon, Play, X, Plus, HardDriveUpload, Files, Boxes,
+  MessagesSquare, Send, Cloud, FolderOpen, ChevronRight, Check, Unplug, Folder
 } from "lucide-react";
 import { API } from "../App";
 
@@ -17,6 +18,19 @@ const fmtBytes = (n) => {
 
 function Markdown({ text }) {
   if (!text) return null;
+  const inline = (t) => {
+    const nodes = [];
+    const re = /(\*\*([^*]+)\*\*|`([^`]+)`)/g;
+    let last = 0, m, i = 0;
+    while ((m = re.exec(t)) !== null) {
+      if (m.index > last) nodes.push(t.slice(last, m.index));
+      if (m[2] !== undefined) nodes.push(<strong key={`b${i++}`}>{m[2]}</strong>);
+      else if (m[3] !== undefined) nodes.push(<code key={`c${i++}`}>{m[3]}</code>);
+      last = m.index + m[0].length;
+    }
+    if (last < t.length) nodes.push(t.slice(last));
+    return nodes;
+  };
   const blocks = text.split(/```/);
   return (
     <div className="fa-md">
@@ -24,11 +38,13 @@ function Markdown({ text }) {
         if (bi % 2 === 1) return <pre key={bi} className="fa-code">{blk.replace(/^\w+\n/, "")}</pre>;
         return blk.split("\n").map((ln, i) => {
           const t = ln.trim();
-          if (!t) return <div key={`${bi}-${i}`} className="fa-gap" />;
-          if (t.startsWith("## ")) return <h4 key={`${bi}-${i}`}>{t.replace(/^##\s*/, "")}</h4>;
-          if (t.startsWith("# ")) return <h3 key={`${bi}-${i}`}>{t.replace(/^#\s*/, "")}</h3>;
-          if (t.startsWith("- ") || t.startsWith("* ")) return <li key={`${bi}-${i}`}>{t.replace(/^[-*]\s*/, "")}</li>;
-          return <p key={`${bi}-${i}`}>{t.replace(/`([^`]+)`/g, "$1")}</p>;
+          const k = `${bi}-${i}`;
+          if (!t) return <div key={k} className="fa-gap" />;
+          if (t.startsWith("### ")) return <h5 key={k}>{inline(t.replace(/^###\s*/, ""))}</h5>;
+          if (t.startsWith("## ")) return <h4 key={k}>{inline(t.replace(/^##\s*/, ""))}</h4>;
+          if (t.startsWith("# ")) return <h3 key={k}>{inline(t.replace(/^#\s*/, ""))}</h3>;
+          if (t.startsWith("- ") || t.startsWith("* ")) return <li key={k}>{inline(t.replace(/^[-*]\s*/, ""))}</li>;
+          return <p key={k}>{inline(t)}</p>;
         });
       })}
     </div>
@@ -44,6 +60,17 @@ export default function FileAnalyzer() {
   const [progress, setProgress] = useState({ done: 0, total: 0 });
   const [analyzing, setAnalyzing] = useState(false);
   const [analysis, setAnalysis] = useState(null);
+  const [chat, setChat] = useState([]);
+  const [chatInput, setChatInput] = useState("");
+  const [chatSending, setChatSending] = useState(false);
+  // Google Drive
+  const [drive, setDrive] = useState({ configured: false, connected: false, email: null });
+  const [driveOpen, setDriveOpen] = useState(false);
+  const [driveItems, setDriveItems] = useState([]);
+  const [driveCrumbs, setDriveCrumbs] = useState([{ id: "root", name: "My Drive" }]);
+  const [driveSel, setDriveSel] = useState([]);
+  const [driveLoading, setDriveLoading] = useState(false);
+  const [driveImporting, setDriveImporting] = useState(false);
   const filesInput = useRef(null);
   const folderInput = useRef(null);
 
@@ -66,6 +93,8 @@ export default function FileAnalyzer() {
       ]);
       setFiles(f.data);
       setAnalysis(a.data?.[0] || null);
+      try { const c = await axios.get(`${API}/filesets/${id}/chat`); setChat(c.data || []); }
+      catch { setChat([]); }
     } catch (e) { console.error(e); }
   }, []);
 
@@ -84,6 +113,7 @@ export default function FileAnalyzer() {
     setActiveId(r.data.id);
     setAnalysis(null);
     setFiles([]);
+    setChat([]);
     await loadSets();
     toast.success("New analysis set created");
   };
@@ -133,6 +163,100 @@ export default function FileAnalyzer() {
     } finally { setAnalyzing(false); }
   };
 
+  const sendChat = async () => {
+    const msg = chatInput.trim();
+    if (!msg) return;
+    if (!activeId || !files.length) { toast.error("Upload files first"); return; }
+    setChatInput("");
+    const now = new Date().toISOString();
+    setChat((c) => [...c, { id: `tmp-${now}`, role: "user", content: msg, created_at: now }]);
+    setChatSending(true);
+    try {
+      const r = await axios.post(`${API}/filesets/${activeId}/chat`, { message: msg });
+      setChat((c) => [...c, r.data]);
+    } catch (e) {
+      toast.error(e?.response?.data?.detail || "Chat failed");
+    } finally { setChatSending(false); }
+  };
+
+  const loadDriveStatus = useCallback(async () => {
+    try { const r = await axios.get(`${API}/drive/status`); setDrive(r.data); }
+    catch (e) { console.error(e); }
+  }, []);
+
+  useEffect(() => {
+    loadDriveStatus();
+    const params = new URLSearchParams(window.location.search);
+    if (params.get("drive_connected")) {
+      toast.success("Google Drive connected");
+      loadDriveStatus();
+      window.history.replaceState({}, "", window.location.pathname);
+    } else if (params.get("drive_error")) {
+      toast.error(`Drive connection failed: ${params.get("drive_error")}`);
+      window.history.replaceState({}, "", window.location.pathname);
+    }
+  }, [loadDriveStatus]);
+
+  const connectDrive = async () => {
+    try {
+      const r = await axios.get(`${API}/drive/connect`);
+      window.location.href = r.data.authorization_url;
+    } catch (e) { toast.error(e?.response?.data?.detail || "Cannot start Drive connect"); }
+  };
+
+  const disconnectDrive = async () => {
+    try { await axios.post(`${API}/drive/disconnect`); await loadDriveStatus(); toast("Google Drive disconnected"); }
+    catch { toast.error("Disconnect failed"); }
+  };
+
+  const browseFolder = async (folderId, crumbs) => {
+    setDriveLoading(true);
+    try {
+      const r = await axios.get(`${API}/drive/list?folder_id=${encodeURIComponent(folderId)}`);
+      setDriveItems(r.data.items || []);
+      if (crumbs) setDriveCrumbs(crumbs);
+    } catch (e) {
+      toast.error(e?.response?.data?.detail || "Failed to list Drive");
+    } finally { setDriveLoading(false); }
+  };
+
+  const openDrive = async () => {
+    setDriveOpen(true);
+    setDriveSel([]);
+    setDriveCrumbs([{ id: "root", name: "My Drive" }]);
+    await browseFolder("root", [{ id: "root", name: "My Drive" }]);
+  };
+
+  const enterFolder = (item) => {
+    const crumbs = [...driveCrumbs, { id: item.id, name: item.name }];
+    browseFolder(item.id, crumbs);
+  };
+
+  const gotoCrumb = (idx) => {
+    const crumbs = driveCrumbs.slice(0, idx + 1);
+    browseFolder(crumbs[crumbs.length - 1].id, crumbs);
+  };
+
+  const toggleDriveSel = (id) => setDriveSel((s) => s.includes(id) ? s.filter((x) => x !== id) : [...s, id]);
+
+  const importDrive = async () => {
+    if (!driveSel.length) { toast.error("Select at least one file"); return; }
+    setDriveImporting(true);
+    try {
+      const r = await axios.post(`${API}/drive/import`, { file_ids: driveSel, fileset_id: activeId });
+      setActiveId(r.data.fileset_id);
+      await loadSets();
+      await loadFiles(r.data.fileset_id);
+      const imp = r.data.imported?.length || 0;
+      const skp = r.data.skipped?.length || 0;
+      toast.success(`Imported ${imp} file${imp !== 1 ? "s" : ""} from Drive${skp ? ` · ${skp} skipped` : ""}`);
+      setDriveOpen(false);
+      setDriveSel([]);
+    } catch (e) {
+      toast.error(e?.response?.data?.detail || "Drive import failed");
+    } finally { setDriveImporting(false); }
+  };
+
   return (
     <div className="fa-wrap" data-testid="file-analyzer">
       <section className="fa-console">
@@ -161,6 +285,24 @@ export default function FileAnalyzer() {
             data-testid="analyzer-folder-input"
             onChange={(e) => { handlePicked(e.target.files); e.target.value = ""; }} />
         </div>
+
+        {drive.configured && (
+          <div className="fa-drive" data-testid="analyzer-drive-bar">
+            <Cloud size={15} />
+            {drive.connected ? (
+              <>
+                <span className="fa-drive-on">Google Drive connected{drive.email ? ` · ${drive.email}` : ""}</span>
+                <button className="fa-drive-btn" data-testid="drive-browse" onClick={openDrive}><FolderOpen size={14} /> Browse Drive</button>
+                <button className="fa-drive-btn ghost" data-testid="drive-disconnect" onClick={disconnectDrive}><Unplug size={14} /> Disconnect</button>
+              </>
+            ) : (
+              <>
+                <span className="fa-drive-off">Import files straight from your Google Drive</span>
+                <button className="fa-drive-btn" data-testid="drive-connect" onClick={connectDrive}><Cloud size={14} /> Connect Google Drive</button>
+              </>
+            )}
+          </div>
+        )}
 
         {uploading && (
           <div className="fa-prog" data-testid="analyzer-progress">
@@ -235,6 +377,88 @@ export default function FileAnalyzer() {
           )}
         </section>
       </div>
+
+      <section className="fa-chat" data-testid="analyzer-chat">
+        <div className="fa-sub-head"><MessagesSquare size={14} /> Follow-up Chat <span className="fa-chat-hint">ask anything about these files</span></div>
+        <div className="fa-chat-log" data-testid="analyzer-chat-log">
+          {chat.length === 0 ? (
+            <div className="fa-chat-empty">Upload files, then ask follow-up questions here. Answers are grounded in your files.</div>
+          ) : (
+            chat.map((m) => (
+              <div key={m.id} className={`fa-msg ${m.role}`} data-testid={`analyzer-chat-msg-${m.role}`}>
+                <span className="fa-msg-who">{m.role === "user" ? "You" : "ACASO"}</span>
+                <div className="fa-msg-body"><Markdown text={m.content} /></div>
+              </div>
+            ))
+          )}
+          {chatSending && <div className="fa-msg assistant"><span className="fa-msg-who">ACASO</span><div className="fa-msg-body"><Loader2 className="spin" size={14} /> thinking...</div></div>}
+        </div>
+        <div className="fa-chat-input">
+          <input
+            data-testid="analyzer-chat-input"
+            value={chatInput}
+            onChange={(e) => setChatInput(e.target.value)}
+            onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendChat(); } }}
+            placeholder="Ask a follow-up about your files..."
+            disabled={chatSending || !files.length}
+          />
+          <button data-testid="analyzer-chat-send" onClick={sendChat} disabled={chatSending || !files.length || !chatInput.trim()}>
+            {chatSending ? <Loader2 className="spin" size={15} /> : <Send size={15} />}
+          </button>
+        </div>
+      </section>
+
+      <AnimatePresence>
+        {driveOpen && (
+          <motion.div className="fa-modal-overlay" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} onClick={() => setDriveOpen(false)}>
+            <motion.div className="fa-modal" data-testid="drive-modal" initial={{ opacity: 0, y: 14 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: 14 }} onClick={(e) => e.stopPropagation()}>
+              <div className="fa-modal-head">
+                <Cloud size={16} /> <span>Google Drive</span>
+                <button className="fa-modal-x" onClick={() => setDriveOpen(false)}><X size={16} /></button>
+              </div>
+              <div className="fa-crumbs">
+                {driveCrumbs.map((c, i) => (
+                  <span key={c.id} className="fa-crumb">
+                    {i > 0 && <ChevronRight size={12} />}
+                    <button onClick={() => gotoCrumb(i)}>{c.name}</button>
+                  </span>
+                ))}
+              </div>
+              <div className="fa-drive-list" data-testid="drive-list">
+                {driveLoading ? (
+                  <div className="fa-empty"><Loader2 className="spin" size={18} /><p>Loading Drive…</p></div>
+                ) : driveItems.length === 0 ? (
+                  <div className="fa-empty"><Folder size={22} /><p>This folder is empty.</p></div>
+                ) : (
+                  driveItems.map((it) => (
+                    <div key={it.id} className={`fa-drive-row ${!it.supported && !it.is_folder ? "unsupported" : ""}`} data-testid={`drive-item-${it.id}`}>
+                      {it.is_folder ? (
+                        <button className="fa-drive-folder" onClick={() => enterFolder(it)}>
+                          <Folder size={15} /> <span>{it.name}</span> <ChevronRight size={14} />
+                        </button>
+                      ) : (
+                        <label className={`fa-drive-file ${driveSel.includes(it.id) ? "sel" : ""}`}>
+                          <input type="checkbox" disabled={!it.supported} checked={driveSel.includes(it.id)} onChange={() => toggleDriveSel(it.id)} />
+                          <FileText size={14} />
+                          <span className="fa-drive-name">{it.name}</span>
+                          {!it.supported && <span className="fa-bin">unsupported</span>}
+                        </label>
+                      )}
+                    </div>
+                  ))
+                )}
+              </div>
+              <div className="fa-modal-foot">
+                <span className="fa-drive-count">{driveSel.length} selected</span>
+                <button className="fa-analyze" data-testid="drive-import" onClick={importDrive} disabled={driveImporting || !driveSel.length}>
+                  {driveImporting ? <Loader2 className="spin" size={15} /> : <Check size={15} />}
+                  {driveImporting ? "Importing…" : "Import to analysis"}
+                </button>
+              </div>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
     </div>
   );
 }

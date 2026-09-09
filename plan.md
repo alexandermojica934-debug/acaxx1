@@ -30,7 +30,16 @@ Shipped & verified:
 
 ---
 
-## Phase: Files + Self-Directive (ARCHIVED SPEC)
+## Phase: Follow-ups (Status: COMPLETED except Google Drive)
+
+- **Self-Directive on Server (DONE, verified):** backend/server.py is in the allowlist; apply now PRE-VALIDATES every Python change (py_compile + real import smoke-test in a sibling temp file using sys.executable) BEFORE touching the live file, so a broken server.py can never crash the app. 3/3 safety tests passed (bad syntax -> 422, import error -> 422, live file untouched; valid change applies + rolls back).
+- **Analyzer Chat (DONE, verified):** POST/GET /api/filesets/{fsid}/chat; grounded in uploaded files, cites filenames, persists to Mongo file_chats. Frontend chat panel in File Analyzer verified by testing agent (user + assistant messages render).
+- **Refresh Handoff (DONE):** reproducible generator at /app/handoff/generate_handoff.py rebuilds ACASO_COMPLETE_HANDOFF.md (now 231KB, includes FileAnalyzer/SelfDirective + new endpoints), NEXT_AGENT_BRIEF.md, VERIFIED_STATE.json, src mirror (secrets stripped) and the zip; mirrored to /app/frontend/public (all HTTP 200).
+- **Google Drive (BUILT — pending Web-app creds):** Full backend OAuth (connect/callback/list/import/disconnect, single-owner, token refresh, google-docs export) + frontend (Connect button, folder browser modal with breadcrumbs, multi-select import into an analysis set). Uses google-api-python-client/google-auth-oauthlib. Creds stored in backend/.env. NOTE: user-provided client was a Desktop/"installed" type; Google requires a *Web application* OAuth client for the hosted https redirect. Connect URL generation + status verified; full login blocked until a Web-app Client ID/Secret is supplied. Scope chosen: full drive.
+- **Analyzer Chat & Self-Directive server safety:** completed & verified (see above).
+- **Handoff:** regenerated (256KB) including Drive endpoints/components; reproducible via handoff/generate_handoff.py.
+
+
 
 Deliver real, permissioned file analysis and a safe, approval-gated "work on itself" workflow under a **~100 credit** budget.
 
