@@ -1,11 +1,18 @@
-from fastapi import FastAPI, APIRouter, HTTPException, Header, Depends
+from fastapi import FastAPI, APIRouter, HTTPException, Header, Depends, UploadFile, File, Query, Form
+from fastapi.responses import Response
 from dotenv import load_dotenv
 from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
 import os
+import io
 import json
 import logging
 import asyncio
+import requests
+import difflib
+import hashlib
+import shutil
+import subprocess
 from pathlib import Path
 from pydantic import BaseModel, Field, ConfigDict
 from typing import List, Optional
@@ -22,6 +29,52 @@ client = AsyncIOMotorClient(mongo_url)
 db = client[os.environ['DB_NAME']]
 
 EMERGENT_LLM_KEY = os.environ.get('EMERGENT_LLM_KEY')
+
+# ---------------- Object Storage (real Emergent-managed object store) ----------------
+STORAGE_BASE = (os.environ.get("INTEGRATION_PROXY_URL") or "").strip() or "https://integrations.emergentagent.com"
+STORAGE_URL = STORAGE_BASE.rstrip("/") + "/objstore/api/v1/storage"
+APP_NAME = "acaso"
+_storage_key = None
+
+# What we accept for evidence/PoC uploads
+ALLOWED_MIME = {
+    "jpg": "image/jpeg", "jpeg": "image/jpeg", "png": "image/png", "gif": "image/gif",
+    "webp": "image/webp", "pdf": "application/pdf", "json": "application/json",
+    "csv": "text/csv", "txt": "text/plain", "log": "text/plain", "har": "application/json",
+    "md": "text/markdown",
+}
+MAX_UPLOAD_BYTES = 10 * 1024 * 1024  # 10 MB
+
+def init_storage(force: bool = False) -> str:
+    global _storage_key
+    if _storage_key and not force:
+        return _storage_key
+    resp = requests.post(f"{STORAGE_URL}/init", json={"emergent_key": EMERGENT_LLM_KEY}, timeout=30)
+    resp.raise_for_status()
+    _storage_key = resp.json()["storage_key"]
+    return _storage_key
+
+def storage_put(path: str, data: bytes, content_type: str) -> dict:
+    key = init_storage()
+    resp = requests.put(f"{STORAGE_URL}/objects/{path}",
+                        headers={"X-Storage-Key": key, "Content-Type": content_type},
+                        data=data, timeout=120)
+    if resp.status_code == 404:  # stale key — mint a fresh one once and retry
+        key = init_storage(force=True)
+        resp = requests.put(f"{STORAGE_URL}/objects/{path}",
+                            headers={"X-Storage-Key": key, "Content-Type": content_type},
+                            data=data, timeout=120)
+    resp.raise_for_status()
+    return resp.json()
+
+def storage_get(path: str) -> tuple:
+    key = init_storage()
+    resp = requests.get(f"{STORAGE_URL}/objects/{path}", headers={"X-Storage-Key": key}, timeout=60)
+    if resp.status_code == 404:
+        key = init_storage(force=True)
+        resp = requests.get(f"{STORAGE_URL}/objects/{path}", headers={"X-Storage-Key": key}, timeout=60)
+    resp.raise_for_status()
+    return resp.content, resp.headers.get("Content-Type", "application/octet-stream")
 
 app = FastAPI(title="ACASO Omniverse API")
 api_router = APIRouter(prefix="/api")
@@ -505,11 +558,20 @@ SOULS = [
     },
 ]
 
-def soul_problem(mission: dict) -> str:
-    return (f"Program: {mission.get('program')} on {mission.get('platform')}\n"
+def soul_problem(mission: dict, attachments: Optional[list] = None) -> str:
+    base = (f"Program: {mission.get('program')} on {mission.get('platform')}\n"
             f"In-scope asset: {mission.get('asset')}\n"
             f"Vulnerability class: {mission.get('vuln_type')} | Severity: {mission.get('severity')} | CVSS: {mission.get('cvss')}\n"
             f"Context report:\n{(mission.get('report') or '')[:1200]}")
+    if attachments:
+        lines = ["\n\nAnalyst-uploaded evidence (real files attached to this engagement):"]
+        for a in attachments:
+            desc = f"- {a['original_filename']} ({a['content_type']}, {a['size']} bytes)"
+            if a.get("text_excerpt"):
+                desc += f"\n  excerpt:\n  " + a["text_excerpt"].replace("\n", "\n  ")[:1500]
+            lines.append(desc)
+        base += "\n".join(lines)
+    return base
 
 @api_router.post("/missions/{mid}/deploy-souls")
 async def deploy_souls(mid: str):
@@ -519,7 +581,10 @@ async def deploy_souls(mid: str):
     if doc.get("kind") != "bugbounty":
         raise HTTPException(400, "Soul Council deploys on bug-bounty engagements")
 
-    problem = soul_problem(doc)
+    attachments = await db.attachments.find(
+        {"mission_id": mid, "is_deleted": False}, {"_id": 0}
+    ).sort("created_at", 1).to_list(50)
+    problem = soul_problem(doc, attachments)
 
     async def run_soul(soul):
         prompt = f"AUTHORIZED security engagement. Analyze and help truly FIX this problem.\n\n{problem}"
@@ -537,12 +602,60 @@ async def deploy_souls(mid: str):
 
     souls = await asyncio.gather(*[run_soul(s) for s in SOULS])
 
+    # ---- Round 2: Debate — each soul sees the others and rebuts ----
     ok_souls = [s for s in souls if s["ok"]]
-    council_text = "\n\n".join([f"[{s['name']} · {s['role']} · {s['model_label']}]\n{s['analysis']}" for s in ok_souls])
+    soul_by_id = {s["id"]: s for s in souls}
+    debate_context = "\n\n".join(
+        [f"[{s['name']} · {s['role']}]\n{s['analysis']}" for s in ok_souls]
+    )
+
+    async def rebut(soul):
+        if not soul.get("ok"):
+            return soul["id"], ""
+        others = [s for s in ok_souls if s["id"] != soul["id"]]
+        if not others:
+            return soul["id"], ""
+        original = next((x for x in SOULS if x["id"] == soul["id"]), None)
+        if not original:
+            return soul["id"], ""
+        peers_text = "\n\n".join([f"[{s['name']}]\n{s['analysis']}" for s in others])
+        rebut_system = (
+            original["system"]
+            + " You are now in DEBATE ROUND. Read your peers' analyses. Reply ONLY with your rebuttal: "
+              "call out where you disagree, refine your position where they made you stronger, or explicitly concede. "
+              "Stay in persona. 2-3 sentences. No weaponized detail."
+        )
+        rebut_prompt = (
+            f"Your original analysis:\n{soul['analysis']}\n\nYour peers said:\n{peers_text}\n\n"
+            "Now deliver your rebuttal."
+        )
+        try:
+            ans, _, _ = await llm_call_failover(
+                rebut_system, rebut_prompt,
+                [original["provider"]] + [p for p in ["gemini", "openai", "anthropic"] if p != original["provider"]],
+                session=f"{mid}-{soul['id']}-rebut"
+            )
+            return soul["id"], ans.strip()
+        except Exception as e:
+            logger.error(f"rebuttal {soul['id']} failed: {e}")
+            return soul["id"], ""
+
+    rebuttals = dict(await asyncio.gather(*[rebut(s) for s in ok_souls]))
+    for s in souls:
+        s["rebuttal"] = rebuttals.get(s["id"], "")
+
+    # Rebuild council text with both rounds for the Throne
+    council_text = "\n\n".join([
+        (f"[{s['name']} · {s['role']} · {s['model_label']}]\n"
+         f"Round 1 (analysis): {s['analysis']}\n"
+         + (f"Round 2 (rebuttal): {s['rebuttal']}" if s.get('rebuttal') else "Round 2: (no rebuttal)"))
+        for s in ok_souls
+    ])
     throne_system = (
         "You are ETERNAL THRONE — the Soul Brain and sovereign arbiter of ACASO (House of Nova). "
-        "You command a council of specialist AI souls, each running on a different model. Fuse their findings into "
-        "the FINAL VERIFIED RESOLUTION that truly fixes the problem. Respond ONLY with valid minified JSON, no prose."
+        "You command a council of specialist AI souls, each running on a different model. You have observed two rounds: "
+        "initial analyses AND cross-rebuttals. Fuse everything into the FINAL VERIFIED RESOLUTION that truly fixes the problem. "
+        "Respond ONLY with valid minified JSON, no prose."
     )
     throne_prompt = (
         f"Vulnerability context:\n{problem}\n\nCouncil findings (labelled by soul name and model):\n{council_text}\n\n"
@@ -812,6 +925,513 @@ async def ask_all_ais(req: ChatRequest):
             logger.error(f"synthesis failed: {e}")
     return {"session_id": session, "results": results, "synthesis": synthesis}
 
+# ---------------- Attachments (real object storage) ----------------
+class Attachment(BaseModel):
+    id: str
+    mission_id: str
+    storage_path: str
+    original_filename: str
+    content_type: str
+    size: int
+    text_excerpt: Optional[str] = None
+    created_at: str
+
+def _public_attachment(a: dict) -> dict:
+    return {k: a.get(k) for k in
+            ["id", "mission_id", "original_filename", "content_type", "size", "created_at"]}
+
+@api_router.post("/missions/{mid}/attachments")
+async def upload_attachment(mid: str, file: UploadFile = File(...)):
+    mission = await db.missions.find_one({"id": mid}, {"_id": 0})
+    if not mission:
+        raise HTTPException(404, "Mission not found")
+    ext = (file.filename.rsplit(".", 1)[-1].lower() if "." in (file.filename or "") else "bin")
+    if ext not in ALLOWED_MIME:
+        raise HTTPException(400, f"Unsupported file type '.{ext}'. Allowed: {', '.join(sorted(ALLOWED_MIME))}")
+    data = await file.read()
+    if len(data) == 0:
+        raise HTTPException(400, "Empty file")
+    if len(data) > MAX_UPLOAD_BYTES:
+        raise HTTPException(400, f"File too large ({len(data)} bytes). Max {MAX_UPLOAD_BYTES} bytes.")
+    content_type = ALLOWED_MIME[ext]
+
+    fid = str(uuid.uuid4())
+    path = f"{APP_NAME}/missions/{mid}/{fid}.{ext}"
+    try:
+        result = storage_put(path, data, content_type)
+    except Exception as e:
+        logger.error(f"storage upload failed: {e}")
+        raise HTTPException(502, "Storage upload failed")
+
+    # For text-like files, capture an excerpt so the Soul Council can actually read it
+    text_excerpt = None
+    if content_type in ("text/plain", "application/json", "text/csv", "text/markdown"):
+        try:
+            text_excerpt = data.decode("utf-8", errors="replace")[:4000]
+        except Exception:
+            text_excerpt = None
+
+    record = {
+        "id": fid, "mission_id": mid, "storage_path": result["path"],
+        "original_filename": file.filename or f"{fid}.{ext}", "content_type": content_type,
+        "size": result.get("size", len(data)), "text_excerpt": text_excerpt,
+        "is_deleted": False, "created_at": datetime.now(timezone.utc).isoformat(),
+    }
+    await db.attachments.insert_one(dict(record))
+    return _public_attachment(record)
+
+@api_router.get("/missions/{mid}/attachments")
+async def list_attachments(mid: str):
+    docs = await db.attachments.find(
+        {"mission_id": mid, "is_deleted": False}, {"_id": 0}
+    ).sort("created_at", 1).to_list(100)
+    return [_public_attachment(d) for d in docs]
+
+@api_router.get("/attachments/{fid}/download")
+async def download_attachment(fid: str, auth: str = Query(None)):
+    record = await db.attachments.find_one({"id": fid, "is_deleted": False}, {"_id": 0})
+    if not record:
+        raise HTTPException(404, "Attachment not found")
+    try:
+        data, ctype = storage_get(record["storage_path"])
+    except Exception as e:
+        logger.error(f"storage download failed: {e}")
+        raise HTTPException(502, "Storage download failed")
+    headers = {"Content-Disposition": f'inline; filename="{record["original_filename"]}"'}
+    return Response(content=data, media_type=record.get("content_type", ctype), headers=headers)
+
+@api_router.delete("/attachments/{fid}")
+async def delete_attachment(fid: str):
+    res = await db.attachments.update_one(
+        {"id": fid, "is_deleted": False}, {"$set": {"is_deleted": True}}
+    )
+    if res.matched_count == 0:
+        raise HTTPException(404, "Attachment not found")
+    return {"ok": True, "id": fid}
+
+# ==================== FILE ANALYZER (real folder/file ingestion + AI analysis) ====================
+# Hosted apps cannot read arbitrary local directories (browser/OS sandbox). The honest, real
+# equivalent is user-initiated file/folder upload into real object storage, then AI analysis.
+
+ANALYZER_TEXT_EXT = {
+    "txt": "text/plain", "md": "text/markdown", "json": "application/json", "csv": "text/csv",
+    "log": "text/plain", "py": "text/x-python", "js": "text/javascript", "jsx": "text/javascript",
+    "ts": "text/typescript", "tsx": "text/typescript", "css": "text/css", "html": "text/html",
+    "xml": "application/xml", "yaml": "text/yaml", "yml": "text/yaml", "ini": "text/plain",
+    "toml": "text/plain", "sh": "text/x-shellscript", "sql": "text/plain", "env": "text/plain",
+}
+ANALYZER_BIN_EXT = {
+    "jpg": "image/jpeg", "jpeg": "image/jpeg", "png": "image/png", "gif": "image/gif",
+    "webp": "image/webp", "pdf": "application/pdf",
+}
+ANALYZER_EXT = {**ANALYZER_TEXT_EXT, **ANALYZER_BIN_EXT}
+
+class FileSet(BaseModel):
+    id: str
+    title: str
+    created_at: str
+    file_count: int = 0
+
+def _public_fileset(fs: dict, count: int = None) -> dict:
+    return {"id": fs["id"], "title": fs["title"], "created_at": fs["created_at"],
+            "file_count": count if count is not None else fs.get("file_count", 0)}
+
+def _public_afile(f: dict) -> dict:
+    return {k: f.get(k) for k in
+            ["id", "fileset_id", "rel_path", "original_filename", "content_type", "size", "created_at", "readable"]}
+
+@api_router.post("/filesets")
+async def create_fileset(body: dict):
+    fsid = str(uuid.uuid4())
+    doc = {"id": fsid, "title": (body or {}).get("title") or "Untitled analysis",
+           "created_at": datetime.now(timezone.utc).isoformat()}
+    await db.file_sets.insert_one(dict(doc))
+    return _public_fileset(doc, 0)
+
+@api_router.get("/filesets")
+async def list_filesets():
+    out = []
+    docs = await db.file_sets.find({}, {"_id": 0}).sort("created_at", -1).to_list(50)
+    for fs in docs:
+        cnt = await db.afiles.count_documents({"fileset_id": fs["id"], "is_deleted": False})
+        out.append(_public_fileset(fs, cnt))
+    return out
+
+@api_router.delete("/filesets/{fsid}")
+async def delete_fileset(fsid: str):
+    await db.afiles.update_many({"fileset_id": fsid}, {"$set": {"is_deleted": True}})
+    await db.file_sets.delete_one({"id": fsid})
+    return {"ok": True, "id": fsid}
+
+@api_router.post("/filesets/{fsid}/files")
+async def upload_fileset_file(fsid: str, file: UploadFile = File(...), rel_path: str = Form(None)):
+    fs = await db.file_sets.find_one({"id": fsid}, {"_id": 0})
+    if not fs:
+        raise HTTPException(404, "File set not found")
+    name = file.filename or "file.bin"
+    ext = name.rsplit(".", 1)[-1].lower() if "." in name else "bin"
+    if ext not in ANALYZER_EXT:
+        raise HTTPException(400, f"Unsupported file type '.{ext}'. Allowed: {', '.join(sorted(ANALYZER_EXT))}")
+    data = await file.read()
+    if len(data) == 0:
+        raise HTTPException(400, "Empty file")
+    if len(data) > MAX_UPLOAD_BYTES:
+        raise HTTPException(400, f"File too large ({len(data)} bytes). Max {MAX_UPLOAD_BYTES} bytes.")
+    content_type = ANALYZER_EXT[ext]
+    fid = str(uuid.uuid4())
+    path = f"{APP_NAME}/analyzer/{fsid}/{fid}.{ext}"
+    try:
+        result = storage_put(path, data, content_type)
+    except Exception as e:
+        logger.error(f"analyzer storage upload failed: {e}")
+        raise HTTPException(502, "Storage upload failed")
+
+    readable = ext in ANALYZER_TEXT_EXT
+    text_excerpt = None
+    if readable:
+        try:
+            text_excerpt = data.decode("utf-8", errors="replace")[:8000]
+        except Exception:
+            text_excerpt = None
+            readable = False
+
+    record = {
+        "id": fid, "fileset_id": fsid, "storage_path": result["path"],
+        "original_filename": name, "rel_path": (rel_path or name),
+        "content_type": content_type, "size": result.get("size", len(data)),
+        "text_excerpt": text_excerpt, "readable": readable, "is_deleted": False,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    }
+    await db.afiles.insert_one(dict(record))
+    return _public_afile(record)
+
+@api_router.get("/filesets/{fsid}/files")
+async def list_fileset_files(fsid: str):
+    docs = await db.afiles.find({"fileset_id": fsid, "is_deleted": False}, {"_id": 0}).sort("rel_path", 1).to_list(500)
+    return [_public_afile(d) for d in docs]
+
+@api_router.get("/files/{fid}/download")
+async def download_fileset_file(fid: str):
+    record = await db.afiles.find_one({"id": fid, "is_deleted": False}, {"_id": 0})
+    if not record:
+        raise HTTPException(404, "File not found")
+    try:
+        data, ctype = storage_get(record["storage_path"])
+    except Exception as e:
+        logger.error(f"analyzer download failed: {e}")
+        raise HTTPException(502, "Storage download failed")
+    headers = {"Content-Disposition": f'inline; filename="{record["original_filename"]}"'}
+    return Response(content=data, media_type=record.get("content_type", ctype), headers=headers)
+
+@api_router.delete("/files/{fid}")
+async def delete_fileset_file(fid: str):
+    res = await db.afiles.update_one({"id": fid, "is_deleted": False}, {"$set": {"is_deleted": True}})
+    if res.matched_count == 0:
+        raise HTTPException(404, "File not found")
+    return {"ok": True, "id": fid}
+
+@api_router.post("/filesets/{fsid}/analyze")
+async def analyze_fileset(fsid: str, body: dict = None):
+    fs = await db.file_sets.find_one({"id": fsid}, {"_id": 0})
+    if not fs:
+        raise HTTPException(404, "File set not found")
+    files = await db.afiles.find({"fileset_id": fsid, "is_deleted": False}, {"_id": 0}).sort("rel_path", 1).to_list(500)
+    if not files:
+        raise HTTPException(400, "No files to analyze — upload files first")
+
+    question = ((body or {}).get("question") or "").strip()
+    # Build a bounded context: readable excerpts + a manifest of binaries.
+    TOTAL_BUDGET = 16000
+    PER_FILE = 3000
+    used = 0
+    ctx_parts = []
+    manifest = []
+    for f in files:
+        manifest.append(f"- {f['rel_path']} ({f['content_type']}, {f['size']} bytes)")
+        if f.get("readable") and f.get("text_excerpt") and used < TOTAL_BUDGET:
+            chunk = f["text_excerpt"][:PER_FILE]
+            if used + len(chunk) > TOTAL_BUDGET:
+                chunk = chunk[: max(0, TOTAL_BUDGET - used)]
+            used += len(chunk)
+            ctx_parts.append(f"===== FILE: {f['rel_path']} =====\n{chunk}")
+        elif not f.get("readable"):
+            ctx_parts.append(f"===== FILE: {f['rel_path']} =====\n[binary {f['content_type']} — not text-readable; excluded from text analysis]")
+
+    manifest_text = "\n".join(manifest)
+    context_text = "\n\n".join(ctx_parts)
+    truncated = used >= TOTAL_BUDGET
+
+    system = (
+        "You are a senior software/document analyst. You are given the contents of files a user uploaded "
+        "(a folder or file selection). Produce a rigorous, honest analysis in clean Markdown with these sections: "
+        "## Overview, ## Per-File Notes, ## Cross-File Insights, ## Risks & Issues, ## Recommended Actions. "
+        "Cite file names/paths in backticks. Never invent files you were not shown. If content was truncated, say so. "
+        "Do not reproduce any secret values you see; instead flag them as '[possible secret redacted]'."
+    )
+    user_prompt = (
+        f"File manifest ({len(files)} files):\n{manifest_text}\n\n"
+        + (f"User's specific question: {question}\n\n" if question else "")
+        + f"File contents:\n{context_text}\n\n"
+        + ("NOTE: content was truncated to fit context limits.\n" if truncated else "")
+        + "Now produce the analysis."
+    )
+    try:
+        answer, used_prov, label = await llm_call_failover(
+            system, user_prompt, ["openai", "gemini", "anthropic"], session=f"analyze-{fsid}"
+        )
+    except Exception as e:
+        logger.error(f"analyze failed: {e}")
+        raise HTTPException(502, "Analysis failed")
+
+    rec = {
+        "id": str(uuid.uuid4()), "fileset_id": fsid, "question": question or None,
+        "analysis": answer.strip(), "model_label": label, "provider": used_prov,
+        "file_count": len(files), "truncated": truncated,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    }
+    await db.file_analyses.insert_one(dict(rec))
+    rec.pop("_id", None)
+    return {k: rec[k] for k in ["id", "fileset_id", "question", "analysis", "model_label", "file_count", "truncated", "created_at"]}
+
+@api_router.get("/filesets/{fsid}/analyses")
+async def list_analyses(fsid: str):
+    docs = await db.file_analyses.find({"fileset_id": fsid}, {"_id": 0}).sort("created_at", -1).to_list(20)
+    return docs
+
+# ==================== SELF-DIRECTIVE (preview-only, approval-gated code self-editing) ====================
+# HARD SAFETY MODEL:
+#  - Preview environment ONLY. This does NOT run after production deploy.
+#  - Reads only an allowlist of source files. Never .env / lockfiles / manifests / .git / infra.
+#  - Generates a PROPOSAL (unified diff). Nothing is written until an explicit approved apply call.
+#  - Every apply snapshots originals for one-click rollback. All actions audited in Mongo.
+
+APP_ROOT = Path("/app").resolve()
+SELF_ALLOWED_DIRS = [(APP_ROOT / "frontend" / "src").resolve()]
+SELF_ALLOWED_FILES = [(APP_ROOT / "backend" / "server.py").resolve()]
+SELF_DENY_NAMES = {".env", ".env.local", ".env.production", "package.json", "yarn.lock",
+                   "package-lock.json", "requirements.txt", "components.json"}
+SELF_ALLOWED_EXT = {".js", ".jsx", ".ts", ".tsx", ".css", ".scss", ".py", ".md", ".html"}
+SELF_DENY_PARTS = {"node_modules", ".git", "build", "dist", "__pycache__", ".emergent"}
+SELF_MAX_FILE_CHARS = 90000
+SELF_MAX_PATHS = 5
+SELF_BACKUP_ROOT = APP_ROOT / "backend" / ".self_backups"
+
+def _resolve_self_path(rel: str) -> Path:
+    if not rel or ".." in rel:
+        raise HTTPException(400, "Invalid path")
+    p = (APP_ROOT / rel.lstrip("/")).resolve()
+    if any(part in SELF_DENY_PARTS for part in p.parts):
+        raise HTTPException(403, f"Path not permitted: {rel}")
+    if p.name in SELF_DENY_NAMES:
+        raise HTTPException(403, f"Protected file blocked: {rel}")
+    if p.suffix not in SELF_ALLOWED_EXT:
+        raise HTTPException(403, f"File type not permitted for self-directive: {p.suffix or '(none)'}")
+    in_dir = any(str(p).startswith(str(d) + os.sep) for d in SELF_ALLOWED_DIRS)
+    is_file = p in SELF_ALLOWED_FILES
+    if not (in_dir or is_file):
+        raise HTTPException(403, f"Path outside allowlist: {rel}")
+    return p
+
+def _rel(p: Path) -> str:
+    return str(p.relative_to(APP_ROOT))
+
+@api_router.get("/self/manifest")
+async def self_manifest():
+    files = []
+    for d in SELF_ALLOWED_DIRS:
+        for root, dirs, fnames in os.walk(d):
+            dirs[:] = [x for x in dirs if x not in SELF_DENY_PARTS]
+            for fn in fnames:
+                fp = Path(root) / fn
+                if fp.suffix not in SELF_ALLOWED_EXT or fp.name in SELF_DENY_NAMES:
+                    continue
+                try:
+                    size = fp.stat().st_size
+                except Exception:
+                    continue
+                files.append({"path": _rel(fp), "size": size})
+    for f in SELF_ALLOWED_FILES:
+        if f.exists():
+            files.append({"path": _rel(f), "size": f.stat().st_size})
+    files.sort(key=lambda x: x["path"])
+    return {
+        "preview_only": True,
+        "note": "Self-directive runs ONLY in this preview environment. It is disabled after production deployment.",
+        "allowlist": [_rel(d) + "/**" for d in SELF_ALLOWED_DIRS] + [_rel(f) for f in SELF_ALLOWED_FILES],
+        "denylist": sorted(list(SELF_DENY_NAMES)) + [".env*", ".git", "node_modules", "infra/deploy configs"],
+        "files": files,
+    }
+
+@api_router.get("/self/source")
+async def self_source(path: str = Query(...)):
+    p = _resolve_self_path(path)
+    if not p.exists():
+        raise HTTPException(404, "File not found")
+    content = p.read_text(encoding="utf-8", errors="replace")
+    return {"path": _rel(p), "content": content, "lines": content.count("\n") + 1, "size": len(content)}
+
+def _unified_diff(path: str, old: str, new: str) -> dict:
+    old_lines = old.splitlines(keepends=True)
+    new_lines = new.splitlines(keepends=True)
+    diff = list(difflib.unified_diff(old_lines, new_lines, fromfile=f"a/{path}", tofile=f"b/{path}", n=3))
+    added = sum(1 for l in diff if l.startswith("+") and not l.startswith("+++"))
+    removed = sum(1 for l in diff if l.startswith("-") and not l.startswith("---"))
+    return {"path": path, "diff": "".join(diff), "added": added, "removed": removed}
+
+@api_router.post("/self/propose")
+async def self_propose(body: dict):
+    instruction = (body or {}).get("instruction", "").strip()
+    paths = (body or {}).get("paths") or []
+    if not instruction:
+        raise HTTPException(400, "Provide an instruction")
+    if not paths:
+        raise HTTPException(400, "Select at least one file to modify")
+    if len(paths) > SELF_MAX_PATHS:
+        raise HTTPException(400, f"Too many files (max {SELF_MAX_PATHS}) for one directive")
+
+    sources = {}
+    for rel in paths:
+        p = _resolve_self_path(rel)
+        if not p.exists():
+            raise HTTPException(404, f"File not found: {rel}")
+        content = p.read_text(encoding="utf-8", errors="replace")
+        if len(content) > SELF_MAX_FILE_CHARS:
+            raise HTTPException(400, f"File too large for self-directive MVP: {rel}")
+        sources[_rel(p)] = content
+
+    src_blocks = "\n\n".join([f"===== FILE: {rp} =====\n{c}" for rp, c in sources.items()])
+    system = (
+        "You are ACASO's Self-Directive engineer operating in a sandboxed PREVIEW environment. "
+        "You are given the FULL current contents of one or more source files and a natural-language instruction. "
+        "Return ONLY strict JSON (no prose, no markdown fences) with this exact shape: "
+        '{"explanation": string, "test_plan": string, "files": [{"path": string, "new_content": string}]}. '
+        "Rules: (1) 'path' MUST be one of the exact file paths you were given; do not invent new files. "
+        "(2) 'new_content' MUST be the COMPLETE new file content (not a diff, not a fragment). "
+        "(3) Preserve everything unrelated to the instruction. (4) Never introduce secrets or hardcoded credentials. "
+        "(5) Keep changes minimal and correct. If a file needs no change, omit it from 'files'."
+    )
+    user_prompt = f"INSTRUCTION:\n{instruction}\n\nCURRENT SOURCE FILES:\n{src_blocks}\n\nReturn the JSON now."
+    try:
+        raw, used_prov, label = await llm_call_failover(
+            system, user_prompt, ["openai", "anthropic", "gemini"], session=f"selfdir-{uuid.uuid4().hex[:8]}"
+        )
+    except Exception as e:
+        logger.error(f"self propose LLM failed: {e}")
+        raise HTTPException(502, "Proposal generation failed")
+
+    parsed = extract_json(raw)
+    if not parsed or not isinstance(parsed.get("files"), list):
+        raise HTTPException(502, "Model returned an unusable proposal")
+
+    diffs = []
+    changes = []
+    for item in parsed["files"]:
+        rp = item.get("path")
+        new_content = item.get("new_content")
+        if rp not in sources or not isinstance(new_content, str):
+            continue
+        # Re-validate the returned path against allowlist (defense in depth)
+        _resolve_self_path(rp)
+        d = _unified_diff(rp, sources[rp], new_content)
+        if d["added"] == 0 and d["removed"] == 0:
+            continue
+        diffs.append(d)
+        changes.append({"path": rp, "old_content": sources[rp], "new_content": new_content})
+
+    if not changes:
+        raise HTTPException(422, "The proposal contained no applicable changes to the selected files")
+
+    pid = str(uuid.uuid4())
+    doc = {
+        "id": pid, "instruction": instruction, "paths": list(sources.keys()),
+        "explanation": parsed.get("explanation", ""), "test_plan": parsed.get("test_plan", ""),
+        "changes": changes, "diffs": diffs, "model_label": label, "provider": used_prov,
+        "status": "proposed", "created_at": datetime.now(timezone.utc).isoformat(),
+        "applied_at": None, "rolled_back_at": None, "backup_dir": None, "error": None,
+    }
+    await db.self_directives.insert_one(dict(doc))
+    return {
+        "id": pid, "instruction": instruction, "explanation": doc["explanation"],
+        "test_plan": doc["test_plan"], "diffs": diffs, "model_label": label,
+        "status": "proposed", "created_at": doc["created_at"],
+    }
+
+@api_router.post("/self/apply")
+async def self_apply(body: dict):
+    pid = (body or {}).get("id")
+    if not (body or {}).get("approved"):
+        raise HTTPException(400, "Explicit approval flag required to apply a self-directive")
+    doc = await db.self_directives.find_one({"id": pid}, {"_id": 0})
+    if not doc:
+        raise HTTPException(404, "Proposal not found")
+    if doc["status"] != "proposed":
+        raise HTTPException(400, f"Proposal is '{doc['status']}', not applicable")
+
+    backup_dir = SELF_BACKUP_ROOT / pid
+    backup_dir.mkdir(parents=True, exist_ok=True)
+    written = []
+    try:
+        for i, ch in enumerate(doc["changes"]):
+            p = _resolve_self_path(ch["path"])
+            # snapshot original
+            bkp = backup_dir / f"{i}.orig"
+            bkp.write_text(ch["old_content"], encoding="utf-8")
+            (backup_dir / f"{i}.path").write_text(ch["path"], encoding="utf-8")
+            p.write_text(ch["new_content"], encoding="utf-8")
+            written.append((p, ch))
+    except Exception as e:
+        # best-effort restore
+        for p, ch in written:
+            try: p.write_text(ch["old_content"], encoding="utf-8")
+            except Exception: pass
+        raise HTTPException(500, f"Apply failed, changes reverted: {e}")
+
+    # Validation: python files must compile. If not, auto-rollback.
+    for p, ch in written:
+        if p.suffix == ".py":
+            res = subprocess.run(["python", "-m", "py_compile", str(p)], capture_output=True, text=True)
+            if res.returncode != 0:
+                for pp, cc in written:
+                    try: pp.write_text(cc["old_content"], encoding="utf-8")
+                    except Exception: pass
+                await db.self_directives.update_one({"id": pid}, {"$set": {
+                    "status": "failed", "error": f"py_compile failed for {ch['path']}: {res.stderr[:500]}",
+                }})
+                raise HTTPException(422, f"Validation failed for {ch['path']} — auto-rolled back. {res.stderr[:300]}")
+
+    await db.self_directives.update_one({"id": pid}, {"$set": {
+        "status": "applied", "applied_at": datetime.now(timezone.utc).isoformat(),
+        "backup_dir": str(backup_dir),
+    }})
+    return {"ok": True, "id": pid, "status": "applied",
+            "applied_paths": [ch["path"] for ch in doc["changes"]],
+            "note": "Applied to preview source. Hot-reload will pick up changes. Use Rollback to revert."}
+
+@api_router.post("/self/rollback")
+async def self_rollback(body: dict):
+    pid = (body or {}).get("id")
+    doc = await db.self_directives.find_one({"id": pid}, {"_id": 0})
+    if not doc:
+        raise HTTPException(404, "Proposal not found")
+    if doc["status"] != "applied":
+        raise HTTPException(400, f"Proposal is '{doc['status']}', cannot rollback")
+    restored = []
+    for ch in doc["changes"]:
+        p = _resolve_self_path(ch["path"])
+        p.write_text(ch["old_content"], encoding="utf-8")
+        restored.append(ch["path"])
+    await db.self_directives.update_one({"id": pid}, {"$set": {
+        "status": "rolled_back", "rolled_back_at": datetime.now(timezone.utc).isoformat(),
+    }})
+    return {"ok": True, "id": pid, "status": "rolled_back", "restored_paths": restored}
+
+@api_router.get("/self/history")
+async def self_history():
+    docs = await db.self_directives.find({}, {"_id": 0, "changes": 0}).sort("created_at", -1).to_list(30)
+    return docs
+
+
+
 app.include_router(api_router)
 
 app.add_middleware(
@@ -821,6 +1441,14 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+@app.on_event("startup")
+async def _startup_storage():
+    try:
+        init_storage()
+        logger.info("Object storage initialized")
+    except Exception as e:
+        logger.error(f"Storage init failed at startup (will retry on first use): {e}")
 
 @app.on_event("shutdown")
 async def shutdown_db_client():

@@ -537,12 +537,60 @@ async def deploy_souls(mid: str):
 
     souls = await asyncio.gather(*[run_soul(s) for s in SOULS])
 
+    # ---- Round 2: Debate — each soul sees the others and rebuts ----
     ok_souls = [s for s in souls if s["ok"]]
-    council_text = "\n\n".join([f"[{s['name']} · {s['role']} · {s['model_label']}]\n{s['analysis']}" for s in ok_souls])
+    soul_by_id = {s["id"]: s for s in souls}
+    debate_context = "\n\n".join(
+        [f"[{s['name']} · {s['role']}]\n{s['analysis']}" for s in ok_souls]
+    )
+
+    async def rebut(soul):
+        if not soul.get("ok"):
+            return soul["id"], ""
+        others = [s for s in ok_souls if s["id"] != soul["id"]]
+        if not others:
+            return soul["id"], ""
+        original = next((x for x in SOULS if x["id"] == soul["id"]), None)
+        if not original:
+            return soul["id"], ""
+        peers_text = "\n\n".join([f"[{s['name']}]\n{s['analysis']}" for s in others])
+        rebut_system = (
+            original["system"]
+            + " You are now in DEBATE ROUND. Read your peers' analyses. Reply ONLY with your rebuttal: "
+              "call out where you disagree, refine your position where they made you stronger, or explicitly concede. "
+              "Stay in persona. 2-3 sentences. No weaponized detail."
+        )
+        rebut_prompt = (
+            f"Your original analysis:\n{soul['analysis']}\n\nYour peers said:\n{peers_text}\n\n"
+            "Now deliver your rebuttal."
+        )
+        try:
+            ans, _, _ = await llm_call_failover(
+                rebut_system, rebut_prompt,
+                [original["provider"]] + [p for p in ["gemini", "openai", "anthropic"] if p != original["provider"]],
+                session=f"{mid}-{soul['id']}-rebut"
+            )
+            return soul["id"], ans.strip()
+        except Exception as e:
+            logger.error(f"rebuttal {soul['id']} failed: {e}")
+            return soul["id"], ""
+
+    rebuttals = dict(await asyncio.gather(*[rebut(s) for s in ok_souls]))
+    for s in souls:
+        s["rebuttal"] = rebuttals.get(s["id"], "")
+
+    # Rebuild council text with both rounds for the Throne
+    council_text = "\n\n".join([
+        (f"[{s['name']} · {s['role']} · {s['model_label']}]\n"
+         f"Round 1 (analysis): {s['analysis']}\n"
+         + (f"Round 2 (rebuttal): {s['rebuttal']}" if s.get('rebuttal') else "Round 2: (no rebuttal)"))
+        for s in ok_souls
+    ])
     throne_system = (
         "You are ETERNAL THRONE — the Soul Brain and sovereign arbiter of ACASO (House of Nova). "
-        "You command a council of specialist AI souls, each running on a different model. Fuse their findings into "
-        "the FINAL VERIFIED RESOLUTION that truly fixes the problem. Respond ONLY with valid minified JSON, no prose."
+        "You command a council of specialist AI souls, each running on a different model. You have observed two rounds: "
+        "initial analyses AND cross-rebuttals. Fuse everything into the FINAL VERIFIED RESOLUTION that truly fixes the problem. "
+        "Respond ONLY with valid minified JSON, no prose."
     )
     throne_prompt = (
         f"Vulnerability context:\n{problem}\n\nCouncil findings (labelled by soul name and model):\n{council_text}\n\n"

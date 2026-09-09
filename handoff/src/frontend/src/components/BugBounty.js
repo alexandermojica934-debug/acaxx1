@@ -6,7 +6,7 @@ import {
   ShieldAlert, Send, Loader2, Zap, Play, CheckCircle2, Circle, Trash2,
   Bug, Crosshair, FileText, ChevronDown, ChevronUp, ShieldCheck, Banknote,
   Target, Activity, AlertTriangle, Radar, Users, Crown, Eye, Cpu, Flame,
-  GitPullRequest, Copy, Scale
+  GitPullRequest, Copy, Scale, MessagesSquare
 } from "lucide-react";
 import { API } from "../App";
 
@@ -52,6 +52,7 @@ export default function BugBounty() {
   const [openReport, setOpenReport] = useState({});
   const [deploying, setDeploying] = useState(null);
   const [openCouncil, setOpenCouncil] = useState({});
+  const [openDebate, setOpenDebate] = useState({});
   const runningRef = useRef(false);
 
   const load = useCallback(async () => {
@@ -302,10 +303,58 @@ export default function BugBounty() {
                               </div>
                               <div className="soul-role">{s.role}</div>
                               <p>{s.analysis}</p>
+                              {s.rebuttal && (
+                                <div className="soul-rebut">
+                                  <span className="soul-rebut-tag" style={{ color: SOUL_COLOR[s.id], borderColor: SOUL_COLOR[s.id] + "88" }}>
+                                    <MessagesSquare size={10} /> Round 2 · Rebuttal
+                                  </span>
+                                  <p>{s.rebuttal}</p>
+                                </div>
+                              )}
                             </div>
                           );
                         })}
                       </div>
+
+                      {m.soul_council.souls.some((s) => s.rebuttal) && (
+                        <div className="debate" data-testid={`soul-debate-${m.id}`}>
+                          <button
+                            className="debate-toggle"
+                            data-testid={`soul-debate-toggle-${m.id}`}
+                            onClick={() => setOpenDebate((o) => ({ ...o, [m.id]: !o[m.id] }))}
+                          >
+                            <MessagesSquare size={13} />
+                            {openDebate[m.id] ? "Hide Debate Transcript" : "Show Debate Transcript"}
+                            <span className="debate-count">
+                              {m.soul_council.souls.filter((s) => s.rebuttal).length} rebuttals
+                            </span>
+                            {openDebate[m.id] ? <ChevronUp size={13} /> : <ChevronDown size={13} />}
+                          </button>
+                          {openDebate[m.id] && (
+                            <div className="debate-body">
+                              {["round-1", "round-2"].map((round) => (
+                                <div key={round} className="debate-round">
+                                  <div className="debate-round-h">
+                                    {round === "round-1" ? "Round 1 · Opening Analyses" : "Round 2 · Cross-Rebuttals"}
+                                  </div>
+                                  {m.soul_council.souls.filter((s) => s.ok).map((s) => {
+                                    const text = round === "round-1" ? s.analysis : s.rebuttal;
+                                    if (!text) return null;
+                                    return (
+                                      <div key={s.id + round} className="debate-msg" style={{ borderLeftColor: SOUL_COLOR[s.id] }}>
+                                        <span className="debate-who" style={{ color: SOUL_COLOR[s.id] }}>{s.name}</span>
+                                        <span className="debate-model">{s.model_label}</span>
+                                        <p>{text}</p>
+                                      </div>
+                                    );
+                                  })}
+                                </div>
+                              ))}
+                            </div>
+                          )}
+                        </div>
+                      )}
+
                       <div className="throne">
                         <div className="throne-h"><Crown size={15} /> Eternal Throne · Soul Brain Verdict
                           <span className="throne-status">{m.soul_council.resolution.status}</span>

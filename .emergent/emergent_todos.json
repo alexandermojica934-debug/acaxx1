@@ -1,18 +1,26 @@
 [
   {
-    "content": "Backend: Mission.soul_council field; SOULS personas mapped to different models; llm_call_failover",
+    "content": "A: Attachment UI on BugBounty missions",
     "status": "completed"
   },
   {
-    "content": "Backend: POST /missions/{id}/deploy-souls — 3 souls parallel + Eternal Throne synthesis + action log",
+    "content": "B: Backend + Frontend File Analyzer (folder upload + AI analysis)",
     "status": "completed"
   },
   {
-    "content": "Frontend: Deploy Soul Council button + council panel (souls + throne verdict)",
+    "content": "C: Backend + Frontend Self-Directive (propose/approve/apply/rollback)",
     "status": "completed"
   },
   {
-    "content": "Test deploy-souls end-to-end via curl + screenshot",
+    "content": "Wire tabs + CSS",
+    "status": "completed"
+  },
+  {
+    "content": "Consolidated testing-agent pass (100% pass, 0 bugs)",
+    "status": "completed"
+  },
+  {
+    "content": "Defer handoff regen + Google Drive/GitHub/HackerOne (need user creds); notify credit status",
     "status": "completed"
   }
 ]
