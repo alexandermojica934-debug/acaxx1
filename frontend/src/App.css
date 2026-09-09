@@ -407,6 +407,26 @@ body {
 .conf-bar > div { height: 100%; background: linear-gradient(90deg, var(--green), var(--cyan)); border-radius: 6px; }
 .conf-num { font-size: 12px; font-weight: 700; color: var(--green); }
 
+/* ===== Soul Dissent & Fix Export ===== */
+.dissent { margin-top: 14px; background: rgba(4,6,16,0.55); border: 1px solid var(--border); border-radius: 12px; padding: 13px 14px; }
+.dissent-h { display: flex; align-items: center; gap: 8px; font-size: 11.5px; font-weight: 700; letter-spacing: 0.4px; color: var(--cyan); text-transform: uppercase; margin-bottom: 10px; }
+.dissent-item { padding: 10px 0; border-top: 1px dashed var(--border); }
+.dissent-item:first-of-type { border-top: none; padding-top: 2px; }
+.dissent-topic { font-size: 12.5px; font-weight: 700; color: var(--text); margin-bottom: 8px; }
+.dissent-positions { display: flex; flex-direction: column; gap: 6px; margin-bottom: 8px; }
+.dissent-pos { display: flex; gap: 10px; align-items: baseline; padding: 6px 10px; background: rgba(255,255,255,0.03); border-left: 3px solid var(--border); border-radius: 6px; font-size: 12.2px; line-height: 1.5; color: var(--muted); }
+.dissent-soul { flex: 0 0 130px; font-size: 11px; font-weight: 700; letter-spacing: 0.3px; text-transform: uppercase; }
+.dissent-reco { display: flex; gap: 8px; align-items: flex-start; padding: 8px 10px; background: rgba(245,196,81,0.08); border: 1px solid rgba(245,196,81,0.28); border-radius: 8px; font-size: 12.2px; line-height: 1.5; color: var(--text); }
+.dissent-reco svg { color: var(--gold); flex-shrink: 0; margin-top: 2px; }
+.dissent-reco b { color: var(--gold); font-weight: 700; }
+
+.fix-export { margin-top: 12px; background: rgba(4,6,16,0.55); border: 1px solid rgba(72,213,151,0.32); border-radius: 12px; padding: 13px 14px; }
+.fx-h { display: flex; align-items: center; gap: 8px; font-size: 11.5px; font-weight: 700; letter-spacing: 0.4px; color: var(--green); text-transform: uppercase; margin-bottom: 10px; }
+.fx-copy { margin-left: auto; display: flex; align-items: center; gap: 6px; background: rgba(72,213,151,0.12); border: 1px solid rgba(72,213,151,0.4); color: var(--green); padding: 5px 10px; border-radius: 8px; font-size: 11px; font-weight: 700; letter-spacing: 0.3px; text-transform: uppercase; cursor: pointer; transition: background 160ms, transform 160ms; }
+.fx-copy:hover { background: rgba(72,213,151,0.22); transform: translateY(-1px); }
+.fx-copy:active { transform: translateY(0); }
+.fx-body { margin: 0; max-height: 320px; overflow-y: auto; padding: 12px; background: rgba(0,0,0,0.35); border: 1px solid var(--border); border-radius: 8px; font-family: 'Source Code Pro', ui-monospace, monospace; font-size: 12px; line-height: 1.55; color: var(--text); white-space: pre-wrap; word-break: break-word; }
+
 /* ===== Agent Bridge ===== */
 .bridge-wrap { max-width: 1120px; margin: 0 auto; }
 .br-hero { display: flex; justify-content: space-between; align-items: center; gap: 20px; background: linear-gradient(160deg, rgba(79,209,255,0.12), rgba(139,124,255,0.06)); border: 1px solid var(--border-lit); border-radius: 18px; padding: 22px 24px; flex-wrap: wrap; }

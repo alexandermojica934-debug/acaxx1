@@ -545,13 +545,34 @@ async def deploy_souls(mid: str):
         "the FINAL VERIFIED RESOLUTION that truly fixes the problem. Respond ONLY with valid minified JSON, no prose."
     )
     throne_prompt = (
-        f"Vulnerability context:\n{problem}\n\nCouncil findings:\n{council_text}\n\n"
-        "Return JSON: {\"root_cause\":\"confirmed one-line root cause\","
+        f"Vulnerability context:\n{problem}\n\nCouncil findings (labelled by soul name and model):\n{council_text}\n\n"
+        "Return ONLY valid minified JSON with this exact shape:\n"
+        "{"
+        "\"root_cause\":\"confirmed one-line root cause\","
         "\"fix\":\"the exact fix/patch to deploy (2-4 sentences, code/config level, non-weaponized)\","
         "\"verification\":\"how to retest & confirm it is resolved (1-2 sentences)\","
-        "\"confidence\":92,\"status\":\"RESOLVED\"}"
+        "\"confidence\":92,"
+        "\"status\":\"RESOLVED\","
+        "\"dissent\":["
+          "{\"topic\":\"where the souls disagreed (e.g. root cause vs. attack vector)\","
+          "\"positions\":{\"vision\":\"Vision Command's stance in one sentence\","
+                         "\"fusion\":\"Fusion Engine's stance in one sentence\","
+                         "\"rebirth\":\"Rebirth Protocol's stance in one sentence\"},"
+          "\"reconciliation\":\"how Eternal Throne reconciled it and which stance won and why (1-2 sentences)\"}"
+        "],"
+        "\"patch_note\":\"a copy-ready PR / patch note in markdown with these sections in order: "
+                        "'# <title>', '## Summary', '## Root Cause', '## Changes' (bulleted, code/config level, non-weaponized), "
+                        "'## Verification' (bulleted retest steps), '## Risk & Rollout' (blast radius + safe rollout note). "
+                        "Use \\n for newlines inside the JSON string.\""
+        "}\n"
+        "Rules: if souls fully agreed, still return one dissent entry describing the subtlest tension you can identify "
+        "(e.g. priority, scope, timing) — never return an empty dissent array. Keep every string non-weaponized."
     )
-    resolution = {"root_cause": "", "fix": "", "verification": "", "confidence": 90, "status": "RESOLVED"}
+    resolution = {
+        "root_cause": "", "fix": "", "verification": "",
+        "confidence": 90, "status": "RESOLVED",
+        "dissent": [], "patch_note": "",
+    }
     throne_label = "Eternal Throne"
     try:
         raw, _, throne_label = await llm_call_failover(throne_system, throne_prompt,

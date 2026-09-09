@@ -5,7 +5,8 @@ import { motion, AnimatePresence } from "framer-motion";
 import {
   ShieldAlert, Send, Loader2, Zap, Play, CheckCircle2, Circle, Trash2,
   Bug, Crosshair, FileText, ChevronDown, ChevronUp, ShieldCheck, Banknote,
-  Target, Activity, AlertTriangle, Radar, Users, Crown, Eye, Cpu, Flame
+  Target, Activity, AlertTriangle, Radar, Users, Crown, Eye, Cpu, Flame,
+  GitPullRequest, Copy, Scale
 } from "lucide-react";
 import { API } from "../App";
 
@@ -318,6 +319,56 @@ export default function BugBounty() {
                           <span className="conf-num">{m.soul_council.resolution.confidence}%</span>
                         </div>
                       </div>
+
+                      {Array.isArray(m.soul_council.resolution.dissent) && m.soul_council.resolution.dissent.length > 0 && (
+                        <div className="dissent" data-testid={`soul-dissent-${m.id}`}>
+                          <div className="dissent-h"><Scale size={14} /> Soul Dissent & Reconciliation</div>
+                          {m.soul_council.resolution.dissent.map((d, i) => {
+                            const positions = d.positions || {};
+                            return (
+                              <div key={i} className="dissent-item">
+                                <div className="dissent-topic">{d.topic || "Point of tension"}</div>
+                                <div className="dissent-positions">
+                                  {["vision", "fusion", "rebirth"].map((sid) => positions[sid] ? (
+                                    <div key={sid} className="dissent-pos" style={{ borderLeftColor: SOUL_COLOR[sid] }}>
+                                      <span className="dissent-soul" style={{ color: SOUL_COLOR[sid] }}>
+                                        {sid === "vision" ? "Vision Command" : sid === "fusion" ? "Fusion Engine" : "Rebirth Protocol"}
+                                      </span>
+                                      <span>{positions[sid]}</span>
+                                    </div>
+                                  ) : null)}
+                                </div>
+                                {d.reconciliation && (
+                                  <div className="dissent-reco"><Crown size={12} /> <span><b>Throne reconciled:</b> {d.reconciliation}</span></div>
+                                )}
+                              </div>
+                            );
+                          })}
+                        </div>
+                      )}
+
+                      {m.soul_council.resolution.patch_note && (
+                        <div className="fix-export" data-testid={`fix-export-${m.id}`}>
+                          <div className="fx-h">
+                            <GitPullRequest size={14} /> Fix Export · PR-Ready Patch Note
+                            <button
+                              className="fx-copy"
+                              data-testid={`fix-export-copy-${m.id}`}
+                              onClick={async () => {
+                                try {
+                                  await navigator.clipboard.writeText(m.soul_council.resolution.patch_note);
+                                  toast.success("Patch note copied — paste into your PR");
+                                } catch {
+                                  toast.error("Copy failed — select and copy manually");
+                                }
+                              }}
+                            >
+                              <Copy size={12} /> Copy
+                            </button>
+                          </div>
+                          <pre className="fx-body">{m.soul_council.resolution.patch_note}</pre>
+                        </div>
+                      )}
                     </motion.div>
                   )}
 
