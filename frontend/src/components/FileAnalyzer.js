@@ -16,16 +16,30 @@ const fmtBytes = (n) => {
   return `${(n / (1024 * 1024)).toFixed(1)} MB`;
 };
 
-function Markdown({ text }) {
+function Markdown({ text, onCite }) {
   if (!text) return null;
+  const CITE = /^([A-Za-z0-9_.\/-]+\.[A-Za-z0-9]+):(\d+)(?:-(\d+))?$/;
   const inline = (t) => {
     const nodes = [];
     const re = /(\*\*([^*]+)\*\*|`([^`]+)`)/g;
     let last = 0, m, i = 0;
     while ((m = re.exec(t)) !== null) {
       if (m.index > last) nodes.push(t.slice(last, m.index));
-      if (m[2] !== undefined) nodes.push(<strong key={`b${i++}`}>{m[2]}</strong>);
-      else if (m[3] !== undefined) nodes.push(<code key={`c${i++}`}>{m[3]}</code>);
+      if (m[2] !== undefined) {
+        nodes.push(<strong key={`b${i++}`}>{m[2]}</strong>);
+      } else if (m[3] !== undefined) {
+        const cm = onCite && m[3].match(CITE);
+        if (cm) {
+          const path = cm[1], line = parseInt(cm[2], 10);
+          nodes.push(
+            <button key={`cite${i++}`} className="fa-cite" onClick={() => onCite(path, line)} title="Open and highlight this line">
+              {m[3]}
+            </button>
+          );
+        } else {
+          nodes.push(<code key={`c${i++}`}>{m[3]}</code>);
+        }
+      }
       last = m.index + m[0].length;
     }
     if (last < t.length) nodes.push(t.slice(last));
@@ -72,6 +86,7 @@ export default function FileAnalyzer() {
   const [driveLoading, setDriveLoading] = useState(false);
   const [driveImporting, setDriveImporting] = useState(false);
   const [driveSearch, setDriveSearch] = useState("");
+  const [viewer, setViewer] = useState(null); // { path, line, content, loading }
   const filesInput = useRef(null);
   const folderInput = useRef(null);
 
@@ -282,6 +297,41 @@ export default function FileAnalyzer() {
     } finally { setDriveImporting(false); }
   };
 
+  const importFolder = async () => {
+    const folder = driveCrumbs[driveCrumbs.length - 1];
+    setDriveImporting(true);
+    try {
+      const r = await axios.post(`${API}/drive/import-folder`, { folder_id: folder.id, fileset_id: activeId, recursive: true });
+      setActiveId(r.data.fileset_id);
+      await loadSets();
+      await loadFiles(r.data.fileset_id);
+      const imp = r.data.imported?.length || 0;
+      const skp = r.data.skipped?.length || 0;
+      toast.success(`Imported ${imp} file${imp !== 1 ? "s" : ""} from "${folder.name}"${skp ? ` · ${skp} skipped` : ""}`);
+      setDriveOpen(false); setDriveSel([]);
+      if (imp > 0) { toast("Auto-analyzing imported files…"); analyze(r.data.fileset_id, null); }
+    } catch (e) {
+      toast.error(e?.response?.data?.detail || "Folder import failed");
+    } finally { setDriveImporting(false); }
+  };
+
+  const exportSet = () => {
+    if (!activeId) { toast.error("Nothing to export yet"); return; }
+    window.open(`${API}/filesets/${activeId}/export`, "_blank", "noopener");
+  };
+
+  const openCite = async (path, line) => {
+    if (!activeId) return;
+    setViewer({ path, line, content: null, loading: true });
+    try {
+      const r = await axios.get(`${API}/filesets/${activeId}/file?path=${encodeURIComponent(path)}`);
+      setViewer({ path, line, content: r.data.content, loading: false });
+    } catch (e) {
+      toast.error(e?.response?.data?.detail || "Could not open file");
+      setViewer(null);
+    }
+  };
+
   return (
     <div className="fa-wrap" data-testid="file-analyzer">
       <section className="fa-console">
@@ -386,7 +436,16 @@ export default function FileAnalyzer() {
         </section>
 
         <section className="fa-result" data-testid="analyzer-result">
-          <div className="fa-sub-head"><Sparkles size={14} /> AI Analysis {analysis?.model_label && <span className="fa-model">{analysis.model_label}</span>}</div>
+          <div className="fa-sub-head"><Sparkles size={14} /> AI Analysis
+            <div className="fa-head-right">
+              {analysis?.model_label && <span className="fa-model">{analysis.model_label}</span>}
+              {activeId && files.length > 0 && (
+                <button className="fa-export" data-testid="analyzer-export" onClick={exportSet} title="Download analysis + chat as Markdown">
+                  <Download size={13} /> Export
+                </button>
+              )}
+            </div>
+          </div>
           {analyzing ? (
             <div className="fa-skeleton">
               {[...Array(5)].map((_, i) => <div key={i} className="fa-sk-line" style={{ width: `${90 - i * 9}%` }} />)}
@@ -395,7 +454,7 @@ export default function FileAnalyzer() {
             <>
               {analysis.truncated && <div className="fa-trunc">Note: content was truncated to fit the model context window.</div>}
               {analysis.question && <div className="fa-q">Q: {analysis.question}</div>}
-              <Markdown text={analysis.analysis} />
+              <Markdown text={analysis.analysis} onCite={openCite} />
             </>
           ) : (
             <div className="fa-empty"><Play size={24} /><p>Run an analysis to see per-file notes, cross-file insights, risks and recommended actions.</p></div>
@@ -412,7 +471,7 @@ export default function FileAnalyzer() {
             chat.map((m) => (
               <div key={m.id} className={`fa-msg ${m.role}`} data-testid={`analyzer-chat-msg-${m.role}`}>
                 <span className="fa-msg-who">{m.role === "user" ? "You" : "ACASO"}</span>
-                <div className="fa-msg-body"><Markdown text={m.content} /></div>
+                <div className="fa-msg-body"><Markdown text={m.content} onCite={openCite} /></div>
               </div>
             ))
           )}
@@ -487,10 +546,46 @@ export default function FileAnalyzer() {
               </div>
               <div className="fa-modal-foot">
                 <span className="fa-drive-count">{driveSel.length} selected</span>
+                <button className="fa-drive-btn ghost" data-testid="drive-import-folder" onClick={importFolder} disabled={driveImporting || !!driveSearch}
+                  title="Import every supported file in this folder (recursively)">
+                  <FolderUp size={14} /> Import entire folder
+                </button>
                 <button className="fa-analyze" data-testid="drive-import" onClick={importDrive} disabled={driveImporting || !driveSel.length}>
                   {driveImporting ? <Loader2 className="spin" size={15} /> : <Check size={15} />}
-                  {driveImporting ? "Importing…" : "Import to analysis"}
+                  {driveImporting ? "Importing…" : "Import selected"}
                 </button>
+              </div>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      <AnimatePresence>
+        {viewer && (
+          <motion.div className="fa-modal-overlay" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} onClick={() => setViewer(null)}>
+            <motion.div className="fa-modal fa-viewer" data-testid="file-viewer" initial={{ opacity: 0, y: 14 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: 14 }} onClick={(e) => e.stopPropagation()}>
+              <div className="fa-modal-head">
+                <FileText size={16} /> <span>{viewer.path}</span>
+                <span className="fa-viewer-line">line {viewer.line}</span>
+                <button className="fa-modal-x" onClick={() => setViewer(null)}><X size={16} /></button>
+              </div>
+              <div className="fa-viewer-body">
+                {viewer.loading ? (
+                  <div className="fa-empty"><Loader2 className="spin" size={18} /><p>Loading…</p></div>
+                ) : (
+                  <pre className="fa-viewer-code">
+                    {(viewer.content || "").split("\n").map((ln, i) => {
+                      const n = i + 1;
+                      const hit = n === viewer.line;
+                      return (
+                        <div key={n} className={`fa-vline ${hit ? "hit" : ""}`} ref={hit ? (el) => el && el.scrollIntoView({ block: "center" }) : null}>
+                          <span className="fa-vnum">{n}</span>
+                          <span className="fa-vtext">{ln || " "}</span>
+                        </div>
+                      );
+                    })}
+                  </pre>
+                )}
               </div>
             </motion.div>
           </motion.div>

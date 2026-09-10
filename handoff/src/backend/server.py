@@ -1718,27 +1718,23 @@ async def drive_list(folder_id: str = Query("root"), search: str = Query(None)):
         })
     return {"folder_id": folder_id, "items": out, "search": term or None}
 
-@api_router.post("/drive/import")
-async def drive_import(body: dict):
-    file_ids = (body or {}).get("file_ids") or []
-    if not file_ids:
-        raise HTTPException(400, "No files selected")
-    fileset_id = (body or {}).get("fileset_id")
+async def _resolve_or_create_fileset(fileset_id, title):
     if fileset_id:
         fs = await db.file_sets.find_one({"id": fileset_id}, {"_id": 0})
         if not fs:
             raise HTTPException(404, "File set not found")
-    else:
-        fileset_id = str(uuid.uuid4())
-        await db.file_sets.insert_one({"id": fileset_id, "title": f"Drive import {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M')}",
-                                       "created_at": datetime.now(timezone.utc).isoformat()})
+        return fileset_id
+    fileset_id = str(uuid.uuid4())
+    await db.file_sets.insert_one({"id": fileset_id, "title": title,
+                                   "created_at": datetime.now(timezone.utc).isoformat()})
+    return fileset_id
 
-    svc = await _drive_service()
+async def _import_drive_ids(svc, file_ids, fileset_id):
     imported, skipped = [], []
-    for fid in file_ids[:100]:
+    for fid in file_ids[:200]:
         try:
             meta = await asyncio.to_thread(lambda: svc.files().get(fileId=fid, fields="id,name,mimeType,size").execute())
-        except Exception as e:
+        except Exception:
             skipped.append({"id": fid, "reason": "metadata fetch failed"}); continue
         name = meta.get("name", fid)
         mime = meta.get("mimeType", "")
@@ -1747,7 +1743,7 @@ async def drive_import(body: dict):
         try:
             if mime.startswith("application/vnd.google-apps."):
                 if mime not in GOOGLE_EXPORT_MAP:
-                    skipped.append({"name": name, "reason": f"unsupported Google type"}); continue
+                    skipped.append({"name": name, "reason": "unsupported Google type"}); continue
                 export_mime, ext = GOOGLE_EXPORT_MAP[mime]
                 data = await asyncio.to_thread(lambda: svc.files().export(fileId=fid, mimeType=export_mime).execute())
                 content_type = export_mime
@@ -1768,7 +1764,108 @@ async def drive_import(body: dict):
         except Exception as e:
             logger.error(f"drive import {fid} failed: {e}")
             skipped.append({"name": name, "reason": "download failed"})
+    return imported, skipped
+
+async def _drive_folder_file_ids(svc, folder_id, recursive=True, cap=200):
+    ids = []
+    def _children(fid):
+        res = svc.files().list(q=f"'{fid}' in parents and trashed=false", pageSize=200,
+                               fields="files(id,name,mimeType)").execute()
+        return res.get("files", [])
+    stack = [folder_id]
+    while stack and len(ids) < cap:
+        cur = stack.pop()
+        for c in await asyncio.to_thread(_children, cur):
+            if c.get("mimeType") == "application/vnd.google-apps.folder":
+                if recursive:
+                    stack.append(c["id"])
+            else:
+                ids.append(c["id"])
+                if len(ids) >= cap:
+                    break
+    return ids
+
+@api_router.post("/drive/import")
+async def drive_import(body: dict):
+    file_ids = (body or {}).get("file_ids") or []
+    if not file_ids:
+        raise HTTPException(400, "No files selected")
+    fileset_id = await _resolve_or_create_fileset(
+        (body or {}).get("fileset_id"),
+        f"Drive import {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M')}")
+    svc = await _drive_service()
+    imported, skipped = await _import_drive_ids(svc, file_ids, fileset_id)
     return {"fileset_id": fileset_id, "imported": imported, "skipped": skipped}
+
+@api_router.post("/drive/import-folder")
+async def drive_import_folder(body: dict):
+    folder_id = (body or {}).get("folder_id")
+    if not folder_id:
+        raise HTTPException(400, "folder_id required")
+    recursive = bool((body or {}).get("recursive", True))
+    svc = await _drive_service()
+    try:
+        meta = await asyncio.to_thread(lambda: svc.files().get(fileId=folder_id, fields="id,name,mimeType").execute())
+    except Exception:
+        raise HTTPException(404, "Folder not found")
+    fname = meta.get("name", "folder")
+    fileset_id = await _resolve_or_create_fileset(
+        (body or {}).get("fileset_id"), f"Drive · {fname}")
+    ids = await _drive_folder_file_ids(svc, folder_id, recursive=recursive, cap=200)
+    if not ids:
+        return {"fileset_id": fileset_id, "imported": [], "skipped": [{"name": fname, "reason": "no supported files found"}]}
+    imported, skipped = await _import_drive_ids(svc, ids, fileset_id)
+    return {"fileset_id": fileset_id, "imported": imported, "skipped": skipped}
+
+@api_router.get("/filesets/{fsid}/file")
+async def get_fileset_file_by_path(fsid: str, path: str = Query(...)):
+    """Return a file's text content by its rel_path (for citation-jump viewer)."""
+    rec = await db.afiles.find_one({"fileset_id": fsid, "rel_path": path, "is_deleted": False}, {"_id": 0})
+    if not rec:
+        rec = await db.afiles.find_one({"fileset_id": fsid, "original_filename": path, "is_deleted": False}, {"_id": 0})
+    if not rec:
+        raise HTTPException(404, "File not found in this set")
+    content = rec.get("text_excerpt")
+    if content is None:
+        try:
+            data, _ = await asyncio.to_thread(storage_get, rec["storage_path"])
+            content = data.decode("utf-8", errors="replace")
+        except Exception:
+            content = "[binary file — no text preview available]"
+    return {"rel_path": rec["rel_path"], "content_type": rec.get("content_type"),
+            "readable": rec.get("readable", False), "content": content}
+
+@api_router.get("/filesets/{fsid}/export")
+async def export_fileset(fsid: str):
+    fs = await db.file_sets.find_one({"id": fsid}, {"_id": 0})
+    if not fs:
+        raise HTTPException(404, "File set not found")
+    files = await db.afiles.find({"fileset_id": fsid, "is_deleted": False}, {"_id": 0}).sort("rel_path", 1).to_list(500)
+    analyses = await db.file_analyses.find({"fileset_id": fsid}, {"_id": 0}).sort("created_at", -1).to_list(1)
+    chats = await db.file_chats.find({"fileset_id": fsid}, {"_id": 0}).sort("created_at", 1).to_list(500)
+
+    lines = [f"# {fs['title']}", "", f"_Exported: {datetime.now(timezone.utc).isoformat()}_", ""]
+    lines.append(f"## Files ({len(files)})")
+    for f in files:
+        src = f.get("source", "upload")
+        lines.append(f"- `{f['rel_path']}` ({f['content_type']}, {f['size']} bytes, via {src})")
+    lines.append("")
+    if analyses:
+        a = analyses[0]
+        lines.append(f"## AI Analysis ({a.get('model_label','')})")
+        if a.get("question"):
+            lines.append(f"**Question:** {a['question']}\n")
+        lines.append(a.get("analysis", ""))
+        lines.append("")
+    if chats:
+        lines.append("## Follow-up Chat")
+        for c in chats:
+            who = "You" if c["role"] == "user" else "ACASO"
+            lines.append(f"**{who}:** {c['content']}\n")
+    md = "\n".join(lines)
+    safe = "".join(ch if ch.isalnum() or ch in "-_" else "-" for ch in fs["title"])[:50] or "analysis"
+    headers = {"Content-Disposition": f'attachment; filename="{safe}.md"'}
+    return Response(content=md, media_type="text/markdown", headers=headers)
 
 
 

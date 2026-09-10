@@ -1,5 +1,5 @@
 # ACASO Handoff Package
-_Generated: 2026-09-10T00:00:28.675868+00:00_
+_Generated: 2026-09-10T00:24:06.782518+00:00_
 
 Files in this bundle:
 - `NEXT_AGENT_BRIEF.md` — start here.

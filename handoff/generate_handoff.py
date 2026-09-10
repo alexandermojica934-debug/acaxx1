@@ -54,8 +54,9 @@ FEATURES = [
     "Real object storage: mission Evidence & Media attachments (upload/list/download/delete)",
     "File Analyzer: upload files OR a whole folder -> real object storage -> AI analysis + follow-up chat grounded in the files",
     "Self-Directive: PREVIEW-ONLY, approval-gated self-editing (propose unified diff -> approve/apply with compile+import validation & snapshot -> rollback), audited",
-    "File Analyzer follow-up chat: ask questions grounded in the uploaded files; cites exact `path:line` locations and quotes snippets (line-numbered context)",
-    "Google Drive ingestion (user OAuth): connect Drive, browse folders, SEARCH by name, import selected files into an analysis set (auto-analyzes right after import). Requires user-supplied Web-app OAuth client.",
+    "File Analyzer follow-up chat: grounded answers that cite exact `path:line` (clickable -> opens a file viewer that highlights the line) and quote snippets",
+    "Analysis Export: one-click download of the analysis + chat thread + file list as a Markdown report",
+    "Google Drive ingestion (user OAuth): connect, browse, SEARCH by name, import selected files OR an entire folder (recursive) in one click, auto-analyzes after import. Requires user-supplied Web-app OAuth client.",
 ]
 
 MODELS = {
@@ -86,6 +87,9 @@ KEY_ENDPOINTS = [
     ["GET", "/api/oauth/drive/callback", "OAuth callback -> stores tokens, redirects to app"],
     ["GET", "/api/drive/list?folder_id=root", "list Drive folders/files"],
     ["POST", "/api/drive/import", "import selected Drive files into an analysis set"],
+    ["POST", "/api/drive/import-folder", "import all supported files in a Drive folder (recursive)"],
+    ["GET", "/api/filesets/{fsid}/file?path=", "file content by rel_path (citation-jump viewer)"],
+    ["GET", "/api/filesets/{fsid}/export", "download analysis + chat as Markdown"],
     ["POST", "/api/drive/disconnect", "revoke + delete stored Drive tokens"],
     ["GET", "/api/agent/info", "Agent Bridge info"],
 ]

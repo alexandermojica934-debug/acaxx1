@@ -1,22 +1,18 @@
 [
   {
-    "content": "Drive Search (backend + frontend)",
+    "content": "Whole-Folder Import (backend /drive/import-folder + modal button)",
     "status": "completed"
   },
   {
-    "content": "Drive Auto-Analyze after import",
+    "content": "Analysis Export (backend markdown export + Export button)",
     "status": "completed"
   },
   {
-    "content": "Chat line-number citations (verified path:line + snippet)",
+    "content": "Chat Citations Jump (clickable path:line -> file viewer w/ highlight) — verified end-to-end",
     "status": "completed"
   },
   {
-    "content": "Regenerate handoff",
-    "status": "completed"
-  },
-  {
-    "content": "Web-app OAuth credentials installed + connect flow verified (client_id/redirect/scope correct)",
+    "content": "Handoff regenerated + all components compile + services healthy",
     "status": "completed"
   }
 ]

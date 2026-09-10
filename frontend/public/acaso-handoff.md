@@ -1,6 +1,6 @@
 # ACASO Omniverse — Complete Handoff
 
-_Generated: 2026-09-10T00:00:28.675868+00:00_
+_Generated: 2026-09-10T00:24:06.782518+00:00_
 
 ## What this is
 A contest-ready **Directive-to-Payment Operating System** (FastAPI + React + MongoDB).
@@ -14,8 +14,9 @@ A contest-ready **Directive-to-Payment Operating System** (FastAPI + React + Mon
 - Real object storage: mission Evidence & Media attachments (upload/list/download/delete)
 - File Analyzer: upload files OR a whole folder -> real object storage -> AI analysis + follow-up chat grounded in the files
 - Self-Directive: PREVIEW-ONLY, approval-gated self-editing (propose unified diff -> approve/apply with compile+import validation & snapshot -> rollback), audited
-- File Analyzer follow-up chat: ask questions grounded in the uploaded files; cites exact `path:line` locations and quotes snippets (line-numbered context)
-- Google Drive ingestion (user OAuth): connect Drive, browse folders, SEARCH by name, import selected files into an analysis set (auto-analyzes right after import). Requires user-supplied Web-app OAuth client.
+- File Analyzer follow-up chat: grounded answers that cite exact `path:line` (clickable -> opens a file viewer that highlights the line) and quote snippets
+- Analysis Export: one-click download of the analysis + chat thread + file list as a Markdown report
+- Google Drive ingestion (user OAuth): connect, browse, SEARCH by name, import selected files OR an entire folder (recursive) in one click, auto-analyzes after import. Requires user-supplied Web-app OAuth client.
 
 ## Tech & Integrations
 - Backend: FastAPI + Motor (MongoDB), Pydantic, UUID ids, timezone-aware UTC.
@@ -63,6 +64,9 @@ Hot-reload is enabled; restart only after dependency/.env changes.
 - `GET /api/oauth/drive/callback` — OAuth callback -> stores tokens, redirects to app
 - `GET /api/drive/list?folder_id=root` — list Drive folders/files
 - `POST /api/drive/import` — import selected Drive files into an analysis set
+- `POST /api/drive/import-folder` — import all supported files in a Drive folder (recursive)
+- `GET /api/filesets/{fsid}/file?path=` — file content by rel_path (citation-jump viewer)
+- `GET /api/filesets/{fsid}/export` — download analysis + chat as Markdown
 - `POST /api/drive/disconnect` — revoke + delete stored Drive tokens
 - `GET /api/agent/info` — Agent Bridge info
 
@@ -1809,27 +1813,23 @@ async def drive_list(folder_id: str = Query("root"), search: str = Query(None)):
         })
     return {"folder_id": folder_id, "items": out, "search": term or None}
 
-@api_router.post("/drive/import")
-async def drive_import(body: dict):
-    file_ids = (body or {}).get("file_ids") or []
-    if not file_ids:
-        raise HTTPException(400, "No files selected")
-    fileset_id = (body or {}).get("fileset_id")
+async def _resolve_or_create_fileset(fileset_id, title):
     if fileset_id:
         fs = await db.file_sets.find_one({"id": fileset_id}, {"_id": 0})
         if not fs:
             raise HTTPException(404, "File set not found")
-    else:
-        fileset_id = str(uuid.uuid4())
-        await db.file_sets.insert_one({"id": fileset_id, "title": f"Drive import {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M')}",
-                                       "created_at": datetime.now(timezone.utc).isoformat()})
+        return fileset_id
+    fileset_id = str(uuid.uuid4())
+    await db.file_sets.insert_one({"id": fileset_id, "title": title,
+                                   "created_at": datetime.now(timezone.utc).isoformat()})
+    return fileset_id
 
-    svc = await _drive_service()
+async def _import_drive_ids(svc, file_ids, fileset_id):
     imported, skipped = [], []
-    for fid in file_ids[:100]:
+    for fid in file_ids[:200]:
         try:
             meta = await asyncio.to_thread(lambda: svc.files().get(fileId=fid, fields="id,name,mimeType,size").execute())
-        except Exception as e:
+        except Exception:
             skipped.append({"id": fid, "reason": "metadata fetch failed"}); continue
         name = meta.get("name", fid)
         mime = meta.get("mimeType", "")
@@ -1838,7 +1838,7 @@ async def drive_import(body: dict):
         try:
             if mime.startswith("application/vnd.google-apps."):
                 if mime not in GOOGLE_EXPORT_MAP:
-                    skipped.append({"name": name, "reason": f"unsupported Google type"}); continue
+                    skipped.append({"name": name, "reason": "unsupported Google type"}); continue
                 export_mime, ext = GOOGLE_EXPORT_MAP[mime]
                 data = await asyncio.to_thread(lambda: svc.files().export(fileId=fid, mimeType=export_mime).execute())
                 content_type = export_mime
@@ -1859,7 +1859,108 @@ async def drive_import(body: dict):
         except Exception as e:
             logger.error(f"drive import {fid} failed: {e}")
             skipped.append({"name": name, "reason": "download failed"})
+    return imported, skipped
+
+async def _drive_folder_file_ids(svc, folder_id, recursive=True, cap=200):
+    ids = []
+    def _children(fid):
+        res = svc.files().list(q=f"'{fid}' in parents and trashed=false", pageSize=200,
+                               fields="files(id,name,mimeType)").execute()
+        return res.get("files", [])
+    stack = [folder_id]
+    while stack and len(ids) < cap:
+        cur = stack.pop()
+        for c in await asyncio.to_thread(_children, cur):
+            if c.get("mimeType") == "application/vnd.google-apps.folder":
+                if recursive:
+                    stack.append(c["id"])
+            else:
+                ids.append(c["id"])
+                if len(ids) >= cap:
+                    break
+    return ids
+
+@api_router.post("/drive/import")
+async def drive_import(body: dict):
+    file_ids = (body or {}).get("file_ids") or []
+    if not file_ids:
+        raise HTTPException(400, "No files selected")
+    fileset_id = await _resolve_or_create_fileset(
+        (body or {}).get("fileset_id"),
+        f"Drive import {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M')}")
+    svc = await _drive_service()
+    imported, skipped = await _import_drive_ids(svc, file_ids, fileset_id)
     return {"fileset_id": fileset_id, "imported": imported, "skipped": skipped}
+
+@api_router.post("/drive/import-folder")
+async def drive_import_folder(body: dict):
+    folder_id = (body or {}).get("folder_id")
+    if not folder_id:
+        raise HTTPException(400, "folder_id required")
+    recursive = bool((body or {}).get("recursive", True))
+    svc = await _drive_service()
+    try:
+        meta = await asyncio.to_thread(lambda: svc.files().get(fileId=folder_id, fields="id,name,mimeType").execute())
+    except Exception:
+        raise HTTPException(404, "Folder not found")
+    fname = meta.get("name", "folder")
+    fileset_id = await _resolve_or_create_fileset(
+        (body or {}).get("fileset_id"), f"Drive · {fname}")
+    ids = await _drive_folder_file_ids(svc, folder_id, recursive=recursive, cap=200)
+    if not ids:
+        return {"fileset_id": fileset_id, "imported": [], "skipped": [{"name": fname, "reason": "no supported files found"}]}
+    imported, skipped = await _import_drive_ids(svc, ids, fileset_id)
+    return {"fileset_id": fileset_id, "imported": imported, "skipped": skipped}
+
+@api_router.get("/filesets/{fsid}/file")
+async def get_fileset_file_by_path(fsid: str, path: str = Query(...)):
+    """Return a file's text content by its rel_path (for citation-jump viewer)."""
+    rec = await db.afiles.find_one({"fileset_id": fsid, "rel_path": path, "is_deleted": False}, {"_id": 0})
+    if not rec:
+        rec = await db.afiles.find_one({"fileset_id": fsid, "original_filename": path, "is_deleted": False}, {"_id": 0})
+    if not rec:
+        raise HTTPException(404, "File not found in this set")
+    content = rec.get("text_excerpt")
+    if content is None:
+        try:
+            data, _ = await asyncio.to_thread(storage_get, rec["storage_path"])
+            content = data.decode("utf-8", errors="replace")
+        except Exception:
+            content = "[binary file — no text preview available]"
+    return {"rel_path": rec["rel_path"], "content_type": rec.get("content_type"),
+            "readable": rec.get("readable", False), "content": content}
+
+@api_router.get("/filesets/{fsid}/export")
+async def export_fileset(fsid: str):
+    fs = await db.file_sets.find_one({"id": fsid}, {"_id": 0})
+    if not fs:
+        raise HTTPException(404, "File set not found")
+    files = await db.afiles.find({"fileset_id": fsid, "is_deleted": False}, {"_id": 0}).sort("rel_path", 1).to_list(500)
+    analyses = await db.file_analyses.find({"fileset_id": fsid}, {"_id": 0}).sort("created_at", -1).to_list(1)
+    chats = await db.file_chats.find({"fileset_id": fsid}, {"_id": 0}).sort("created_at", 1).to_list(500)
+
+    lines = [f"# {fs['title']}", "", f"_Exported: {datetime.now(timezone.utc).isoformat()}_", ""]
+    lines.append(f"## Files ({len(files)})")
+    for f in files:
+        src = f.get("source", "upload")
+        lines.append(f"- `{f['rel_path']}` ({f['content_type']}, {f['size']} bytes, via {src})")
+    lines.append("")
+    if analyses:
+        a = analyses[0]
+        lines.append(f"## AI Analysis ({a.get('model_label','')})")
+        if a.get("question"):
+            lines.append(f"**Question:** {a['question']}\n")
+        lines.append(a.get("analysis", ""))
+        lines.append("")
+    if chats:
+        lines.append("## Follow-up Chat")
+        for c in chats:
+            who = "You" if c["role"] == "user" else "ACASO"
+            lines.append(f"**{who}:** {c['content']}\n")
+    md = "\n".join(lines)
+    safe = "".join(ch if ch.isalnum() or ch in "-_" else "-" for ch in fs["title"])[:50] or "analysis"
+    headers = {"Content-Disposition": f'attachment; filename="{safe}.md"'}
+    return Response(content=md, media_type="text/markdown", headers=headers)
 
 
 
@@ -3290,6 +3391,22 @@ body {
 .fa-modal-foot { display: flex; align-items: center; gap: 12px; padding: 14px 18px; border-top: 1px solid var(--border); }
 .fa-drive-count { font-size: 12px; color: var(--muted); }
 .fa-modal-foot .fa-analyze { margin-left: auto; padding: 10px 18px; }
+.fa-head-right { margin-left: auto; display: flex; align-items: center; gap: 8px; }
+.fa-head-right .fa-model { margin-left: 0; }
+.fa-export { display: inline-flex; align-items: center; gap: 6px; font-size: 11.5px; font-weight: 600; color: var(--text); background: rgba(255,255,255,0.04); border: 1px solid var(--border); border-radius: 9px; padding: 6px 11px; cursor: pointer; transition: border-color .16s, background .16s; }
+.fa-export:hover { border-color: var(--border-lit); background: rgba(139,124,255,0.12); }
+.fa-cite { display: inline; font-family: ui-monospace, "Source Code Pro", monospace; font-size: 12px; color: var(--gold); background: rgba(245,196,81,0.1); border: 1px solid rgba(245,196,81,0.3); border-radius: 5px; padding: 0 5px; cursor: pointer; transition: background .15s, border-color .15s; }
+.fa-cite:hover { background: rgba(245,196,81,0.22); border-color: var(--gold); }
+.fa-viewer { width: min(820px, 96vw); }
+.fa-viewer-line { margin-left: 8px; font-size: 11px; color: var(--gold); background: rgba(245,196,81,0.1); border-radius: 8px; padding: 2px 9px; }
+.fa-viewer .fa-modal-head span:first-of-type { font-family: ui-monospace, monospace; font-size: 13px; }
+.fa-viewer-body { flex: 1; overflow: auto; padding: 0; }
+.fa-viewer-code { margin: 0; background: #05060f; font-family: ui-monospace, "Source Code Pro", monospace; font-size: 12px; line-height: 1.55; }
+.fa-vline { display: flex; gap: 12px; padding: 0 14px; }
+.fa-vline.hit { background: rgba(245,196,81,0.14); box-shadow: inset 3px 0 0 var(--gold); }
+.fa-vnum { color: var(--dim); text-align: right; min-width: 40px; user-select: none; }
+.fa-vtext { color: var(--text); white-space: pre; }
+.fa-vline.hit .fa-vtext { color: #fff; }
 
 
 /* File Analyzer chat */
@@ -4683,16 +4800,30 @@ const fmtBytes = (n) => {
   return `${(n / (1024 * 1024)).toFixed(1)} MB`;
 };
 
-function Markdown({ text }) {
+function Markdown({ text, onCite }) {
   if (!text) return null;
+  const CITE = /^([A-Za-z0-9_.\/-]+\.[A-Za-z0-9]+):(\d+)(?:-(\d+))?$/;
   const inline = (t) => {
     const nodes = [];
     const re = /(\*\*([^*]+)\*\*|`([^`]+)`)/g;
     let last = 0, m, i = 0;
     while ((m = re.exec(t)) !== null) {
       if (m.index > last) nodes.push(t.slice(last, m.index));
-      if (m[2] !== undefined) nodes.push(<strong key={`b${i++}`}>{m[2]}</strong>);
-      else if (m[3] !== undefined) nodes.push(<code key={`c${i++}`}>{m[3]}</code>);
+      if (m[2] !== undefined) {
+        nodes.push(<strong key={`b${i++}`}>{m[2]}</strong>);
+      } else if (m[3] !== undefined) {
+        const cm = onCite && m[3].match(CITE);
+        if (cm) {
+          const path = cm[1], line = parseInt(cm[2], 10);
+          nodes.push(
+            <button key={`cite${i++}`} className="fa-cite" onClick={() => onCite(path, line)} title="Open and highlight this line">
+              {m[3]}
+            </button>
+          );
+        } else {
+          nodes.push(<code key={`c${i++}`}>{m[3]}</code>);
+        }
+      }
       last = m.index + m[0].length;
     }
     if (last < t.length) nodes.push(t.slice(last));
@@ -4739,6 +4870,7 @@ export default function FileAnalyzer() {
   const [driveLoading, setDriveLoading] = useState(false);
   const [driveImporting, setDriveImporting] = useState(false);
   const [driveSearch, setDriveSearch] = useState("");
+  const [viewer, setViewer] = useState(null); // { path, line, content, loading }
   const filesInput = useRef(null);
   const folderInput = useRef(null);
 
@@ -4949,6 +5081,41 @@ export default function FileAnalyzer() {
     } finally { setDriveImporting(false); }
   };
 
+  const importFolder = async () => {
+    const folder = driveCrumbs[driveCrumbs.length - 1];
+    setDriveImporting(true);
+    try {
+      const r = await axios.post(`${API}/drive/import-folder`, { folder_id: folder.id, fileset_id: activeId, recursive: true });
+      setActiveId(r.data.fileset_id);
+      await loadSets();
+      await loadFiles(r.data.fileset_id);
+      const imp = r.data.imported?.length || 0;
+      const skp = r.data.skipped?.length || 0;
+      toast.success(`Imported ${imp} file${imp !== 1 ? "s" : ""} from "${folder.name}"${skp ? ` · ${skp} skipped` : ""}`);
+      setDriveOpen(false); setDriveSel([]);
+      if (imp > 0) { toast("Auto-analyzing imported files…"); analyze(r.data.fileset_id, null); }
+    } catch (e) {
+      toast.error(e?.response?.data?.detail || "Folder import failed");
+    } finally { setDriveImporting(false); }
+  };
+
+  const exportSet = () => {
+    if (!activeId) { toast.error("Nothing to export yet"); return; }
+    window.open(`${API}/filesets/${activeId}/export`, "_blank", "noopener");
+  };
+
+  const openCite = async (path, line) => {
+    if (!activeId) return;
+    setViewer({ path, line, content: null, loading: true });
+    try {
+      const r = await axios.get(`${API}/filesets/${activeId}/file?path=${encodeURIComponent(path)}`);
+      setViewer({ path, line, content: r.data.content, loading: false });
+    } catch (e) {
+      toast.error(e?.response?.data?.detail || "Could not open file");
+      setViewer(null);
+    }
+  };
+
   return (
     <div className="fa-wrap" data-testid="file-analyzer">
       <section className="fa-console">
@@ -5053,7 +5220,16 @@ export default function FileAnalyzer() {
         </section>
 
         <section className="fa-result" data-testid="analyzer-result">
-          <div className="fa-sub-head"><Sparkles size={14} /> AI Analysis {analysis?.model_label && <span className="fa-model">{analysis.model_label}</span>}</div>
+          <div className="fa-sub-head"><Sparkles size={14} /> AI Analysis
+            <div className="fa-head-right">
+              {analysis?.model_label && <span className="fa-model">{analysis.model_label}</span>}
+              {activeId && files.length > 0 && (
+                <button className="fa-export" data-testid="analyzer-export" onClick={exportSet} title="Download analysis + chat as Markdown">
+                  <Download size={13} /> Export
+                </button>
+              )}
+            </div>
+          </div>
           {analyzing ? (
             <div className="fa-skeleton">
               {[...Array(5)].map((_, i) => <div key={i} className="fa-sk-line" style={{ width: `${90 - i * 9}%` }} />)}
@@ -5062,7 +5238,7 @@ export default function FileAnalyzer() {
             <>
               {analysis.truncated && <div className="fa-trunc">Note: content was truncated to fit the model context window.</div>}
               {analysis.question && <div className="fa-q">Q: {analysis.question}</div>}
-              <Markdown text={analysis.analysis} />
+              <Markdown text={analysis.analysis} onCite={openCite} />
             </>
           ) : (
             <div className="fa-empty"><Play size={24} /><p>Run an analysis to see per-file notes, cross-file insights, risks and recommended actions.</p></div>
@@ -5079,7 +5255,7 @@ export default function FileAnalyzer() {
             chat.map((m) => (
               <div key={m.id} className={`fa-msg ${m.role}`} data-testid={`analyzer-chat-msg-${m.role}`}>
                 <span className="fa-msg-who">{m.role === "user" ? "You" : "ACASO"}</span>
-                <div className="fa-msg-body"><Markdown text={m.content} /></div>
+                <div className="fa-msg-body"><Markdown text={m.content} onCite={openCite} /></div>
               </div>
             ))
           )}
@@ -5154,10 +5330,46 @@ export default function FileAnalyzer() {
               </div>
               <div className="fa-modal-foot">
                 <span className="fa-drive-count">{driveSel.length} selected</span>
+                <button className="fa-drive-btn ghost" data-testid="drive-import-folder" onClick={importFolder} disabled={driveImporting || !!driveSearch}
+                  title="Import every supported file in this folder (recursively)">
+                  <FolderUp size={14} /> Import entire folder
+                </button>
                 <button className="fa-analyze" data-testid="drive-import" onClick={importDrive} disabled={driveImporting || !driveSel.length}>
                   {driveImporting ? <Loader2 className="spin" size={15} /> : <Check size={15} />}
-                  {driveImporting ? "Importing…" : "Import to analysis"}
+                  {driveImporting ? "Importing…" : "Import selected"}
                 </button>
+              </div>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      <AnimatePresence>
+        {viewer && (
+          <motion.div className="fa-modal-overlay" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} onClick={() => setViewer(null)}>
+            <motion.div className="fa-modal fa-viewer" data-testid="file-viewer" initial={{ opacity: 0, y: 14 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: 14 }} onClick={(e) => e.stopPropagation()}>
+              <div className="fa-modal-head">
+                <FileText size={16} /> <span>{viewer.path}</span>
+                <span className="fa-viewer-line">line {viewer.line}</span>
+                <button className="fa-modal-x" onClick={() => setViewer(null)}><X size={16} /></button>
+              </div>
+              <div className="fa-viewer-body">
+                {viewer.loading ? (
+                  <div className="fa-empty"><Loader2 className="spin" size={18} /><p>Loading…</p></div>
+                ) : (
+                  <pre className="fa-viewer-code">
+                    {(viewer.content || "").split("\n").map((ln, i) => {
+                      const n = i + 1;
+                      const hit = n === viewer.line;
+                      return (
+                        <div key={n} className={`fa-vline ${hit ? "hit" : ""}`} ref={hit ? (el) => el && el.scrollIntoView({ block: "center" }) : null}>
+                          <span className="fa-vnum">{n}</span>
+                          <span className="fa-vtext">{ln || " "}</span>
+                        </div>
+                      );
+                    })}
+                  </pre>
+                )}
               </div>
             </motion.div>
           </motion.div>
