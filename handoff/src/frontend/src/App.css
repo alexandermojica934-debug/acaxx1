@@ -673,6 +673,14 @@ body {
 .fa-modal-x { margin-left: auto; background: transparent; border: none; color: var(--muted); cursor: pointer; display: flex; padding: 4px; border-radius: 7px; }
 .fa-modal-x:hover { color: var(--text); background: rgba(255,255,255,0.06); }
 .fa-crumbs { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; padding: 10px 18px; border-bottom: 1px solid var(--border); }
+.fa-drive-search { display: flex; align-items: center; gap: 9px; padding: 10px 18px; border-bottom: 1px solid var(--border); background: rgba(4,6,16,0.35); }
+.fa-drive-search-ic { color: var(--cyan); flex-shrink: 0; }
+.fa-drive-search input { flex: 1; background: rgba(4,6,16,0.5); border: 1px solid var(--border); border-radius: 9px; padding: 8px 11px; color: var(--text); font-size: 12.5px; outline: none; transition: border-color .2s; }
+.fa-drive-search input:focus { border-color: var(--violet); box-shadow: 0 0 0 3px rgba(139,124,255,0.14); }
+.fa-drive-search-x { background: transparent; border: none; color: var(--muted); cursor: pointer; display: flex; padding: 4px; border-radius: 6px; }
+.fa-drive-search-x:hover { color: var(--text); background: rgba(255,255,255,0.06); }
+.fa-drive-search-go { font-size: 12px; font-weight: 600; color: #06060f; background: linear-gradient(135deg, var(--violet2), var(--cyan)); border: none; border-radius: 9px; padding: 8px 14px; cursor: pointer; }
+.fa-drive-search-go:hover { opacity: 0.92; }
 .fa-crumb { display: inline-flex; align-items: center; gap: 4px; color: var(--dim); }
 .fa-crumb button { background: transparent; border: none; color: var(--muted); font-size: 12px; cursor: pointer; padding: 3px 5px; border-radius: 6px; }
 .fa-crumb button:hover { color: var(--cyan); }

@@ -71,6 +71,7 @@ export default function FileAnalyzer() {
   const [driveSel, setDriveSel] = useState([]);
   const [driveLoading, setDriveLoading] = useState(false);
   const [driveImporting, setDriveImporting] = useState(false);
+  const [driveSearch, setDriveSearch] = useState("");
   const filesInput = useRef(null);
   const folderInput = useRef(null);
 
@@ -151,11 +152,13 @@ export default function FileAnalyzer() {
 
   const download = (fid) => window.open(`${API}/files/${fid}/download`, "_blank", "noopener");
 
-  const analyze = async () => {
-    if (!activeId || !files.length) { toast.error("Upload files first"); return; }
+  const analyze = async (fsid, q) => {
+    const id = (typeof fsid === "string" && fsid) ? fsid : activeId;
+    if (!id) { toast.error("Upload files first"); return; }
     setAnalyzing(true);
     try {
-      const r = await axios.post(`${API}/filesets/${activeId}/analyze`, { question: question.trim() || null });
+      const question_ = (q !== undefined && q !== null) ? q : (question.trim() || null);
+      const r = await axios.post(`${API}/filesets/${id}/analyze`, { question: question_ });
       setAnalysis(r.data);
       toast.success(`Analysis complete · ${r.data.model_label}`);
     } catch (e) {
@@ -223,16 +226,37 @@ export default function FileAnalyzer() {
   const openDrive = async () => {
     setDriveOpen(true);
     setDriveSel([]);
+    setDriveSearch("");
     setDriveCrumbs([{ id: "root", name: "My Drive" }]);
     await browseFolder("root", [{ id: "root", name: "My Drive" }]);
   };
 
+  const searchDrive = async (term) => {
+    const t = (term ?? driveSearch).trim();
+    if (!t) { const cur = driveCrumbs[driveCrumbs.length - 1]; browseFolder(cur.id, driveCrumbs); return; }
+    setDriveLoading(true);
+    try {
+      const r = await axios.get(`${API}/drive/list?search=${encodeURIComponent(t)}`);
+      setDriveItems(r.data.items || []);
+    } catch (e) {
+      toast.error(e?.response?.data?.detail || "Drive search failed");
+    } finally { setDriveLoading(false); }
+  };
+
+  const clearSearch = () => {
+    setDriveSearch("");
+    const cur = driveCrumbs[driveCrumbs.length - 1];
+    browseFolder(cur.id, driveCrumbs);
+  };
+
   const enterFolder = (item) => {
+    setDriveSearch("");
     const crumbs = [...driveCrumbs, { id: item.id, name: item.name }];
     browseFolder(item.id, crumbs);
   };
 
   const gotoCrumb = (idx) => {
+    setDriveSearch("");
     const crumbs = driveCrumbs.slice(0, idx + 1);
     browseFolder(crumbs[crumbs.length - 1].id, crumbs);
   };
@@ -252,6 +276,7 @@ export default function FileAnalyzer() {
       toast.success(`Imported ${imp} file${imp !== 1 ? "s" : ""} from Drive${skp ? ` · ${skp} skipped` : ""}`);
       setDriveOpen(false);
       setDriveSel([]);
+      if (imp > 0) { toast("Auto-analyzing imported files…"); analyze(r.data.fileset_id, null); }
     } catch (e) {
       toast.error(e?.response?.data?.detail || "Drive import failed");
     } finally { setDriveImporting(false); }
@@ -353,7 +378,7 @@ export default function FileAnalyzer() {
               placeholder="Optional: ask a specific question about these files (e.g. 'find security risks' or 'summarize the API')"
               rows={2}
             />
-            <button className="fa-analyze" data-testid="analyzer-run" onClick={analyze} disabled={analyzing || !files.length}>
+            <button className="fa-analyze" data-testid="analyzer-run" onClick={() => analyze()} disabled={analyzing || !files.length}>
               {analyzing ? <Loader2 className="spin" size={16} /> : <Sparkles size={16} />}
               {analyzing ? "Analyzing…" : "Analyze with AI"}
             </button>
@@ -415,6 +440,18 @@ export default function FileAnalyzer() {
               <div className="fa-modal-head">
                 <Cloud size={16} /> <span>Google Drive</span>
                 <button className="fa-modal-x" onClick={() => setDriveOpen(false)}><X size={16} /></button>
+              </div>
+              <div className="fa-drive-search">
+                <Cloud size={13} className="fa-drive-search-ic" />
+                <input
+                  data-testid="drive-search-input"
+                  value={driveSearch}
+                  onChange={(e) => setDriveSearch(e.target.value)}
+                  onKeyDown={(e) => { if (e.key === "Enter") searchDrive(); }}
+                  placeholder="Search your Drive by file name, then press Enter"
+                />
+                {driveSearch && <button className="fa-drive-search-x" data-testid="drive-search-clear" onClick={clearSearch}><X size={13} /></button>}
+                <button className="fa-drive-search-go" data-testid="drive-search-go" onClick={() => searchDrive()}>Search</button>
               </div>
               <div className="fa-crumbs">
                 {driveCrumbs.map((c, i) => (

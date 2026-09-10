@@ -1214,6 +1214,24 @@ def _fileset_context(files: list, budget: int = 12000, per_file: int = 2500) -> 
             parts.append(f"{head}\n[binary or empty — not included]")
     return "\n\n".join(parts)
 
+def _fileset_context_numbered(files: list, budget: int = 12000, per_file: int = 3000) -> str:
+    """Like _fileset_context but prefixes every source line with its 1-based line number
+    so the model can cite exact locations (path:line) and quote snippets."""
+    used = 0
+    parts = []
+    for f in files:
+        head = f"===== {f['rel_path']} ({f['content_type']}, {f['size']} bytes) ====="
+        if f.get("readable") and f.get("text_excerpt") and used < budget:
+            excerpt = f["text_excerpt"][:per_file]
+            if used + len(excerpt) > budget:
+                excerpt = excerpt[: max(0, budget - used)]
+            used += len(excerpt)
+            numbered = "\n".join(f"{i+1:>4}| {ln}" for i, ln in enumerate(excerpt.split("\n")))
+            parts.append(f"{head}\n{numbered}")
+        else:
+            parts.append(f"{head}\n[binary or empty — not included]")
+    return "\n\n".join(parts)
+
 @api_router.get("/filesets/{fsid}/chat")
 async def get_fileset_chat(fsid: str):
     docs = await db.file_chats.find({"fileset_id": fsid}, {"_id": 0}).sort("created_at", 1).to_list(200)
@@ -1234,12 +1252,15 @@ async def post_fileset_chat(fsid: str, body: dict):
     history = await db.file_chats.find({"fileset_id": fsid}, {"_id": 0}).sort("created_at", 1).to_list(200)
     recent = history[-8:]
     convo = "\n".join([f"{h['role'].upper()}: {h['content']}" for h in recent])
-    context = _fileset_context(files)
+    context = _fileset_context_numbered(files)
 
     system = (
-        "You are ACASO's file analyst assistant. Answer the user's questions strictly grounded in the "
-        "provided uploaded files. Cite file names/paths in backticks. If the answer isn't in the files, say so. "
-        "Never reveal secret values you might see; flag them as '[possible secret redacted]'. Be concise and useful."
+        "You are ACASO's file analyst assistant. Answer strictly grounded in the provided uploaded files. "
+        "The file contents are shown with line numbers in the form `NNNN| text`. "
+        "When you make a claim about a file, CITE the exact location as `path:line` (or `path:start-end` for a range) "
+        "and QUOTE the relevant snippet in a fenced code block or inline backticks. "
+        "If the answer isn't in the files, say so plainly. Do NOT include the leading 'NNNN| ' line-number prefix inside your quoted snippets. "
+        "Never reveal secret values you might see; flag them as '[possible secret redacted]'. Be concise and precise."
     )
     prompt = (
         f"UPLOADED FILES CONTEXT:\n{context}\n\n"
@@ -1669,12 +1690,19 @@ async def drive_disconnect():
     return {"ok": True}
 
 @api_router.get("/drive/list")
-async def drive_list(folder_id: str = Query("root")):
+async def drive_list(folder_id: str = Query("root"), search: str = Query(None)):
     svc = await _drive_service()
+    term = (search or "").strip()
     def _list():
-        query = f"'{folder_id}' in parents and trashed=false"
+        if term:
+            safe = term.replace("\\", "").replace("'", "\\'")
+            query = f"name contains '{safe}' and trashed=false"
+            order = "folder,name"
+        else:
+            query = f"'{folder_id}' in parents and trashed=false"
+            order = "folder,name"
         res = svc.files().list(
-            q=query, pageSize=200, orderBy="folder,name",
+            q=query, pageSize=200, orderBy=order,
             fields="files(id,name,mimeType,size,modifiedTime)",
         ).execute()
         return res.get("files", [])
@@ -1688,7 +1716,7 @@ async def drive_list(folder_id: str = Query("root")):
             "supported": is_folder or (f.get("mimeType") in GOOGLE_EXPORT_MAP)
                          or ((f.get("name", "").rsplit(".", 1)[-1].lower() if "." in f.get("name", "") else "") in ANALYZER_EXT),
         })
-    return {"folder_id": folder_id, "items": out}
+    return {"folder_id": folder_id, "items": out, "search": term or None}
 
 @api_router.post("/drive/import")
 async def drive_import(body: dict):

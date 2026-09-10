@@ -1,22 +1,22 @@
 [
   {
-    "content": "Self-Directive on Server (compile+import pre-validation) — verified",
+    "content": "Drive Search (backend + frontend)",
     "status": "completed"
   },
   {
-    "content": "Analyzer Chat (backend+frontend) — verified",
+    "content": "Drive Auto-Analyze after import",
     "status": "completed"
   },
   {
-    "content": "Refresh Handoff (reproducible generator + republished, incl. Drive) — done",
+    "content": "Chat line-number citations (verified path:line + snippet)",
     "status": "completed"
   },
   {
-    "content": "Google Drive: backend OAuth + frontend browser/import built; verified status+connect URL",
+    "content": "Regenerate handoff",
     "status": "completed"
   },
   {
-    "content": "BLOCKED: user must supply a Google Cloud WEB-application OAuth client (Desktop client won't work) to complete Drive login",
-    "status": "pending"
+    "content": "Web-app OAuth credentials installed + connect flow verified (client_id/redirect/scope correct)",
+    "status": "completed"
   }
 ]

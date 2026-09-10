@@ -54,8 +54,8 @@ FEATURES = [
     "Real object storage: mission Evidence & Media attachments (upload/list/download/delete)",
     "File Analyzer: upload files OR a whole folder -> real object storage -> AI analysis + follow-up chat grounded in the files",
     "Self-Directive: PREVIEW-ONLY, approval-gated self-editing (propose unified diff -> approve/apply with compile+import validation & snapshot -> rollback), audited",
-    "File Analyzer follow-up chat: ask questions grounded in the uploaded files (cites filenames)",
-    "Google Drive ingestion (user OAuth): connect Drive, browse folders, import selected files into an analysis set (requires user-supplied Web-app OAuth client)",
+    "File Analyzer follow-up chat: ask questions grounded in the uploaded files; cites exact `path:line` locations and quotes snippets (line-numbered context)",
+    "Google Drive ingestion (user OAuth): connect Drive, browse folders, SEARCH by name, import selected files into an analysis set (auto-analyzes right after import). Requires user-supplied Web-app OAuth client.",
 ]
 
 MODELS = {

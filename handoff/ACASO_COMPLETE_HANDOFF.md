@@ -1,6 +1,6 @@
 # ACASO Omniverse — Complete Handoff
 
-_Generated: 2026-09-09T23:55:11.572027+00:00_
+_Generated: 2026-09-10T00:00:28.675868+00:00_
 
 ## What this is
 A contest-ready **Directive-to-Payment Operating System** (FastAPI + React + MongoDB).
@@ -14,8 +14,8 @@ A contest-ready **Directive-to-Payment Operating System** (FastAPI + React + Mon
 - Real object storage: mission Evidence & Media attachments (upload/list/download/delete)
 - File Analyzer: upload files OR a whole folder -> real object storage -> AI analysis + follow-up chat grounded in the files
 - Self-Directive: PREVIEW-ONLY, approval-gated self-editing (propose unified diff -> approve/apply with compile+import validation & snapshot -> rollback), audited
-- File Analyzer follow-up chat: ask questions grounded in the uploaded files (cites filenames)
-- Google Drive ingestion (user OAuth): connect Drive, browse folders, import selected files into an analysis set (requires user-supplied Web-app OAuth client)
+- File Analyzer follow-up chat: ask questions grounded in the uploaded files; cites exact `path:line` locations and quotes snippets (line-numbered context)
+- Google Drive ingestion (user OAuth): connect Drive, browse folders, SEARCH by name, import selected files into an analysis set (auto-analyzes right after import). Requires user-supplied Web-app OAuth client.
 
 ## Tech & Integrations
 - Backend: FastAPI + Motor (MongoDB), Pydantic, UUID ids, timezone-aware UTC.
@@ -1305,6 +1305,24 @@ def _fileset_context(files: list, budget: int = 12000, per_file: int = 2500) -> 
             parts.append(f"{head}\n[binary or empty — not included]")
     return "\n\n".join(parts)
 
+def _fileset_context_numbered(files: list, budget: int = 12000, per_file: int = 3000) -> str:
+    """Like _fileset_context but prefixes every source line with its 1-based line number
+    so the model can cite exact locations (path:line) and quote snippets."""
+    used = 0
+    parts = []
+    for f in files:
+        head = f"===== {f['rel_path']} ({f['content_type']}, {f['size']} bytes) ====="
+        if f.get("readable") and f.get("text_excerpt") and used < budget:
+            excerpt = f["text_excerpt"][:per_file]
+            if used + len(excerpt) > budget:
+                excerpt = excerpt[: max(0, budget - used)]
+            used += len(excerpt)
+            numbered = "\n".join(f"{i+1:>4}| {ln}" for i, ln in enumerate(excerpt.split("\n")))
+            parts.append(f"{head}\n{numbered}")
+        else:
+            parts.append(f"{head}\n[binary or empty — not included]")
+    return "\n\n".join(parts)
+
 @api_router.get("/filesets/{fsid}/chat")
 async def get_fileset_chat(fsid: str):
     docs = await db.file_chats.find({"fileset_id": fsid}, {"_id": 0}).sort("created_at", 1).to_list(200)
@@ -1325,12 +1343,15 @@ async def post_fileset_chat(fsid: str, body: dict):
     history = await db.file_chats.find({"fileset_id": fsid}, {"_id": 0}).sort("created_at", 1).to_list(200)
     recent = history[-8:]
     convo = "\n".join([f"{h['role'].upper()}: {h['content']}" for h in recent])
-    context = _fileset_context(files)
+    context = _fileset_context_numbered(files)
 
     system = (
-        "You are ACASO's file analyst assistant. Answer the user's questions strictly grounded in the "
-        "provided uploaded files. Cite file names/paths in backticks. If the answer isn't in the files, say so. "
-        "Never reveal secret values you might see; flag them as '[possible secret redacted]'. Be concise and useful."
+        "You are ACASO's file analyst assistant. Answer strictly grounded in the provided uploaded files. "
+        "The file contents are shown with line numbers in the form `NNNN| text`. "
+        "When you make a claim about a file, CITE the exact location as `path:line` (or `path:start-end` for a range) "
+        "and QUOTE the relevant snippet in a fenced code block or inline backticks. "
+        "If the answer isn't in the files, say so plainly. Do NOT include the leading 'NNNN| ' line-number prefix inside your quoted snippets. "
+        "Never reveal secret values you might see; flag them as '[possible secret redacted]'. Be concise and precise."
     )
     prompt = (
         f"UPLOADED FILES CONTEXT:\n{context}\n\n"
@@ -1760,12 +1781,19 @@ async def drive_disconnect():
     return {"ok": True}
 
 @api_router.get("/drive/list")
-async def drive_list(folder_id: str = Query("root")):
+async def drive_list(folder_id: str = Query("root"), search: str = Query(None)):
     svc = await _drive_service()
+    term = (search or "").strip()
     def _list():
-        query = f"'{folder_id}' in parents and trashed=false"
+        if term:
+            safe = term.replace("\\", "").replace("'", "\\'")
+            query = f"name contains '{safe}' and trashed=false"
+            order = "folder,name"
+        else:
+            query = f"'{folder_id}' in parents and trashed=false"
+            order = "folder,name"
         res = svc.files().list(
-            q=query, pageSize=200, orderBy="folder,name",
+            q=query, pageSize=200, orderBy=order,
             fields="files(id,name,mimeType,size,modifiedTime)",
         ).execute()
         return res.get("files", [])
@@ -1779,7 +1807,7 @@ async def drive_list(folder_id: str = Query("root")):
             "supported": is_folder or (f.get("mimeType") in GOOGLE_EXPORT_MAP)
                          or ((f.get("name", "").rsplit(".", 1)[-1].lower() if "." in f.get("name", "") else "") in ANALYZER_EXT),
         })
-    return {"folder_id": folder_id, "items": out}
+    return {"folder_id": folder_id, "items": out, "search": term or None}
 
 @api_router.post("/drive/import")
 async def drive_import(body: dict):
@@ -3234,6 +3262,14 @@ body {
 .fa-modal-x { margin-left: auto; background: transparent; border: none; color: var(--muted); cursor: pointer; display: flex; padding: 4px; border-radius: 7px; }
 .fa-modal-x:hover { color: var(--text); background: rgba(255,255,255,0.06); }
 .fa-crumbs { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; padding: 10px 18px; border-bottom: 1px solid var(--border); }
+.fa-drive-search { display: flex; align-items: center; gap: 9px; padding: 10px 18px; border-bottom: 1px solid var(--border); background: rgba(4,6,16,0.35); }
+.fa-drive-search-ic { color: var(--cyan); flex-shrink: 0; }
+.fa-drive-search input { flex: 1; background: rgba(4,6,16,0.5); border: 1px solid var(--border); border-radius: 9px; padding: 8px 11px; color: var(--text); font-size: 12.5px; outline: none; transition: border-color .2s; }
+.fa-drive-search input:focus { border-color: var(--violet); box-shadow: 0 0 0 3px rgba(139,124,255,0.14); }
+.fa-drive-search-x { background: transparent; border: none; color: var(--muted); cursor: pointer; display: flex; padding: 4px; border-radius: 6px; }
+.fa-drive-search-x:hover { color: var(--text); background: rgba(255,255,255,0.06); }
+.fa-drive-search-go { font-size: 12px; font-weight: 600; color: #06060f; background: linear-gradient(135deg, var(--violet2), var(--cyan)); border: none; border-radius: 9px; padding: 8px 14px; cursor: pointer; }
+.fa-drive-search-go:hover { opacity: 0.92; }
 .fa-crumb { display: inline-flex; align-items: center; gap: 4px; color: var(--dim); }
 .fa-crumb button { background: transparent; border: none; color: var(--muted); font-size: 12px; cursor: pointer; padding: 3px 5px; border-radius: 6px; }
 .fa-crumb button:hover { color: var(--cyan); }
@@ -4702,6 +4738,7 @@ export default function FileAnalyzer() {
   const [driveSel, setDriveSel] = useState([]);
   const [driveLoading, setDriveLoading] = useState(false);
   const [driveImporting, setDriveImporting] = useState(false);
+  const [driveSearch, setDriveSearch] = useState("");
   const filesInput = useRef(null);
   const folderInput = useRef(null);
 
@@ -4782,11 +4819,13 @@ export default function FileAnalyzer() {
 
   const download = (fid) => window.open(`${API}/files/${fid}/download`, "_blank", "noopener");
 
-  const analyze = async () => {
-    if (!activeId || !files.length) { toast.error("Upload files first"); return; }
+  const analyze = async (fsid, q) => {
+    const id = (typeof fsid === "string" && fsid) ? fsid : activeId;
+    if (!id) { toast.error("Upload files first"); return; }
     setAnalyzing(true);
     try {
-      const r = await axios.post(`${API}/filesets/${activeId}/analyze`, { question: question.trim() || null });
+      const question_ = (q !== undefined && q !== null) ? q : (question.trim() || null);
+      const r = await axios.post(`${API}/filesets/${id}/analyze`, { question: question_ });
       setAnalysis(r.data);
       toast.success(`Analysis complete · ${r.data.model_label}`);
     } catch (e) {
@@ -4854,16 +4893,37 @@ export default function FileAnalyzer() {
   const openDrive = async () => {
     setDriveOpen(true);
     setDriveSel([]);
+    setDriveSearch("");
     setDriveCrumbs([{ id: "root", name: "My Drive" }]);
     await browseFolder("root", [{ id: "root", name: "My Drive" }]);
   };
 
+  const searchDrive = async (term) => {
+    const t = (term ?? driveSearch).trim();
+    if (!t) { const cur = driveCrumbs[driveCrumbs.length - 1]; browseFolder(cur.id, driveCrumbs); return; }
+    setDriveLoading(true);
+    try {
+      const r = await axios.get(`${API}/drive/list?search=${encodeURIComponent(t)}`);
+      setDriveItems(r.data.items || []);
+    } catch (e) {
+      toast.error(e?.response?.data?.detail || "Drive search failed");
+    } finally { setDriveLoading(false); }
+  };
+
+  const clearSearch = () => {
+    setDriveSearch("");
+    const cur = driveCrumbs[driveCrumbs.length - 1];
+    browseFolder(cur.id, driveCrumbs);
+  };
+
   const enterFolder = (item) => {
+    setDriveSearch("");
     const crumbs = [...driveCrumbs, { id: item.id, name: item.name }];
     browseFolder(item.id, crumbs);
   };
 
   const gotoCrumb = (idx) => {
+    setDriveSearch("");
     const crumbs = driveCrumbs.slice(0, idx + 1);
     browseFolder(crumbs[crumbs.length - 1].id, crumbs);
   };
@@ -4883,6 +4943,7 @@ export default function FileAnalyzer() {
       toast.success(`Imported ${imp} file${imp !== 1 ? "s" : ""} from Drive${skp ? ` · ${skp} skipped` : ""}`);
       setDriveOpen(false);
       setDriveSel([]);
+      if (imp > 0) { toast("Auto-analyzing imported files…"); analyze(r.data.fileset_id, null); }
     } catch (e) {
       toast.error(e?.response?.data?.detail || "Drive import failed");
     } finally { setDriveImporting(false); }
@@ -4984,7 +5045,7 @@ export default function FileAnalyzer() {
               placeholder="Optional: ask a specific question about these files (e.g. 'find security risks' or 'summarize the API')"
               rows={2}
             />
-            <button className="fa-analyze" data-testid="analyzer-run" onClick={analyze} disabled={analyzing || !files.length}>
+            <button className="fa-analyze" data-testid="analyzer-run" onClick={() => analyze()} disabled={analyzing || !files.length}>
               {analyzing ? <Loader2 className="spin" size={16} /> : <Sparkles size={16} />}
               {analyzing ? "Analyzing…" : "Analyze with AI"}
             </button>
@@ -5046,6 +5107,18 @@ export default function FileAnalyzer() {
               <div className="fa-modal-head">
                 <Cloud size={16} /> <span>Google Drive</span>
                 <button className="fa-modal-x" onClick={() => setDriveOpen(false)}><X size={16} /></button>
+              </div>
+              <div className="fa-drive-search">
+                <Cloud size={13} className="fa-drive-search-ic" />
+                <input
+                  data-testid="drive-search-input"
+                  value={driveSearch}
+                  onChange={(e) => setDriveSearch(e.target.value)}
+                  onKeyDown={(e) => { if (e.key === "Enter") searchDrive(); }}
+                  placeholder="Search your Drive by file name, then press Enter"
+                />
+                {driveSearch && <button className="fa-drive-search-x" data-testid="drive-search-clear" onClick={clearSearch}><X size={13} /></button>}
+                <button className="fa-drive-search-go" data-testid="drive-search-go" onClick={() => searchDrive()}>Search</button>
               </div>
               <div className="fa-crumbs">
                 {driveCrumbs.map((c, i) => (
