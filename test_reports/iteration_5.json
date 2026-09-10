@@ -1,0 +1,93 @@
+{
+  "summary": "Completed comprehensive testing of Companion Watch Mode and Apex Nexus features. All backend APIs tested successfully with LLM budget constraints respected (2 watch calls, 1 generate call). Frontend UI verified for Companion mode, Apex tab, and regression tabs.",
+  "backend_issues": {
+    "critical_bugs": [],
+    "flaky_endpoints": []
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": []
+  },
+  "passed_tests": [
+    "WATCH: Empty image_b64 -> 400",
+    "WATCH: Error frame detection with notable=true, kind='error', message mentions error/httpx",
+    "WATCH: Calm dashboard frame with notable=false, kind='none', message=''",
+    "WATCH: History API returns watch messages with session_id",
+    "WATCH: DELETE clears history",
+    "APEX: Products catalog returns 3 products (rfp_kit, prompt_library, seo_pack) with correct fields",
+    "APEX: Payments provider='manual', stripe_configured=false, note mentions STRIPE_API_KEY",
+    "APEX: Generate validation - invalid product -> 400",
+    "APEX: Generate validation - prompt_library without domain -> 400",
+    "APEX: Generate validation - seo_pack missing required fields -> 400",
+    "APEX: Generate validation - rfp_kit without opportunity_id or rfp_text -> 400",
+    "APEX: Generate prompt_library with count=10 returns 8-12 prompts, markdown >1500 chars, 32-char hex API key",
+    "APEX: Deliverables list excludes markdown field",
+    "APEX: Deliverable GET includes markdown and data",
+    "APEX: Export deliverable as markdown with attachment header and 'ACASO Apex Nexus' text",
+    "APEX: Export deliverable as JSON with data.prompts",
+    "APEX: Order creation with invalid email -> 400",
+    "APEX: Order creation with valid data returns pending_payment status, manual provider, 32-char unlock token",
+    "APEX: Order creation with wrong product for deliverable -> 400",
+    "APEX: Unlock before payment -> 402",
+    "APEX: Library API before payment -> 402",
+    "APEX: Library API with wrong key -> 401",
+    "APEX: PATCH order with invalid status -> 400",
+    "APEX: PATCH order to paid sets status and paid_at",
+    "APEX: Unlock after payment returns markdown",
+    "APEX: Unlock with fmt=status returns JSON with api_key",
+    "APEX: Library API after payment returns prompts array",
+    "APEX: Orders list shows downloads >= 1",
+    "APEX: PATCH order to refunded",
+    "APEX: Unlock after refund -> 402",
+    "APEX: Unlock with unknown token -> 404",
+    "LOCAL NODE: --help contains --companion and --no-top flags",
+    "LOCAL NODE: /local-node/acaso_node.py served file contains 'launch_companion'",
+    "COMPANION: /companion.webmanifest returns JSON with start_url='/?mode=companion' and 2+ icons",
+    "COMPANION: /companion-192.png returns image/png",
+    "REGRESSION: /api/radar/sources returns 3",
+    "REGRESSION: /api/acaso/presets returns 3",
+    "REGRESSION: /api/self/scan/config returns enabled=false",
+    "FRONTEND COMPANION: /?mode=companion renders with correct manifest, install button, share button, no watch button before sharing",
+    "FRONTEND COMPANION: Document title is 'ACASO Companion'",
+    "FRONTEND APEX: /?tab=apex renders with payments banner showing 'manual unlock'",
+    "FRONTEND APEX: 3 product cards present (rfp_kit, prompt_library, seo_pack)",
+    "FRONTEND APEX: Clicking prompt_library shows domain input",
+    "FRONTEND APEX: Clicking seo_pack shows business/service/region inputs",
+    "FRONTEND APEX: Clicking rfp_kit shows opportunity select with 28 options and rfp_text textarea",
+    "FRONTEND APEX: Generate button present",
+    "FRONTEND APEX: Deliverables section displays generated deliverable with export links",
+    "FRONTEND APEX: Orders section displays order with copy unlock button",
+    "FRONTEND REGRESSION: Node, Radar, Council, Voice, Self tabs load without console errors",
+    "FRONTEND REGRESSION: Voice commander widget present",
+    "FRONTEND REGRESSION: Header companion launch button present"
+  ],
+  "test_report_links": [
+    "/app/backend_test.py"
+  ],
+  "action_item_for_main_agent": "",
+  "updated_files": [
+    "/app/backend_test.py"
+  ],
+  "success_percentage": {
+    "backend": "100% (37/37 tests passed)",
+    "frontend": "100% (all UI elements and integrations verified)"
+  },
+  "should_call_test_agent_after_fix": false,
+  "should_main_agent_test_itself": false,
+  "llm_budget_usage": {
+    "watch_calls": "2/2 (budget respected)",
+    "generate_calls": "1/1 (budget respected)",
+    "chat_calls": "0/0 (budget respected)"
+  },
+  "notes": [
+    "All LLM budget constraints were strictly followed",
+    "Watch mode correctly identifies error frames (notable=true, kind='error') and calm frames (notable=false, kind='none')",
+    "Apex Nexus full order flow tested: create order -> unlock before payment (402) -> mark paid -> unlock after payment (200) -> refund -> unlock after refund (402)",
+    "Prompt library gated API tested: wrong key (401), before payment (402), after payment (200)",
+    "Local Node companion flag verified in --help output and served file",
+    "Frontend Companion mode correctly swaps manifest to companion.webmanifest",
+    "Frontend Apex displays deliverables and orders from backend test",
+    "All regression tabs (Node, Radar, Council, Voice, Self) load without errors"
+  ]
+}

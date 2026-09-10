@@ -2,7 +2,7 @@ import React, { useCallback, useEffect, useRef, useState } from "react";
 import axios from "axios";
 import { toast } from "sonner";
 import {
-  Castle, Mic, Square, MonitorUp, MonitorOff, Send, Volume2, VolumeX, Loader2, Trash2, Camera, Radio, ExternalLink, Pin
+  Castle, Mic, Square, MonitorUp, MonitorOff, Send, Volume2, VolumeX, Loader2, Trash2, Camera, Radio, ExternalLink, Pin, Eye, EyeOff, Download
 } from "lucide-react";
 import { API } from "../App";
 
@@ -31,6 +31,9 @@ export default function Companion({ standalone = true }) {
   const [handsFree, setHandsFree] = useState(false);
   const [speak, setSpeak] = useState(true);
   const [speaking, setSpeaking] = useState(false);
+  const [watch, setWatch] = useState(false);
+  const [watchState, setWatchState] = useState({ glances: 0, skipped: 0, last: null, checking: false });
+  const watchRef = useRef({ prevHash: null, prevSummary: null, lastSpoken: null, busy: false });
   const videoRef = useRef(null);
   const streamRef = useRef(null);
   const recRef = useRef(null);
@@ -42,7 +45,24 @@ export default function Companion({ standalone = true }) {
     (async () => { try { setMessages((await axios.get(`${API}/companion/history`, { params: { session_id: sessionId } })).data); } catch { /* silent */ } })();
   }, [sessionId]);
   useEffect(() => { endRef.current?.scrollIntoView({ behavior: "smooth" }); }, [messages, streaming]);
-  useEffect(() => { if (standalone) document.title = "ACASO Companion"; }, [standalone]);
+  const [installEvt, setInstallEvt] = useState(null);
+  const [installed, setInstalled] = useState(() => typeof window !== "undefined" && window.matchMedia?.("(display-mode: standalone)").matches);
+  useEffect(() => {
+    if (!standalone) return undefined;
+    document.title = "ACASO Companion";
+    // swap the page manifest so Chrome offers to install *the Companion* as its own desktop app
+    document.querySelectorAll('link[rel="manifest"]').forEach((l) => l.remove());
+    const link = document.createElement("link"); link.rel = "manifest"; link.href = "/companion.webmanifest"; document.head.appendChild(link);
+    const onPrompt = (e) => { e.preventDefault(); setInstallEvt(e); };
+    const onInstalled = () => { setInstalled(true); setInstallEvt(null); toast.success("ACASO Companion installed - find it in your Start menu / dock"); };
+    window.addEventListener("beforeinstallprompt", onPrompt);
+    window.addEventListener("appinstalled", onInstalled);
+    return () => { window.removeEventListener("beforeinstallprompt", onPrompt); window.removeEventListener("appinstalled", onInstalled); };
+  }, [standalone]);
+  const install = async () => {
+    if (installEvt) { installEvt.prompt(); const r = await installEvt.userChoice.catch(() => null); if (r?.outcome === "accepted") setInstallEvt(null); return; }
+    toast("Chrome: menu (⋮) → Cast, save and share → Install page as app. Or run the Local Node with --companion for an always-on-top window.", { duration: 9000 });
+  };
 
   // ---- screen / window share ----
   const startShare = async () => {
@@ -60,7 +80,7 @@ export default function Companion({ standalone = true }) {
   };
   const stopShare = useCallback(() => {
     try { streamRef.current?.getTracks().forEach((t) => t.stop()); } catch { /* ignore */ }
-    streamRef.current = null; setSharing(false); setShareLabel("");
+    streamRef.current = null; setSharing(false); setShareLabel(""); setWatch(false);
     if (videoRef.current) videoRef.current.srcObject = null;
   }, []);
   const captureFrame = () => {
@@ -73,6 +93,18 @@ export default function Companion({ standalone = true }) {
     c.getContext("2d").drawImage(v, 0, 0, c.width, c.height);
     return c.toDataURL("image/jpeg", 0.72).split(",")[1];
   };
+  /** 16x16 grayscale fingerprint - lets watch mode skip frames that barely changed (no model call). */
+  const frameHash = () => {
+    const v = videoRef.current;
+    if (!v || !v.videoWidth) return null;
+    const c = document.createElement("canvas"); c.width = 16; c.height = 16;
+    const ctx = c.getContext("2d"); ctx.drawImage(v, 0, 0, 16, 16);
+    const d = ctx.getImageData(0, 0, 16, 16).data; const out = [];
+    for (let i = 0; i < d.length; i += 4) out.push((d[i] + d[i + 1] + d[i + 2]) / 3);
+    return out;
+  };
+  const hashDiff = (a, b) => { if (!a || !b) return 1; let s = 0; for (let i = 0; i < a.length; i++) s += Math.abs(a[i] - b[i]); return s / (a.length * 255); };
+
 
   // ---- TTS ----
   const say = useCallback((t, onDone) => {
@@ -87,6 +119,37 @@ export default function Companion({ standalone = true }) {
     u.onerror = () => { setSpeaking(false); onDone?.(); };
     TTS.speak(u);
   }, []);
+
+  // ---- watch mode loop: glance every 30s, only call the model when the screen changed, speak only if notable ----
+  useEffect(() => {
+    if (!watch || !sharing) return undefined;
+    let cancelled = false;
+    const glance = async () => {
+      if (cancelled || watchRef.current.busy || busy) return;
+      const h = frameHash();
+      if (!h) return;
+      const changed = hashDiff(watchRef.current.prevHash, h) > 0.04; // ~4% average pixel change
+      if (!changed) { setWatchState((w) => ({ ...w, skipped: w.skipped + 1, last: new Date() })); return; }
+      const frame = captureFrame();
+      if (!frame) return;
+      watchRef.current.busy = true; setWatchState((w) => ({ ...w, checking: true }));
+      try {
+        const r = await axios.post(`${API}/companion/watch`, { image_b64: frame, session_id: sessionId, share_label: shareLabel,
+          previous_summary: watchRef.current.prevSummary, last_spoken: watchRef.current.lastSpoken }, { timeout: 60000 });
+        watchRef.current.prevHash = h; watchRef.current.prevSummary = r.data.summary;
+        setWatchState((w) => ({ ...w, glances: w.glances + 1, last: new Date(), checking: false }));
+        if (r.data.notable && r.data.message) {
+          watchRef.current.lastSpoken = r.data.message;
+          setMessages((m) => [...m, { id: `w-${Date.now()}`, role: "assistant", content: r.data.message, model_label: r.data.model_label, watch: true, kind: r.data.kind, created_at: r.data.at }]);
+          if (speak) say(r.data.message);
+        }
+      } catch { setWatchState((w) => ({ ...w, checking: false })); }
+      finally { watchRef.current.busy = false; }
+    };
+    const t0 = setTimeout(glance, 1500);
+    const iv = setInterval(glance, 30000);
+    return () => { cancelled = true; clearTimeout(t0); clearInterval(iv); };
+  }, [watch, sharing, sessionId, shareLabel, speak, say, busy]);
 
   // ---- send (SSE stream) ----
   const send = useCallback(async (msg, withFrame = includeFrame) => {
@@ -151,7 +214,8 @@ export default function Companion({ standalone = true }) {
           <button className="cp-ic" title={speak ? "Mute replies" : "Speak replies"} onClick={() => { setSpeak((s) => !s); TTS?.cancel(); }} data-testid="cp-mute">{speak ? <Volume2 size={14} /> : <VolumeX size={14} />}</button>
           <button className="cp-ic" title="Clear conversation" onClick={clear} data-testid="cp-clear"><Trash2 size={14} /></button>
           {!standalone && <button className="cp-ic" title="Open as its own window" onClick={openCompanionWindow} data-testid="cp-popout"><ExternalLink size={14} /></button>}
-          {standalone && <span className="cp-pin" title="Tip: in Chrome use menu > Cast, save, and share > Install ACASO for a real desktop app"><Pin size={12} /> desktop</span>}
+          {standalone && !installed && <button className="cp-install" onClick={install} title="Install as a desktop app" data-testid="cp-install"><Download size={12} /> Install app</button>}
+          {standalone && installed && <span className="cp-pin" title="Running as an installed desktop app"><Pin size={12} /> desktop app</span>}
         </div>
       </header>
 
@@ -163,12 +227,18 @@ export default function Companion({ standalone = true }) {
           <div className="cp-share-bar">
             <span title={shareLabel}><Radio size={11} /> {shareLabel.slice(0, 38) || "sharing"}</span>
             <label className="cp-chk" title="Attach a frame of the shared window to each message"><input type="checkbox" checked={includeFrame} onChange={(e) => setIncludeFrame(e.target.checked)} data-testid="cp-include-frame" /> see it</label>
+            <button className={`cp-ic ${watch ? "on" : ""}`} title={watch ? "Watch mode on - glances every 30s, speaks only for errors, forms or action prompts" : "Watch mode: glance every 30s and speak up only when something notable appears"} onClick={() => setWatch((w) => !w)} data-testid="cp-watch">{watch ? <Eye size={14} /> : <EyeOff size={14} />}</button>
             <button className="cp-ic" title="Describe what's on screen now" onClick={() => send("", true)} disabled={busy} data-testid="cp-look"><Camera size={14} /></button>
             <button className="cp-ic" title="Stop sharing" onClick={stopShare} data-testid="cp-share-stop"><MonitorOff size={14} /></button>
           </div>
         )}
       </div>
 
+      {watch && sharing && (
+        <div className="cp-watchbar" data-testid="cp-watch-status">
+          <Eye size={11} /> watching · {watchState.glances} glance{watchState.glances === 1 ? "" : "s"} · {watchState.skipped} unchanged skipped{watchState.checking ? " · checking..." : ""}
+        </div>
+      )}
       <div className="cp-log" data-testid="cp-log">
         {messages.length === 0 && !streaming && (
           <div className="cp-empty">Talk or type. Share a window and I can read what's on it - errors, forms, documents, dashboards - and tell you what to do next.</div>
@@ -176,6 +246,7 @@ export default function Companion({ standalone = true }) {
         {messages.map((m) => (
           <div key={m.id} className={`cp-msg ${m.role}`} data-testid={`cp-msg-${m.role}`}>
             {m.had_image && <span className="cp-tag"><Camera size={10} /> frame</span>}
+            {m.watch && <span className={`cp-tag k-${m.kind}`}><Eye size={10} /> watch · {m.kind}</span>}
             <div>{m.content}</div>
             {m.role === "assistant" && <button className="cp-replay" onClick={() => say(m.content)} title="Speak"><Volume2 size={11} /></button>}
           </div>

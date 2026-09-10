@@ -14,6 +14,8 @@ Safety, enforced HERE on your machine (the server enforces the same rules again)
   * Browser tasks fill forms and STOP. Nothing is submitted until you approve a separate submit step.
   * Passwords / 2FA: type them yourself in the Chrome window that opens. This program never sees or stores them.
   * --shell is off unless you pass it. Shell commands run inside the allowed root with a timeout.
+  * --companion opens the ACASO Companion as its own small always-on-top desktop window (real Chrome in app mode,
+    separate profile, so it survives closing your normal browser). Works with or without pairing.
 """
 import argparse
 import base64
@@ -308,6 +310,87 @@ class Node:
         return {"closed": sid or "all"}
 
 
+# ----------------------------------------------------------------------------------------------
+# Companion desktop window: Chrome --app mode + best-effort always-on-top
+# ----------------------------------------------------------------------------------------------
+def _find_chrome():
+    cands = []
+    if platform.system() == "Windows":
+        pf = [os.environ.get("PROGRAMFILES", r"C:\Program Files"), os.environ.get("PROGRAMFILES(X86)", r"C:\Program Files (x86)"), os.environ.get("LOCALAPPDATA", "")]
+        for base in pf:
+            cands += [os.path.join(base, r"Google\Chrome\Application\chrome.exe"), os.path.join(base, r"Microsoft\Edge\Application\msedge.exe"),
+                      os.path.join(base, r"BraveSoftware\Brave-Browser\Application\brave.exe")]
+    elif platform.system() == "Darwin":
+        cands += ["/Applications/Google Chrome.app/Contents/MacOS/Google Chrome", "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge"]
+    else:
+        for n in ("google-chrome", "google-chrome-stable", "chromium", "chromium-browser", "microsoft-edge", "brave-browser"):
+            path = shutil.which(n)
+            if path:
+                cands.append(path)
+    for c in cands:
+        if c and os.path.exists(c):
+            return c
+    return None
+
+
+def _keep_on_top_windows(title_part: str, stop):
+    import ctypes
+    from ctypes import wintypes
+    user32 = ctypes.windll.user32
+    HWND_TOPMOST, SWP_NOMOVE, SWP_NOSIZE, SWP_NOACTIVATE = -1, 0x0002, 0x0001, 0x0010
+    EnumWindowsProc = ctypes.WINFUNCTYPE(ctypes.c_bool, wintypes.HWND, wintypes.LPARAM)
+
+    def find():
+        found = []
+        def cb(hwnd, _):
+            n = user32.GetWindowTextLengthW(hwnd)
+            if n:
+                buf = ctypes.create_unicode_buffer(n + 1); user32.GetWindowTextW(hwnd, buf, n + 1)
+                if title_part.lower() in buf.value.lower() and user32.IsWindowVisible(hwnd):
+                    found.append(hwnd)
+            return True
+        user32.EnumWindows(EnumWindowsProc(cb), 0)
+        return found
+    while not stop.is_set():
+        for hwnd in find():
+            user32.SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE)
+        time.sleep(3)
+
+
+def _keep_on_top_linux(title_part: str, stop):
+    if not shutil.which("wmctrl"):
+        print("   (install 'wmctrl' for always-on-top on Linux: sudo apt install wmctrl)")
+        return
+    while not stop.is_set():
+        subprocess.run(["wmctrl", "-r", title_part, "-b", "add,above"], capture_output=True)
+        time.sleep(3)
+
+
+def launch_companion(url: str, on_top: bool = True):
+    """Open the Companion as its own app window; returns the Popen (or None)."""
+    import threading
+    chrome = _find_chrome()
+    target = url.rstrip("/") + "/?mode=companion"
+    if not chrome:
+        print("No Chrome/Edge found - opening the Companion in your default browser instead.")
+        import webbrowser; webbrowser.open(target)
+        return None
+    profile = Path.home() / ".acaso_companion_profile"
+    args = [chrome, f"--app={target}", f"--user-data-dir={profile}", "--window-size=440,760", "--window-position=40,40",
+            "--no-first-run", "--no-default-browser-check", "--disable-features=TranslateUI"]
+    proc = subprocess.Popen(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    print(f"Companion window opened ({os.path.basename(chrome)} app mode, profile {profile})")
+    if on_top:
+        stop = threading.Event()
+        fn = _keep_on_top_windows if platform.system() == "Windows" else (_keep_on_top_linux if platform.system() == "Linux" else None)
+        if fn:
+            threading.Thread(target=fn, args=("ACASO Companion", stop), daemon=True).start()
+            print("   always-on-top: enabled")
+        else:
+            print("   always-on-top: not available on this OS (window still opens as an app)")
+    return proc
+
+
 def main():
     ap = argparse.ArgumentParser(description="ACASO Local Node")
     ap.add_argument("--url", default=os.environ.get("ACASO_URL"), help="ACASO site URL (or env ACASO_URL)")
@@ -316,9 +399,22 @@ def main():
     ap.add_argument("--shell", action="store_true", help="Allow approved shell commands inside the root")
     ap.add_argument("--browser", action="store_true", help="Allow approved browser tasks in a real Chrome window")
     ap.add_argument("--name", default=None)
+    ap.add_argument("--companion", action="store_true", help="Open the ACASO Companion as its own always-on-top desktop window")
+    ap.add_argument("--no-top", action="store_true", help="With --companion: do not force always-on-top")
     a = ap.parse_args()
-    if not a.url or not a.key:
-        print("Need --url/ACASO_URL and --key/ACASO_KEY (key is on the Agent Bridge tab)."); sys.exit(1)
+    if not a.url:
+        print("Need --url or ACASO_URL."); sys.exit(1)
+    proc = launch_companion(a.url, on_top=not a.no_top) if a.companion else None
+    if not a.key:
+        if a.companion:
+            print("No ACASO_KEY given - running Companion window only (no file/browser tasks). Ctrl+C to close.")
+            try:
+                while proc is None or proc.poll() is None:
+                    time.sleep(1)
+            except KeyboardInterrupt:
+                pass
+            return
+        print("Need --key/ACASO_KEY (key is on the Agent Bridge tab)."); sys.exit(1)
     roots = a.root or [str(Path.home() / "ACASO")]
     Node(a.url, a.key, roots, a.shell, a.browser, a.name).run()
 

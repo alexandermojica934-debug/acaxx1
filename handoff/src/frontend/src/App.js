@@ -14,7 +14,8 @@ import Radar from "./components/Radar";
 import VoiceCommander from "./components/VoiceCommander";
 import LocalNode from "./components/LocalNode";
 import Companion, { openCompanionWindow } from "./components/Companion";
-import { Sparkles, LayoutGrid, MessagesSquare, BookOpen, ShieldAlert, Plug, Boxes, Wand2, Crown, Waves, Radar as RadarIcon, MonitorSmartphone, Castle } from "lucide-react";
+import Apex from "./components/Apex";
+import { Sparkles, LayoutGrid, MessagesSquare, BookOpen, ShieldAlert, Plug, Boxes, Wand2, Crown, Waves, Radar as RadarIcon, MonitorSmartphone, Castle, Store } from "lucide-react";
 
 const BACKEND_URL = process.env.REACT_APP_BACKEND_URL;
 export const API = `${BACKEND_URL}/api`;
@@ -25,6 +26,7 @@ const TABS = [
   { key: "council", label: "Council", icon: Crown },
   { key: "voice", label: "Voice", icon: Waves },
   { key: "radar", label: "Radar", icon: RadarIcon },
+  { key: "apex", label: "Apex Nexus", icon: Store },
   { key: "askai", label: "Ask All AIs", icon: MessagesSquare },
   { key: "analyzer", label: "File Analyzer", icon: Boxes },
   { key: "self", label: "Self-Directive", icon: Wand2 },
@@ -90,6 +92,7 @@ function App() {
         {tab === "council" && <Council />}
         {tab === "voice" && <VoiceChat />}
         {tab === "radar" && <Radar />}
+        {tab === "apex" && <Apex />}
         {tab === "askai" && <AskAllAIs />}
         {tab === "analyzer" && <FileAnalyzer />}
         {tab === "self" && <SelfDirective />}

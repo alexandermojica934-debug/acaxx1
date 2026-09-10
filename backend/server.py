@@ -2458,10 +2458,11 @@ VOICE_TABS = {
     "chronicle": ["chronicle", "ledger", "outcomes"],
     "bridge": ["bridge", "agent bridge", "api"],
     "node": ["local node", "node", "my computer", "desktop", "my pc"],
+    "apex": ["apex", "apex nexus", "store", "storefront", "products"],
 }
 COMMAND_SCHEMA = (
     "Return ONLY minified JSON {\"intent\": ..., \"args\": {...}} with intent one of: "
-    "open_tab {tab: home|bounty|council|voice|radar|askai|analyzer|self|chronicle|bridge|node}; "
+    "open_tab {tab: home|bounty|council|voice|radar|askai|analyzer|self|chronicle|bridge|node|apex}; "
     "council_deliberate {challenge: string, preset_id: genesis|hunter|foresight|custom}; "
     "compile_directive {directive: string, mode: Make|Find|Move|Collect}; "
     "radar_discover {keyword: string|null}; radar_search {query: string}; "
@@ -2594,6 +2595,11 @@ node_module.init(db, require_key, llm_call_failover, extract_json)
 api_router.include_router(node_module.router)
 api_router.include_router(node_module.browse_router)
 
+# ---------------- Apex Nexus storefront ----------------
+import apex as apex_module
+apex_module.init(db, llm_call_failover, extract_json)
+api_router.include_router(apex_module.router)
+
 # ---------------- Companion: small desktop window - voice + screen/window share + vision ----------------
 # Frames are captured in the owner's browser (getDisplayMedia -> canvas -> JPEG base64), sent per message only
 # when the owner includes them, analysed with a vision model, and NOT stored (only a thumbnail hash + text).
@@ -2683,6 +2689,61 @@ async def companion_history(session_id: str = Query(...), limit: int = Query(60,
 async def companion_clear(session_id: str = Query(...)):
     r = await db.companion_messages.delete_many({"session_id": session_id})
     return {"ok": True, "deleted": r.deleted_count}
+
+
+# ---- Watch mode: periodic glance at the shared window; speak only when something notable appears ----
+WATCH_SYSTEM = (
+    "You are ACASO Companion in WATCH MODE. You receive a screenshot of the owner's shared window every ~30 seconds. "
+    "Decide whether it is worth interrupting the owner. Speak up ONLY for: (1) a visible error, exception, failed build, "
+    "red alert, blocked payment, or warning dialog; (2) a form or sign-up the owner could fill (visible input fields with "
+    "labels); (3) an explicit request for action (approval prompt, deadline warning). Everything else is 'none'. "
+    "If the screen is essentially the same situation as the previous note, answer 'none' to avoid repeating yourself. "
+    "Respond ONLY with minified JSON: {\"notable\": true|false, \"kind\": \"error\"|\"form\"|\"action\"|\"none\", "
+    "\"message\": string (<=2 sentences, spoken style, specific: quote the error text or name the form fields), "
+    "\"summary\": string (<=12 words describing the screen for memory), \"confidence\": 0-1}"
+)
+
+
+class WatchRequest(BaseModel):
+    image_b64: str
+    session_id: Optional[str] = None
+    share_label: Optional[str] = None
+    previous_summary: Optional[str] = None
+    last_spoken: Optional[str] = None
+
+
+@api_router.post("/companion/watch")
+async def companion_watch(req: WatchRequest):
+    if not req.image_b64:
+        raise HTTPException(400, "image_b64 required")
+    if len(req.image_b64) > 6_000_000:
+        raise HTTPException(413, "Frame too large")
+    b64 = req.image_b64.split(",", 1)[1] if req.image_b64.startswith("data:") else req.image_b64
+    prompt = ((f"Shared: {req.share_label}. " if req.share_label else "")
+              + (f"Previous screen note: {req.previous_summary}. " if req.previous_summary else "First glance. ")
+              + (f"You last said: \"{req.last_spoken}\". " if req.last_spoken else "")
+              + "Assess this frame.")
+    out = None
+    used = None
+    for prov, model, label in [("openai", "gpt-4o-mini", "Watch · GPT-4o"), ("gemini", "gemini-2.5-flash", "Watch · Gemini 2.5")]:
+        try:
+            chat = LlmChat(api_key=EMERGENT_LLM_KEY, session_id=f"watch-{uuid.uuid4().hex[:8]}", system_message=WATCH_SYSTEM).with_model(prov, model)
+            raw = await chat.send_message(UserMessage(text=prompt, file_contents=[ImageContent(image_base64=b64)]))
+            out = extract_json(raw)
+            used = label
+            break
+        except Exception as e:
+            logger.error(f"watch {prov} failed: {e}")
+            continue
+    if not out:
+        raise HTTPException(502, "Vision model unavailable")
+    notable = bool(out.get("notable")) and out.get("kind") in ("error", "form", "action") and float(out.get("confidence") or 0) >= 0.5
+    res = {"notable": notable, "kind": out.get("kind") if notable else "none", "message": (out.get("message") or "").strip() if notable else "",
+           "summary": (out.get("summary") or "")[:120], "confidence": out.get("confidence"), "model_label": used, "at": datetime.now(timezone.utc).isoformat()}
+    if notable and req.session_id:
+        await db.companion_messages.insert_one({"id": str(uuid.uuid4()), "session_id": req.session_id, "role": "assistant", "content": res["message"],
+                                                "model_label": used, "watch": True, "kind": res["kind"], "created_at": res["at"]})
+    return res
 
 
 app.include_router(api_router)

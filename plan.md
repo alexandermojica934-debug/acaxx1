@@ -315,3 +315,16 @@ getDisplayMedia -> frame captured to JPEG (<=1280px) per message when "see it" i
 (SSE stream, X-Accel-Buffering: no) -> vision via emergentintegrations ImageContent (gpt-4o-mini -> gemini-2.5-flash
 failover). Frames are NOT stored; transcript per session in db.companion_messages. Verified: synthetic invoice frame
 read correctly (number/total/status); streaming 33 events; standalone UI + launcher render.
+
+## Phase: Watch Mode + Apex Nexus + Companion desktop app (Status: COMPLETED - iteration_5: 37/37 backend, 100% frontend)
+- Watch Mode: POST /api/companion/watch (vision JSON verdict; notable only for error/form/action, confidence>=0.5);
+  client 30s loop with 16x16 frame-hash diff (>4% change) so unchanged screens cost no model call; spoken + logged.
+  Verified: error frame -> notable/error; calm dashboard -> none.
+- Apex Nexus: backend/apex.py + Apex.js tab. Generators (rfp_kit from Radar opp or pasted RFP; prompt_library with
+  {{variables}} + gated API key; seo_pack) -> deliverables -> orders -> unlock token (402 until paid; refunded re-locks).
+  Payments: manual until STRIPE_API_KEY supplied (then integration playbook + Checkout). Test data cleaned.
+- Companion desktop app: /companion.webmanifest + icons (companion-192/512.png), manifest swapped in companion mode,
+  Install button (beforeinstallprompt); index.html title -> ACASO Omniverse. Local Node --companion/--no-top:
+  Chrome --app window, separate profile, always-on-top via ctypes (Windows) / wmctrl (Linux); launchers updated.
+- Fixed: TDZ bug (watch effect referenced `say` before definition) - moved effect below TTS section.
+- Voice command tab map now includes node + apex.

@@ -1,6 +1,6 @@
 # ACASO Omniverse — Complete Handoff
 
-_Generated: 2026-09-10T02:17:38.887738+00:00_
+_Generated: 2026-09-10T04:06:26.923227+00:00_
 
 ## What this is
 A contest-ready **Directive-to-Payment Operating System** (FastAPI + React + MongoDB).
@@ -24,6 +24,8 @@ A contest-ready **Directive-to-Payment Operating System** (FastAPI + React + Mon
 - Opportunity Radar (backend/radar.py, /api/radar/*): REAL sources Grants.gov public API (no key), GitHub bounty issues, SAM.gov (needs SAM_GOV_API_KEY); adapters fetch->normalize->validate->dedupe->barrier signals->transparent 0-100 score (8 weighted components, labelled inferred)->persist->stale marking; every record has source_url/retrieved_at/http_status/parser_version/evidence[] with source_location; Fit Analyst + Skeptic (gates Strong fit) + Compliance Sentinel on demand; NL search proposes filters never auto-applied; Drafting Desk (email/grant narrative/outreach packet/fill-a-form) uses only profile + source text with [FILL] placeholders; Add-to-pipeline -> mission; export .md. Nothing auto-submitted.
 - Periodic self-scan (Self-Directive): in-process asyncio scheduler, off by default; deterministic checks (py_compile, ruff F/E9, esbuild per component, TODO/console.log census) -> at most ONE Self-Directive proposal per run tagged origin=scheduled_scan; NEVER auto-applies; UI toggle/interval/focus/Scan now/history.
 - Local Node (backend/node.py + handoff/local_node/acaso_node.py, served at /local-node/*): owner runs the Python client on their PC (Windows/Linux), pairs with the Agent Bridge key; server holds an approval-gated task queue (read-only auto-approved; every write/shell/browser action must be approved in the Local Node tab); node enforces allowed roots, backs up overwritten files, soft-deletes to .acaso_trash; browser tasks drive a real headed Chrome (persistent profile) via Playwright, fill forms and STOP (awaiting_submit) until a separate browser_submit is approved; secrets written as [OWNER TYPES THIS]. LLM planner turns a goal into proposed tasks. Server research browser (headless Chromium, /api/browse/research) reads public pages: text/links/forms/screenshot + quoted answer.
+- Companion (/?mode=companion, header Companion button opens popup; components/Companion.js): voice hands-free, share window/tab/screen via getDisplayMedia, per-message frame -> POST /api/companion/chat (SSE, vision via emergentintegrations ImageContent, gpt-4o-mini -> gemini-2.5-flash). WATCH MODE: 30s glance loop with 16x16 frame-hash change filter -> POST /api/companion/watch -> speaks only for error/form/action (JSON verdict). Installable PWA: /companion.webmanifest swapped in companion mode + Install button; Local Node --companion opens Chrome --app window (separate profile) with best-effort always-on-top (Windows ctypes / Linux wmctrl). Frames never stored.
+- Apex Nexus (backend/apex.py, /api/apex/*, tab Apex Nexus): products rfp_kit ($149, from Radar opportunity or pasted RFP), prompt_library ($49, Markdown+JSON+gated API key), seo_pack ($199); POST /generate (one LLM call, [FILL] placeholders counted), deliverables export md/json, orders (pending_payment -> paid -> unlock via /api/apex/unlock/{token}; 402 until paid; refunded re-locks), gated /api/apex/library/{id}?key= requires paid order. Payments: STRIPE NOT CONNECTED (manual Mark paid) until owner supplies STRIPE_API_KEY - integrate via playbook then.
 
 ## Tech & Integrations
 - Backend: FastAPI + Motor (MongoDB), Pydantic, UUID ids, timezone-aware UTC.
@@ -50,6 +52,10 @@ sudo supervisorctl restart backend frontend
 Hot-reload is enabled; restart only after dependency/.env changes.
 
 ## Key API Endpoints
+- `POST /api/companion/chat (SSE) | /api/companion/watch | GET/DELETE /api/companion/history` — Companion vision chat + watch mode
+- `GET /api/apex/products | /api/apex/deliverables[/{id}[/export?fmt=md|json]]` — Apex catalog + deliverables
+- `POST/PATCH /api/apex/generate | /api/apex/orders[/{id}]` — generate product / order lifecycle
+- `GET /api/apex/unlock/{token}[?fmt=md|json|status] | /api/apex/library/{id}?key=` — buyer unlock (public) / gated prompt API
 - `GET/PUT /api/self/scan/config | POST /api/self/scan/run | GET /api/self/scans` — periodic self-scan (propose-only)
 - `POST /api/node/register | /api/node/{id}/heartbeat | /api/node/{id}/claim | /api/node/tasks/{tid}/result` — node-side (X-ACASO-Key)
 - `GET /api/node/nodes | /api/node/tasks | /api/node/setup` — owner-side node + queue
@@ -2578,10 +2584,11 @@ VOICE_TABS = {
     "chronicle": ["chronicle", "ledger", "outcomes"],
     "bridge": ["bridge", "agent bridge", "api"],
     "node": ["local node", "node", "my computer", "desktop", "my pc"],
+    "apex": ["apex", "apex nexus", "store", "storefront", "products"],
 }
 COMMAND_SCHEMA = (
     "Return ONLY minified JSON {\"intent\": ..., \"args\": {...}} with intent one of: "
-    "open_tab {tab: home|bounty|council|voice|radar|askai|analyzer|self|chronicle|bridge|node}; "
+    "open_tab {tab: home|bounty|council|voice|radar|askai|analyzer|self|chronicle|bridge|node|apex}; "
     "council_deliberate {challenge: string, preset_id: genesis|hunter|foresight|custom}; "
     "compile_directive {directive: string, mode: Make|Find|Move|Collect}; "
     "radar_discover {keyword: string|null}; radar_search {query: string}; "
@@ -2714,6 +2721,11 @@ node_module.init(db, require_key, llm_call_failover, extract_json)
 api_router.include_router(node_module.router)
 api_router.include_router(node_module.browse_router)
 
+# ---------------- Apex Nexus storefront ----------------
+import apex as apex_module
+apex_module.init(db, llm_call_failover, extract_json)
+api_router.include_router(apex_module.router)
+
 # ---------------- Companion: small desktop window - voice + screen/window share + vision ----------------
 # Frames are captured in the owner's browser (getDisplayMedia -> canvas -> JPEG base64), sent per message only
 # when the owner includes them, analysed with a vision model, and NOT stored (only a thumbnail hash + text).
@@ -2803,6 +2815,61 @@ async def companion_history(session_id: str = Query(...), limit: int = Query(60,
 async def companion_clear(session_id: str = Query(...)):
     r = await db.companion_messages.delete_many({"session_id": session_id})
     return {"ok": True, "deleted": r.deleted_count}
+
+
+# ---- Watch mode: periodic glance at the shared window; speak only when something notable appears ----
+WATCH_SYSTEM = (
+    "You are ACASO Companion in WATCH MODE. You receive a screenshot of the owner's shared window every ~30 seconds. "
+    "Decide whether it is worth interrupting the owner. Speak up ONLY for: (1) a visible error, exception, failed build, "
+    "red alert, blocked payment, or warning dialog; (2) a form or sign-up the owner could fill (visible input fields with "
+    "labels); (3) an explicit request for action (approval prompt, deadline warning). Everything else is 'none'. "
+    "If the screen is essentially the same situation as the previous note, answer 'none' to avoid repeating yourself. "
+    "Respond ONLY with minified JSON: {\"notable\": true|false, \"kind\": \"error\"|\"form\"|\"action\"|\"none\", "
+    "\"message\": string (<=2 sentences, spoken style, specific: quote the error text or name the form fields), "
+    "\"summary\": string (<=12 words describing the screen for memory), \"confidence\": 0-1}"
+)
+
+
+class WatchRequest(BaseModel):
+    image_b64: str
+    session_id: Optional[str] = None
+    share_label: Optional[str] = None
+    previous_summary: Optional[str] = None
+    last_spoken: Optional[str] = None
+
+
+@api_router.post("/companion/watch")
+async def companion_watch(req: WatchRequest):
+    if not req.image_b64:
+        raise HTTPException(400, "image_b64 required")
+    if len(req.image_b64) > 6_000_000:
+        raise HTTPException(413, "Frame too large")
+    b64 = req.image_b64.split(",", 1)[1] if req.image_b64.startswith("data:") else req.image_b64
+    prompt = ((f"Shared: {req.share_label}. " if req.share_label else "")
+              + (f"Previous screen note: {req.previous_summary}. " if req.previous_summary else "First glance. ")
+              + (f"You last said: \"{req.last_spoken}\". " if req.last_spoken else "")
+              + "Assess this frame.")
+    out = None
+    used = None
+    for prov, model, label in [("openai", "gpt-4o-mini", "Watch · GPT-4o"), ("gemini", "gemini-2.5-flash", "Watch · Gemini 2.5")]:
+        try:
+            chat = LlmChat(api_key=EMERGENT_LLM_KEY, session_id=f"watch-{uuid.uuid4().hex[:8]}", system_message=WATCH_SYSTEM).with_model(prov, model)
+            raw = await chat.send_message(UserMessage(text=prompt, file_contents=[ImageContent(image_base64=b64)]))
+            out = extract_json(raw)
+            used = label
+            break
+        except Exception as e:
+            logger.error(f"watch {prov} failed: {e}")
+            continue
+    if not out:
+        raise HTTPException(502, "Vision model unavailable")
+    notable = bool(out.get("notable")) and out.get("kind") in ("error", "form", "action") and float(out.get("confidence") or 0) >= 0.5
+    res = {"notable": notable, "kind": out.get("kind") if notable else "none", "message": (out.get("message") or "").strip() if notable else "",
+           "summary": (out.get("summary") or "")[:120], "confidence": out.get("confidence"), "model_label": used, "at": datetime.now(timezone.utc).isoformat()}
+    if notable and req.session_id:
+        await db.companion_messages.insert_one({"id": str(uuid.uuid4()), "session_id": req.session_id, "role": "assistant", "content": res["message"],
+                                                "model_label": used, "watch": True, "kind": res["kind"], "created_at": res["at"]})
+    return res
 
 
 app.include_router(api_router)
@@ -3559,7 +3626,8 @@ import Radar from "./components/Radar";
 import VoiceCommander from "./components/VoiceCommander";
 import LocalNode from "./components/LocalNode";
 import Companion, { openCompanionWindow } from "./components/Companion";
-import { Sparkles, LayoutGrid, MessagesSquare, BookOpen, ShieldAlert, Plug, Boxes, Wand2, Crown, Waves, Radar as RadarIcon, MonitorSmartphone, Castle } from "lucide-react";
+import Apex from "./components/Apex";
+import { Sparkles, LayoutGrid, MessagesSquare, BookOpen, ShieldAlert, Plug, Boxes, Wand2, Crown, Waves, Radar as RadarIcon, MonitorSmartphone, Castle, Store } from "lucide-react";
 
 const BACKEND_URL = process.env.REACT_APP_BACKEND_URL;
 export const API = `${BACKEND_URL}/api`;
@@ -3570,6 +3638,7 @@ const TABS = [
   { key: "council", label: "Council", icon: Crown },
   { key: "voice", label: "Voice", icon: Waves },
   { key: "radar", label: "Radar", icon: RadarIcon },
+  { key: "apex", label: "Apex Nexus", icon: Store },
   { key: "askai", label: "Ask All AIs", icon: MessagesSquare },
   { key: "analyzer", label: "File Analyzer", icon: Boxes },
   { key: "self", label: "Self-Directive", icon: Wand2 },
@@ -3635,6 +3704,7 @@ function App() {
         {tab === "council" && <Council />}
         {tab === "voice" && <VoiceChat />}
         {tab === "radar" && <Radar />}
+        {tab === "apex" && <Apex />}
         {tab === "askai" && <AskAllAIs />}
         {tab === "analyzer" && <FileAnalyzer />}
         {tab === "self" && <SelfDirective />}
@@ -4746,6 +4816,40 @@ body {
 .cp-mic.on { color: #06060f; background: linear-gradient(135deg, var(--gold), #f5843c); border-color: transparent; } .cp-mic.live { animation: vcpulse 1.4s infinite; }
 .cp-send { color: #06060f; background: linear-gradient(135deg, var(--violet), var(--cyan)); border-color: transparent; } .cp-send:disabled { opacity: .45; cursor: default; }
 .cp-stopvoice { position: absolute; bottom: 64px; right: 14px; font-size: 11px; color: var(--muted); background: rgba(10,14,34,0.9); border: 1px solid var(--border); border-radius: 999px; padding: 4px 10px; cursor: pointer; }
+.cp-ic.on { color: var(--gold); border-color: rgba(245,196,81,0.5); background: rgba(245,196,81,0.1); }
+.cp-watchbar { display: flex; align-items: center; gap: 6px; font-size: 11px; color: var(--gold); padding: 5px 12px; background: rgba(245,196,81,0.06); border-bottom: 1px solid rgba(245,196,81,0.2); }
+.cp-tag.k-error { color: #ff7a90; } .cp-tag.k-form { color: var(--cyan); }
+
+/* ===== Apex Nexus ===== */
+.ax-wrap { display: flex; flex-direction: column; gap: 16px; }
+.ax-wrap .chr-hero-left p b { color: var(--text); } .ax-wrap .chr-hero-left p code { font-family: ui-monospace, monospace; font-size: 11.5px; color: var(--gold); }
+.ax-pay { display: flex; align-items: flex-start; gap: 8px; font-size: 12px; line-height: 1.5; color: var(--muted); background: rgba(245,196,81,0.06); border: 1px solid rgba(245,196,81,0.3); border-radius: 11px; padding: 10px 13px; }
+.ax-pay svg { color: var(--gold); flex-shrink: 0; margin-top: 2px; } .ax-pay b { color: var(--text); }
+.ax-pay.on { border-color: rgba(72,213,151,0.4); background: rgba(72,213,151,0.06); } .ax-pay.on svg { color: var(--green); }
+.ax-products { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 12px; }
+.ax-product { display: flex; flex-direction: column; gap: 6px; text-align: left; background: var(--panel); border: 1px solid var(--border); border-radius: 14px; padding: 14px 16px; color: var(--text); cursor: pointer; transition: border-color .16s, transform .12s; }
+.ax-product:hover { border-color: var(--border-lit); transform: translateY(-1px); }
+.ax-product.active { border-color: var(--gold); background: rgba(245,196,81,0.07); box-shadow: 0 0 0 1px rgba(245,196,81,0.25) inset; }
+.ax-product-top { display: flex; align-items: center; gap: 8px; font-size: 14px; } .ax-product-top svg { color: var(--gold); }
+.ax-price { margin-left: auto; font-weight: 800; color: var(--gold); }
+.ax-product small { font-size: 12px; line-height: 1.45; color: var(--muted); } .ax-buyer { color: var(--dim) !important; font-size: 11px !important; }
+.ax-form { margin-top: 12px; }
+.ax-deliverable { background: var(--panel); border: 1px solid var(--border-lit); border-radius: 16px; padding: 18px 20px; }
+.ax-del-head { display: flex; justify-content: space-between; gap: 14px; flex-wrap: wrap; align-items: flex-start; }
+.ax-del-head a { color: var(--cyan); }
+.ax-del-grid { display: grid; grid-template-columns: minmax(0, 1.8fr) minmax(260px, 1fr); gap: 18px; margin-top: 14px; }
+.ax-md { min-width: 0; font-size: 13px; line-height: 1.6; max-height: 70vh; overflow-y: auto; padding-right: 8px; }
+.ax-md table { border-collapse: collapse; font-size: 12px; } .ax-md td, .ax-md th { border: 1px solid var(--border); padding: 4px 8px; }
+.ax-sell { display: flex; flex-direction: column; gap: 8px; }
+.ax-sell .cw-input { width: 100%; box-sizing: border-box; min-width: 0; }
+.ax-warn { display: flex; align-items: flex-start; gap: 6px; font-size: 11.5px; color: var(--muted); } .ax-warn svg { color: var(--gold); flex-shrink: 0; margin-top: 2px; }
+.ax-orders { display: flex; flex-direction: column; gap: 6px; margin-top: 10px; }
+.ax-order { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; font-size: 12.5px; padding: 8px 12px; border: 1px solid var(--border); border-radius: 10px; background: rgba(4,6,16,0.35); }
+.ax-order.s-paid { border-color: rgba(72,213,151,0.35); }
+.ax-order-buyer { flex: 1; min-width: 160px; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ax-order-price { font-weight: 700; color: var(--gold); }
+@media (max-width: 900px) { .ax-del-grid { grid-template-columns: 1fr; } }
+.cp-install { display: inline-flex; align-items: center; gap: 5px; font-size: 11px; font-weight: 700; color: #06060f; background: var(--gold); border: 0; border-radius: 999px; padding: 5px 10px; cursor: pointer; }
 
 ```
 
@@ -9596,6 +9700,854 @@ async def research_history(limit: int = Query(20, ge=1, le=100)):
 ```
 
 
+### `backend/apex.py`
+```python
+"""
+ACASO Apex Nexus - zero-capital digital products with an order -> pay -> unlock flow.
+
+Products (Oracle Cortex vectors chosen by the owner):
+  #6  rfp_kit         - proposal response kit for a real RFP/grant (from Radar or pasted text)
+  #2  prompt_library  - packaged domain prompt library (Markdown + JSON, gated API endpoint)
+  #10 seo_pack        - programmatic local landing-page copy pack for high-intent B2B terms
+
+Integrity:
+  * Generators use only the owner's Radar profile (capability facts) + the inputs the owner typed + the opportunity's
+    stored source text. Unknown facts become [FILL: ...] placeholders. Nothing is auto-submitted anywhere.
+  * Payment: Stripe Checkout when STRIPE_API_KEY is configured (wired separately with the owner's keys via the
+    integration playbook). Until then, orders are unlocked manually by the owner ("Mark paid"). The UI shows which.
+"""
+import json
+import logging
+import os
+import re
+import uuid
+from datetime import datetime, timezone
+from typing import Optional, List, Callable, Awaitable
+
+from fastapi import APIRouter, HTTPException, Query
+from fastapi.responses import Response
+from pydantic import BaseModel
+
+logger = logging.getLogger("apex")
+router = APIRouter(prefix="/apex")
+
+db = None
+llm_call_failover: Optional[Callable[..., Awaitable]] = None
+extract_json: Optional[Callable] = None
+
+
+def init(_db, _llm_failover, _extract_json):
+    global db, llm_call_failover, extract_json
+    db, llm_call_failover, extract_json = _db, _llm_failover, _extract_json
+
+
+def now_iso():
+    return datetime.now(timezone.utc).isoformat()
+
+
+PRODUCTS = {
+    "rfp_kit": {
+        "id": "rfp_kit", "vector": 6, "name": "RFP Response Kit", "price_usd": 149,
+        "tagline": "A complete first-draft proposal package for a specific public RFP or grant - cover letter, executive summary, approach, compliance matrix, pricing skeleton, submission checklist.",
+        "buyer": "Small contractors and nonprofits chasing a specific solicitation",
+        "inputs": ["opportunity_id (from Radar) OR rfp_text", "bidder_name", "bidder_capabilities", "differentiators", "price_basis"],
+        "deliverable": "Markdown kit + compliance matrix JSON",
+    },
+    "prompt_library": {
+        "id": "prompt_library", "vector": 2, "name": "Prompt Library", "price_usd": 49,
+        "tagline": "A curated, tested-format library of domain prompts with variables and examples, delivered as Markdown + JSON and a gated API endpoint.",
+        "buyer": "Teams standardising AI use in one domain (legal intake, logistics ops, real-estate marketing...)",
+        "inputs": ["domain", "audience", "use_cases", "count (10-30)", "tone"],
+        "deliverable": "Markdown + JSON + API access key",
+    },
+    "seo_pack": {
+        "id": "seo_pack", "vector": 10, "name": "Local SEO Content Pack", "price_usd": 199,
+        "tagline": "Landing-page copy for zero-volume, high-intent local B2B terms: title, meta, H1, sections, FAQ, CTA and LocalBusiness schema per page.",
+        "buyer": "Local B2B service businesses and agencies",
+        "inputs": ["business", "service", "city_region", "terms (or let ACASO propose)", "count (5-15)", "proof_points"],
+        "deliverable": "Markdown pages + JSON + JSON-LD",
+    },
+}
+
+INTEGRITY = ("INTEGRITY: Use only the facts provided (owner profile, inputs, source text). Never invent past performance, "
+             "clients, revenue, certifications, metrics, addresses or phone numbers - write [FILL: what is needed] instead. "
+             "No guarantees of award, ranking or results.")
+
+
+class GenerateRequest(BaseModel):
+    product: str
+    inputs: dict = {}
+
+
+class OrderCreate(BaseModel):
+    product: str
+    buyer_email: str
+    buyer_name: Optional[str] = None
+    deliverable_id: Optional[str] = None
+    price_usd: Optional[float] = None
+    note: Optional[str] = None
+
+
+class OrderPatch(BaseModel):
+    status: Optional[str] = None  # pending_payment | paid | refunded | cancelled
+    deliverable_id: Optional[str] = None
+    note: Optional[str] = None
+
+
+async def _profile_text() -> str:
+    p = await db.radar_profile.find_one({"id": "owner"}, {"_id": 0}) or {}
+    keys = ["org_name", "entity_type", "city", "state", "industries", "skills", "certifications", "years_experience", "team_size", "bio"]
+    return "OWNER PROFILE (only permitted source of claims about the seller/bidder):\n" + "\n".join(
+        [f"{k}: {p.get(k) if p.get(k) not in (None, [], '') else 'NOT PROVIDED'}" for k in keys])
+
+
+# ----------------------------------------------------------------------------------------------
+@router.get("/products")
+async def products():
+    stripe = bool(os.environ.get("STRIPE_API_KEY"))
+    out = []
+    for p in PRODUCTS.values():
+        n_del = await db.apex_deliverables.count_documents({"product": p["id"]})
+        n_ord = await db.apex_orders.count_documents({"product": p["id"]})
+        paid = await db.apex_orders.count_documents({"product": p["id"], "status": "paid"})
+        out.append({**p, "deliverables": n_del, "orders": n_ord, "paid_orders": paid})
+    return {"products": out, "payments": {"provider": "stripe" if stripe else "manual",
+                                          "stripe_configured": stripe,
+                                          "note": ("Stripe Checkout active." if stripe else
+                                                   "Stripe not connected: set STRIPE_API_KEY (and the webhook secret) in backend/.env to enable "
+                                                   "checkout links. Until then, mark orders paid manually after you receive payment.")}}
+
+
+# ---- generators ----
+async def gen_rfp_kit(inp: dict) -> dict:
+    opp_text = ""
+    opp = None
+    if inp.get("opportunity_id"):
+        opp = await db.radar_opportunities.find_one({"id": inp["opportunity_id"]}, {"_id": 0})
+        if not opp:
+            raise HTTPException(404, "Radar opportunity not found")
+        opp_text = (f"TITLE: {opp.get('title')}\nISSUER: {opp.get('organization_name')}\nTYPE: {opp.get('opportunity_type')}\n"
+                    f"DEADLINE: {opp.get('deadline') or 'Not stated'}\nAMOUNT: {opp.get('funding_amount') or opp.get('estimated_value') or 'Not stated'}\n"
+                    f"SET-ASIDE: {opp.get('set_aside') or 'none stated'}\nELIGIBILITY: {opp.get('eligibility_text') or 'Not stated'}\n"
+                    f"REQUIRED REGISTRATIONS: {opp.get('required_registrations')}\nSOURCE: {opp.get('source_url')}\n"
+                    f"DESCRIPTION:\n{(opp.get('description') or 'Not provided - see source')[:5000]}")
+    elif inp.get("rfp_text"):
+        opp_text = inp["rfp_text"][:12000]
+    else:
+        raise HTTPException(400, "Provide opportunity_id (from Radar) or rfp_text")
+    system = ("You are ACASO's Proposal Architect producing a sellable RFP RESPONSE KIT in Markdown. " + INTEGRITY +
+              " Sections, in order: # Cover Letter; # Executive Summary; # Understanding of the Requirement; # Technical / Service Approach; "
+              "# Management & Staffing Plan; # Past Performance (profile facts only, else [FILL]); # Compliance Matrix (a Markdown table: "
+              "Requirement | Where addressed | Status); # Pricing Skeleton (table with line items and [FILL: price] cells, plus assumptions); "
+              "# Questions to Ask the Contracting Officer / Funder; # Submission Checklist (registrations, forms, formats, deadline); "
+              "# Before Sending (every [FILL] and every claim to verify). After the Markdown, on its own line write ===JSON=== then a minified "
+              "JSON object {\"compliance_matrix\": [{\"requirement\":..., \"addressed_in\":..., \"status\": \"draft|fill|n/a\"}], \"placeholders\": int, "
+              "\"deadline\": string|null, \"issuer\": string|null}.")
+    prompt = (f"SOLICITATION / OPPORTUNITY (source text):\n{opp_text}\n\n{await _profile_text()}\n\n"
+              f"BIDDER NAME: {inp.get('bidder_name') or 'from profile'}\nBIDDER CAPABILITIES (owner-stated): {inp.get('bidder_capabilities') or 'from profile'}\n"
+              f"DIFFERENTIATORS (owner-stated): {inp.get('differentiators') or 'NOT PROVIDED'}\nPRICE BASIS: {inp.get('price_basis') or 'NOT PROVIDED - use [FILL]'}\n\n"
+              "Produce the kit.")
+    text, _, label = await llm_call_failover(system, prompt, ["openai", "anthropic", "gemini"])
+    md, data = _split_json(text)
+    title = f"RFP Kit - {(opp or {}).get('title') or (inp.get('rfp_text') or '')[:60].strip()}"
+    return {"title": title, "markdown": md, "data": data, "model_label": label, "source_url": (opp or {}).get("source_url")}
+
+
+async def gen_prompt_library(inp: dict) -> dict:
+    domain = (inp.get("domain") or "").strip()
+    if not domain:
+        raise HTTPException(400, "domain is required")
+    count = max(10, min(int(inp.get("count") or 15), 30))
+    system = ("You are ACASO's Prompt Engineer producing a sellable PROMPT LIBRARY. Every prompt must be concrete, reusable, and use "
+              "{{double_curly_variables}} for every part the buyer changes (names, dates, amounts, addresses) - these are TEMPLATE VARIABLES, "
+              "not missing facts, so do NOT write [FILL] inside prompts. Reserve [FILL: ...] only for claims about the seller. " + INTEGRITY +
+              " Output Markdown: # <Library name>; ## How to use; then one ### section per prompt with: **Use case**, **Prompt** (code block), "
+              "**Variables**, **Example input**, **Tips**. After the Markdown write ===JSON=== then minified JSON "
+              "{\"name\":..., \"domain\":..., \"prompts\":[{\"id\":\"p01\",\"title\":...,\"use_case\":...,\"prompt\":...,\"variables\":[...],\"example_input\":...,\"tips\":...}]}.")
+    prompt = (f"DOMAIN: {domain}\nAUDIENCE: {inp.get('audience') or 'practitioners in this domain'}\nUSE CASES TO COVER: {inp.get('use_cases') or 'the most valuable everyday tasks'}\n"
+              f"TONE: {inp.get('tone') or 'professional'}\nCOUNT: exactly {count} prompts, no filler.")
+    text, _, label = await llm_call_failover(system, prompt, ["openai", "gemini", "anthropic"])
+    md, data = _split_json(text)
+    return {"title": f"Prompt Library - {domain}", "markdown": md, "data": data, "model_label": label, "count": len((data or {}).get("prompts") or [])}
+
+
+async def gen_seo_pack(inp: dict) -> dict:
+    business = (inp.get("business") or "").strip()
+    service = (inp.get("service") or "").strip()
+    region = (inp.get("city_region") or "").strip()
+    if not (business and service and region):
+        raise HTTPException(400, "business, service and city_region are required")
+    count = max(5, min(int(inp.get("count") or 8), 15))
+    terms = inp.get("terms")
+    system = ("You are ACASO's Programmatic SEO writer producing a sellable LOCAL SEO CONTENT PACK: one landing page per zero-volume, "
+              "high-intent B2B search term. " + INTEGRITY + " Never invent reviews, ratings, addresses, phone numbers or client names; "
+              "use [FILL: ...]. Output Markdown: # Pack overview (terms + intent); then per page: ## <Term> with **Slug**, **Title tag** (<=60 chars), "
+              "**Meta description** (<=155 chars), **H1**, 3-4 H2 sections with 60-120 words each, **FAQ** (3 Q/A), **CTA**. "
+              "After the Markdown write ===JSON=== then minified JSON {\"pages\":[{\"term\":...,\"slug\":...,\"title\":...,\"meta\":...,\"h1\":...,"
+              "\"sections\":[{\"h2\":...,\"copy\":...}],\"faq\":[{\"q\":...,\"a\":...}],\"cta\":...,\"jsonld\":{\"@context\":\"https://schema.org\",\"@type\":\"LocalBusiness\",\"name\":...,\"areaServed\":...,\"description\":...}}]}.")
+    prompt = (f"BUSINESS: {business}\nSERVICE: {service}\nCITY/REGION: {region}\nPROOF POINTS (owner-stated, use verbatim or [FILL]): {inp.get('proof_points') or 'NOT PROVIDED'}\n"
+              + (f"TERMS (use these): {terms}\n" if terms else f"TERMS: propose {count} zero-volume, high-intent local B2B terms (e.g. '<service> for <niche> in <city>', 'emergency <service> <city> commercial').\n")
+              + f"COUNT: {count} pages.\n{await _profile_text()}")
+    text, _, label = await llm_call_failover(system, prompt, ["openai", "gemini", "anthropic"])
+    md, data = _split_json(text)
+    return {"title": f"SEO Pack - {service} in {region}", "markdown": md, "data": data, "model_label": label, "count": len((data or {}).get("pages") or [])}
+
+
+def _split_json(text: str):
+    if "===JSON===" in text:
+        md, js = text.split("===JSON===", 1)
+        try:
+            return md.strip(), extract_json(js)
+        except Exception:
+            return md.strip(), None
+    return text.strip(), None
+
+
+GENERATORS = {"rfp_kit": gen_rfp_kit, "prompt_library": gen_prompt_library, "seo_pack": gen_seo_pack}
+
+
+@router.post("/generate")
+async def generate(req: GenerateRequest):
+    if req.product not in GENERATORS:
+        raise HTTPException(400, f"product must be one of {list(GENERATORS)}")
+    started = datetime.now(timezone.utc)
+    try:
+        out = await GENERATORS[req.product](req.inputs or {})
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(502, f"generation failed: {str(e)[:200]}")
+    fills = len(re.findall(r"\[FILL:[^\]]*\]", out["markdown"]))
+    doc = {"id": str(uuid.uuid4()), "product": req.product, "title": out["title"], "inputs": req.inputs, "markdown": out["markdown"],
+           "data": out.get("data"), "placeholders": fills, "model_label": out.get("model_label"), "source_url": out.get("source_url"),
+           "count": out.get("count"), "chars": len(out["markdown"]), "duration_s": round((datetime.now(timezone.utc) - started).total_seconds(), 1),
+           "created_at": now_iso(), "api_key": uuid.uuid4().hex if req.product == "prompt_library" else None}
+    await db.apex_deliverables.insert_one(dict(doc))
+    doc.pop("_id", None)
+    return doc
+
+
+@router.get("/deliverables")
+async def deliverables(product: Optional[str] = None, limit: int = Query(50, ge=1, le=200)):
+    f = {"product": product} if product else {}
+    return await db.apex_deliverables.find(f, {"_id": 0, "markdown": 0, "data": 0}).sort("created_at", -1).to_list(limit)
+
+
+@router.get("/deliverables/{did}")
+async def deliverable(did: str):
+    d = await db.apex_deliverables.find_one({"id": did}, {"_id": 0})
+    if not d:
+        raise HTTPException(404, "Deliverable not found")
+    return d
+
+
+@router.delete("/deliverables/{did}")
+async def delete_deliverable(did: str):
+    r = await db.apex_deliverables.delete_one({"id": did})
+    if not r.deleted_count:
+        raise HTTPException(404, "Deliverable not found")
+    return {"ok": True}
+
+
+@router.get("/deliverables/{did}/export")
+async def export_deliverable(did: str, fmt: str = "md"):
+    d = await db.apex_deliverables.find_one({"id": did}, {"_id": 0})
+    if not d:
+        raise HTTPException(404, "Deliverable not found")
+    return _export(d, fmt)
+
+
+def _export(d: dict, fmt: str):
+    safe = re.sub(r"[^A-Za-z0-9_-]+", "-", d.get("title") or d["product"])[:60]
+    if fmt == "json":
+        return Response(content=json.dumps({"title": d["title"], "product": d["product"], "generated_at": d["created_at"], "data": d.get("data")}, indent=1),
+                        media_type="application/json", headers={"Content-Disposition": f'attachment; filename="{safe}.json"'})
+    md = (f"{d['markdown']}\n\n---\n*Generated by ACASO Apex Nexus - {d['created_at'][:10]} - {d.get('placeholders', 0)} [FILL] placeholder(s) to complete before use. "
+          "Drafts only; verify every claim; nothing has been submitted on your behalf.*\n")
+    return Response(content=md, media_type="text/markdown", headers={"Content-Disposition": f'attachment; filename="{safe}.md"'})
+
+
+# ---- orders: pending_payment -> paid -> unlocked via token ----
+@router.post("/orders")
+async def create_order(o: OrderCreate):
+    if o.product not in PRODUCTS:
+        raise HTTPException(400, "unknown product")
+    if not re.match(r"^[^@\s]+@[^@\s]+\.[^@\s]+$", o.buyer_email or ""):
+        raise HTTPException(400, "valid buyer_email required")
+    if o.deliverable_id:
+        d = await db.apex_deliverables.find_one({"id": o.deliverable_id}, {"_id": 0, "product": 1})
+        if not d:
+            raise HTTPException(404, "Deliverable not found")
+        if d["product"] != o.product:
+            raise HTTPException(400, "Deliverable belongs to a different product")
+    stripe = bool(os.environ.get("STRIPE_API_KEY"))
+    doc = {"id": str(uuid.uuid4()), "product": o.product, "buyer_email": o.buyer_email.lower(), "buyer_name": o.buyer_name,
+           "deliverable_id": o.deliverable_id, "price_usd": o.price_usd if o.price_usd is not None else PRODUCTS[o.product]["price_usd"],
+           "status": "pending_payment", "payment_provider": "stripe" if stripe else "manual", "checkout_url": None,
+           "unlock_token": uuid.uuid4().hex, "note": o.note, "created_at": now_iso(), "paid_at": None,
+           "audit": [{"at": now_iso(), "event": "created"}]}
+    await db.apex_orders.insert_one(dict(doc))
+    doc.pop("_id", None)
+    return doc
+
+
+@router.get("/orders")
+async def orders(status: Optional[str] = None, limit: int = Query(100, ge=1, le=500)):
+    f = {"status": status} if status else {}
+    return await db.apex_orders.find(f, {"_id": 0}).sort("created_at", -1).to_list(limit)
+
+
+@router.patch("/orders/{oid}")
+async def patch_order(oid: str, p: OrderPatch):
+    o = await db.apex_orders.find_one({"id": oid}, {"_id": 0})
+    if not o:
+        raise HTTPException(404, "Order not found")
+    upd = {}
+    if p.status:
+        if p.status not in ("pending_payment", "paid", "refunded", "cancelled"):
+            raise HTTPException(400, "invalid status")
+        upd["status"] = p.status
+        if p.status == "paid":
+            upd["paid_at"] = now_iso()
+    if p.deliverable_id is not None:
+        d = await db.apex_deliverables.find_one({"id": p.deliverable_id}, {"_id": 0, "product": 1})
+        if not d or d["product"] != o["product"]:
+            raise HTTPException(400, "Deliverable missing or wrong product")
+        upd["deliverable_id"] = p.deliverable_id
+    if p.note is not None:
+        upd["note"] = p.note[:2000]
+    if not upd:
+        raise HTTPException(400, "nothing to update")
+    await db.apex_orders.update_one({"id": oid}, {"$set": upd, "$push": {"audit": {"at": now_iso(), "event": "updated", "fields": list(upd)}}})
+    return await db.apex_orders.find_one({"id": oid}, {"_id": 0})
+
+
+# ---- public unlock (buyer link) ----
+@router.get("/unlock/{token}")
+async def unlock(token: str, fmt: str = "md"):
+    o = await db.apex_orders.find_one({"unlock_token": token}, {"_id": 0})
+    if not o:
+        raise HTTPException(404, "Unknown link")
+    if o["status"] != "paid":
+        raise HTTPException(402, "This deliverable unlocks after payment is confirmed")
+    if not o.get("deliverable_id"):
+        raise HTTPException(409, "Payment received - the seller has not attached the deliverable yet")
+    d = await db.apex_deliverables.find_one({"id": o["deliverable_id"]}, {"_id": 0})
+    if not d:
+        raise HTTPException(404, "Deliverable missing")
+    await db.apex_orders.update_one({"id": o["id"]}, {"$inc": {"downloads": 1}, "$set": {"last_download_at": now_iso()}})
+    if fmt == "status":
+        return {"product": o["product"], "title": d["title"], "status": o["status"], "api_key": d.get("api_key")}
+    return _export(d, fmt)
+
+
+# ---- gated prompt-library API (vector #2 payment path: API key unlocked by a paid order) ----
+@router.get("/library/{did}")
+async def library_api(did: str, key: str = Query(...)):
+    d = await db.apex_deliverables.find_one({"id": did, "product": "prompt_library"}, {"_id": 0})
+    if not d:
+        raise HTTPException(404, "Library not found")
+    if not d.get("api_key") or key != d["api_key"]:
+        raise HTTPException(401, "invalid key")
+    paid = await db.apex_orders.count_documents({"deliverable_id": did, "status": "paid"})
+    if not paid:
+        raise HTTPException(402, "No paid order for this library")
+    return {"title": d["title"], "domain": (d.get("data") or {}).get("domain"), "prompts": (d.get("data") or {}).get("prompts") or []}
+
+```
+
+
+### `frontend/src/components/Apex.js`
+```javascript
+import React, { useCallback, useEffect, useState } from "react";
+import axios from "axios";
+import { toast } from "sonner";
+import { motion, AnimatePresence } from "framer-motion";
+import {
+  Store, FileText, BookOpen, Globe2, Sparkles, Loader2, Download, Copy, Link2, CreditCard, CheckCircle2, X, Trash2,
+  ShoppingCart, KeyRound, AlertTriangle, Package, ExternalLink
+} from "lucide-react";
+import { API } from "../App";
+import { Markdown } from "./FileAnalyzer";
+
+const ICON = { rfp_kit: FileText, prompt_library: BookOpen, seo_pack: Globe2 };
+const fmt = (iso) => { try { return iso ? new Date(iso).toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" }) : ""; } catch { return ""; } };
+const money = (v) => `$${Number(v || 0).toLocaleString()}`;
+
+export default function Apex() {
+  const [catalog, setCatalog] = useState(null);
+  const [product, setProduct] = useState("rfp_kit");
+  const [inputs, setInputs] = useState({});
+  const [opps, setOpps] = useState([]);
+  const [generating, setGenerating] = useState(false);
+  const [deliverables, setDeliverables] = useState([]);
+  const [current, setCurrent] = useState(null);
+  const [orders, setOrders] = useState([]);
+  const [orderForm, setOrderForm] = useState({ buyer_email: "", buyer_name: "", price_usd: "" });
+
+  const load = useCallback(async () => {
+    try {
+      const [c, d, o] = await Promise.all([axios.get(`${API}/apex/products`), axios.get(`${API}/apex/deliverables`), axios.get(`${API}/apex/orders`)]);
+      setCatalog(c.data); setDeliverables(d.data); setOrders(o.data);
+    } catch { toast.error("Could not load Apex Nexus"); }
+  }, []);
+  useEffect(() => { load(); }, [load]);
+  useEffect(() => {
+    if (product === "rfp_kit") axios.get(`${API}/radar/opportunities`, { params: { limit: 40 } }).then((r) => setOpps(r.data)).catch(() => {});
+  }, [product]);
+
+  const p = catalog?.products.find((x) => x.id === product);
+  const set = (k, v) => setInputs((i) => ({ ...i, [k]: v }));
+
+  const generate = async () => {
+    setGenerating(true); setCurrent(null);
+    try {
+      const r = await axios.post(`${API}/apex/generate`, { product, inputs }, { timeout: 300000 });
+      setCurrent(r.data); toast.success(`${r.data.title} ready - ${r.data.placeholders} [FILL] placeholder(s) to complete`); load();
+    } catch (e) { toast.error(e?.response?.data?.detail || "Generation failed"); }
+    finally { setGenerating(false); }
+  };
+  const openDeliverable = async (id) => { try { setCurrent((await axios.get(`${API}/apex/deliverables/${id}`)).data); window.scrollTo({ top: 0, behavior: "smooth" }); } catch { /* ignore */ } };
+  const removeDeliverable = async (id) => { try { await axios.delete(`${API}/apex/deliverables/${id}`); if (current?.id === id) setCurrent(null); load(); } catch { toast.error("Delete failed"); } };
+  const copy = async (t) => { try { await navigator.clipboard.writeText(t); toast.success("Copied"); } catch { toast.error("Copy failed"); } };
+
+  const createOrder = async () => {
+    if (!current) { toast.error("Generate or open a deliverable first"); return; }
+    try {
+      const r = await axios.post(`${API}/apex/orders`, { product: current.product, deliverable_id: current.id, buyer_email: orderForm.buyer_email, buyer_name: orderForm.buyer_name || null, price_usd: orderForm.price_usd ? Number(orderForm.price_usd) : null });
+      toast.success(`Order created for ${r.data.buyer_email} - ${r.data.payment_provider === "stripe" ? "checkout link ready" : "mark paid when payment arrives"}`);
+      setOrderForm({ buyer_email: "", buyer_name: "", price_usd: "" }); load();
+    } catch (e) { toast.error(e?.response?.data?.detail || "Order failed"); }
+  };
+  const patchOrder = async (id, body) => { try { await axios.patch(`${API}/apex/orders/${id}`, body); load(); } catch (e) { toast.error(e?.response?.data?.detail || "Update failed"); } };
+  const unlockLink = (o) => `${API}/apex/unlock/${o.unlock_token}`;
+
+  return (
+    <div className="ax-wrap" data-testid="apex-page">
+      <div className="chr-hero">
+        <div className="chr-hero-left">
+          <div className="chr-title"><Store size={18} /> Apex Nexus</div>
+          <p>Zero-capital digital products generated on demand and sold with an <b>order → pay → unlock</b> flow. Three vectors are live: the <b>RFP Response Kit</b> (built on real Radar solicitations), the <b>Prompt Library</b> (Markdown + JSON + a gated API key), and the <b>Local SEO Content Pack</b>. Everything is a first draft with <code>[FILL]</code> placeholders where facts are missing - you review, complete and deliver; nothing is submitted or sent automatically.</p>
+        </div>
+        <div className="chr-hero-stats">
+          <div className="chr-stat"><span className="v">{deliverables.length}</span><span className="l">deliverables</span></div>
+          <div className="chr-stat gold"><span className="v">{money(orders.filter((o) => o.status === "paid").reduce((a, o) => a + (o.price_usd || 0), 0))}</span><span className="l">paid orders</span></div>
+        </div>
+      </div>
+
+      {catalog && (
+        <div className={`ax-pay ${catalog.payments.stripe_configured ? "on" : ""}`} data-testid="apex-payments">
+          <CreditCard size={14} /> <b>Payments: {catalog.payments.stripe_configured ? "Stripe Checkout" : "manual unlock"}</b> - {catalog.payments.note}
+        </div>
+      )}
+
+      {/* Product picker */}
+      <div className="ax-products" data-testid="apex-products">
+        {(catalog?.products || []).map((x) => { const I = ICON[x.id] || Package; return (
+          <button key={x.id} className={`ax-product ${product === x.id ? "active" : ""}`} onClick={() => { setProduct(x.id); setInputs({}); }} data-testid={`apex-product-${x.id}`}>
+            <div className="ax-product-top"><I size={16} /> <b>{x.name}</b> <span className="ax-price">{money(x.price_usd)}</span></div>
+            <small>{x.tagline}</small>
+            <small className="ax-buyer">Buyer: {x.buyer} · vector #{x.vector} · {x.deliverables} made · {x.paid_orders} paid</small>
+          </button>); })}
+      </div>
+
+      {/* Workbench */}
+      {p && (
+        <div className="fa-console" data-testid="apex-workbench">
+          <div className="fa-head"><Sparkles size={16} /> {p.name} workbench <em>{p.deliverable}</em></div>
+          <div className="rd-grid3 ax-form">
+            {product === "rfp_kit" && <>
+              <label className="rd-span3">Radar opportunity (real RFP/grant) — or paste text below
+                <select className="cw-input" data-testid="ax-opp" value={inputs.opportunity_id || ""} onChange={(e) => set("opportunity_id", e.target.value || undefined)}>
+                  <option value="">— pick from Radar ({opps.length} loaded) —</option>
+                  {opps.map((o) => <option key={o.id} value={o.id}>{o.title.slice(0, 90)} · {o.organization_name || "?"} · {o.score?.total}</option>)}
+                </select>
+              </label>
+              <label className="rd-span3">Or paste the RFP / solicitation text<textarea className="cw-textarea" rows={4} data-testid="ax-rfp-text" value={inputs.rfp_text || ""} onChange={(e) => set("rfp_text", e.target.value)} placeholder="Scope of work, requirements, evaluation criteria, deadline..." /></label>
+              <label>Bidder name<input className="cw-input" value={inputs.bidder_name || ""} onChange={(e) => set("bidder_name", e.target.value)} placeholder="from Radar profile if blank" /></label>
+              <label>Capabilities (facts only)<input className="cw-input" value={inputs.bidder_capabilities || ""} onChange={(e) => set("bidder_capabilities", e.target.value)} /></label>
+              <label>Differentiators<input className="cw-input" value={inputs.differentiators || ""} onChange={(e) => set("differentiators", e.target.value)} /></label>
+              <label>Price basis<input className="cw-input" value={inputs.price_basis || ""} onChange={(e) => set("price_basis", e.target.value)} placeholder="e.g. $95/hr, fixed $12k, monthly $349" /></label>
+            </>}
+            {product === "prompt_library" && <>
+              <label>Domain *<input className="cw-input" data-testid="ax-domain" value={inputs.domain || ""} onChange={(e) => set("domain", e.target.value)} placeholder="e.g. moving company operations" /></label>
+              <label>Audience<input className="cw-input" value={inputs.audience || ""} onChange={(e) => set("audience", e.target.value)} /></label>
+              <label>Count (10-30)<input type="number" className="cw-input" value={inputs.count || 15} onChange={(e) => set("count", Number(e.target.value))} /></label>
+              <label className="rd-span3">Use cases to cover<input className="cw-input" value={inputs.use_cases || ""} onChange={(e) => set("use_cases", e.target.value)} placeholder="comma-separated" /></label>
+              <label>Tone<input className="cw-input" value={inputs.tone || ""} onChange={(e) => set("tone", e.target.value)} placeholder="professional" /></label>
+            </>}
+            {product === "seo_pack" && <>
+              <label>Business *<input className="cw-input" data-testid="ax-business" value={inputs.business || ""} onChange={(e) => set("business", e.target.value)} /></label>
+              <label>Service *<input className="cw-input" data-testid="ax-service" value={inputs.service || ""} onChange={(e) => set("service", e.target.value)} placeholder="e.g. office relocation" /></label>
+              <label>City / region *<input className="cw-input" data-testid="ax-region" value={inputs.city_region || ""} onChange={(e) => set("city_region", e.target.value)} placeholder="Boston, MA" /></label>
+              <label>Pages (5-15)<input type="number" className="cw-input" value={inputs.count || 8} onChange={(e) => set("count", Number(e.target.value))} /></label>
+              <label className="rd-span3">Terms (optional - blank lets ACASO propose high-intent terms)<input className="cw-input" value={inputs.terms || ""} onChange={(e) => set("terms", e.target.value)} placeholder="comma-separated" /></label>
+              <label className="rd-span3">Proof points (facts only)<input className="cw-input" value={inputs.proof_points || ""} onChange={(e) => set("proof_points", e.target.value)} placeholder="e.g. 'insured, 2 trucks, same-day quotes' - missing facts become [FILL]" /></label>
+            </>}
+          </div>
+          <div className="cw-row">
+            <button className="rd-btn primary" data-testid="ax-generate" onClick={generate} disabled={generating}>{generating ? <Loader2 className="spin" size={14} /> : <Sparkles size={14} />} {generating ? "Generating (30-90s)..." : `Generate ${p.name}`}</button>
+            <span className="rd-dim">One model call. Output is a draft with [FILL] placeholders - never sold or sent without your review.</span>
+          </div>
+        </div>
+      )}
+
+      {/* Current deliverable */}
+      <AnimatePresence>
+        {current && (
+          <motion.div className="ax-deliverable" initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0 }} data-testid="ax-deliverable">
+            <div className="ax-del-head">
+              <div>
+                <div className="fa-head"><Package size={16} /> {current.title}</div>
+                <div className="cw-meta">{fmt(current.created_at)} · {current.model_label} · {current.chars} chars · <b className={current.placeholders ? "rd-urgent" : ""}>{current.placeholders} [FILL]</b>{current.count ? ` · ${current.count} items` : ""}{current.source_url ? <> · <a href={current.source_url} target="_blank" rel="noreferrer">source <ExternalLink size={10} /></a></> : null}</div>
+              </div>
+              <div className="cw-actions">
+                <a className="rd-btn" href={`${API}/apex/deliverables/${current.id}/export?fmt=md`} target="_blank" rel="noreferrer" data-testid="ax-export-md"><Download size={13} /> .md</a>
+                {current.data && <a className="rd-btn" href={`${API}/apex/deliverables/${current.id}/export?fmt=json`} target="_blank" rel="noreferrer" data-testid="ax-export-json"><Download size={13} /> .json</a>}
+                <button className="rd-btn" onClick={() => copy(current.markdown)}><Copy size={13} /> Copy</button>
+                {current.api_key && <button className="rd-btn" onClick={() => copy(`${API}/apex/library/${current.id}?key=${current.api_key}`)} title="Gated API endpoint - works after a paid order" data-testid="ax-api-key"><KeyRound size={13} /> API link</button>}
+                <button className="rd-ic" onClick={() => setCurrent(null)}><X size={14} /></button>
+              </div>
+            </div>
+            <div className="ax-del-grid">
+              <div className="ax-md"><Markdown text={current.markdown} /></div>
+              <aside className="ax-sell">
+                <div className="cw-side-title"><ShoppingCart size={14} /> Sell this deliverable</div>
+                <input className="cw-input" placeholder="buyer email *" data-testid="ax-buyer-email" value={orderForm.buyer_email} onChange={(e) => setOrderForm({ ...orderForm, buyer_email: e.target.value })} />
+                <input className="cw-input" placeholder="buyer name" value={orderForm.buyer_name} onChange={(e) => setOrderForm({ ...orderForm, buyer_name: e.target.value })} />
+                <input className="cw-input" type="number" placeholder={`price (default ${money(p?.price_usd)})`} value={orderForm.price_usd} onChange={(e) => setOrderForm({ ...orderForm, price_usd: e.target.value })} />
+                <button className="rd-btn primary" onClick={createOrder} data-testid="ax-create-order"><ShoppingCart size={14} /> Create order</button>
+                <div className="rd-lbl-note">{catalog?.payments.stripe_configured ? "A Stripe Checkout link is attached to the order." : "Manual mode: send the buyer your payment link, then press Mark paid - the unlock link starts working immediately."}</div>
+                <div className="ax-warn"><AlertTriangle size={12} /> Complete every [FILL] before delivering. Drafts carry no guarantee of award, ranking or results.</div>
+              </aside>
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* Orders */}
+      <div className="fa-console">
+        <div className="fa-head"><CreditCard size={16} /> Orders <em>{orders.length} total · {orders.filter((o) => o.status === "paid").length} paid</em></div>
+        {orders.length === 0 ? <div className="attach-empty" data-testid="ax-orders-empty">No orders yet. Generate a deliverable, then create an order for a buyer.</div> : (
+          <div className="ax-orders" data-testid="ax-orders">
+            {orders.map((o) => (
+              <div key={o.id} className={`ax-order s-${o.status}`} data-testid={`ax-order-${o.id}`}>
+                <span className={`bb-tag`}>{o.product}</span>
+                <span className="ax-order-buyer">{o.buyer_email}{o.buyer_name ? ` · ${o.buyer_name}` : ""}</span>
+                <span className="ax-order-price">{money(o.price_usd)}</span>
+                <span className={`ln-status s-${o.status === "paid" ? "done" : o.status === "pending_payment" ? "proposed" : "failed"}`}>{o.status.replace("_", " ")}</span>
+                <span className="ln-when">{fmt(o.created_at)}{o.downloads ? ` · ${o.downloads} download(s)` : ""}</span>
+                <button className="rd-ic" title="Copy buyer unlock link" onClick={() => copy(unlockLink(o))} data-testid="ax-copy-unlock"><Link2 size={13} /></button>
+                {o.status === "pending_payment" && <button className="rd-btn sm primary" onClick={() => patchOrder(o.id, { status: "paid" })} data-testid="ax-mark-paid"><CheckCircle2 size={13} /> Mark paid</button>}
+                {o.status === "pending_payment" && <button className="rd-ic" title="Cancel" onClick={() => patchOrder(o.id, { status: "cancelled" })}><X size={13} /></button>}
+                {o.status === "paid" && <button className="rd-btn sm" onClick={() => patchOrder(o.id, { status: "refunded" })}>Refund</button>}
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
+      {/* Deliverable library */}
+      <div className="fa-console">
+        <div className="fa-head"><Package size={16} /> Deliverables <em>{deliverables.length}</em></div>
+        {deliverables.length === 0 ? <div className="attach-empty" data-testid="ax-deliverables-empty">Nothing generated yet.</div> : (
+          <div className="cw-history" data-testid="ax-deliverables">
+            {deliverables.map((d) => (
+              <div key={d.id} className="cw-hrow">
+                <button className="cw-hmain" onClick={() => openDeliverable(d.id)} data-testid={`ax-del-${d.id}`}>
+                  <span className="bb-tag">{d.product}</span>
+                  <span className="cw-htitle">{d.title}</span>
+                  <span className="cw-hmeta">{fmt(d.created_at)} · {d.placeholders} [FILL]{d.count ? ` · ${d.count} items` : ""}</span>
+                </button>
+                <a className="attach-btn" href={`${API}/apex/deliverables/${d.id}/export?fmt=md`} target="_blank" rel="noreferrer" title="Download"><Download size={13} /></a>
+                <button className="attach-btn danger" onClick={() => removeDeliverable(d.id)} title="Delete"><Trash2 size={13} /></button>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+```
+
+
+### `frontend/src/components/Companion.js`
+```javascript
+import React, { useCallback, useEffect, useRef, useState } from "react";
+import axios from "axios";
+import { toast } from "sonner";
+import {
+  Castle, Mic, Square, MonitorUp, MonitorOff, Send, Volume2, VolumeX, Loader2, Trash2, Camera, Radio, ExternalLink, Pin, Eye, EyeOff, Download
+} from "lucide-react";
+import { API } from "../App";
+
+const SR = typeof window !== "undefined" ? (window.SpeechRecognition || window.webkitSpeechRecognition) : null;
+const TTS = typeof window !== "undefined" ? window.speechSynthesis : null;
+const getSession = () => { try { let s = localStorage.getItem("acaso_companion_session"); if (!s) { s = crypto.randomUUID(); localStorage.setItem("acaso_companion_session", s); } return s; } catch { return "companion"; } };
+
+/** Open the Companion as its own small desktop window (popup). Used by the launcher button in the main app. */
+export function openCompanionWindow() {
+  const url = `${window.location.origin}/?mode=companion`;
+  const w = window.open(url, "acaso-companion", "popup=yes,width=440,height=760,left=" + Math.max(0, window.screen.availWidth - 470) + ",top=60,resizable=yes");
+  if (!w) toast.error("Popup blocked - allow popups for this site, or open /?mode=companion in a new window");
+  return w;
+}
+
+export default function Companion({ standalone = true }) {
+  const [sessionId, setSessionId] = useState(getSession);
+  const [messages, setMessages] = useState([]);
+  const [text, setText] = useState("");
+  const [streaming, setStreaming] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [sharing, setSharing] = useState(false);
+  const [shareLabel, setShareLabel] = useState("");
+  const [includeFrame, setIncludeFrame] = useState(true);
+  const [listening, setListening] = useState(false);
+  const [handsFree, setHandsFree] = useState(false);
+  const [speak, setSpeak] = useState(true);
+  const [speaking, setSpeaking] = useState(false);
+  const [watch, setWatch] = useState(false);
+  const [watchState, setWatchState] = useState({ glances: 0, skipped: 0, last: null, checking: false });
+  const watchRef = useRef({ prevHash: null, prevSummary: null, lastSpoken: null, busy: false });
+  const videoRef = useRef(null);
+  const streamRef = useRef(null);
+  const recRef = useRef(null);
+  const endRef = useRef(null);
+  const handsFreeRef = useRef(false);
+  useEffect(() => { handsFreeRef.current = handsFree; }, [handsFree]);
+
+  useEffect(() => {
+    (async () => { try { setMessages((await axios.get(`${API}/companion/history`, { params: { session_id: sessionId } })).data); } catch { /* silent */ } })();
+  }, [sessionId]);
+  useEffect(() => { endRef.current?.scrollIntoView({ behavior: "smooth" }); }, [messages, streaming]);
+  const [installEvt, setInstallEvt] = useState(null);
+  const [installed, setInstalled] = useState(() => typeof window !== "undefined" && window.matchMedia?.("(display-mode: standalone)").matches);
+  useEffect(() => {
+    if (!standalone) return undefined;
+    document.title = "ACASO Companion";
+    // swap the page manifest so Chrome offers to install *the Companion* as its own desktop app
+    document.querySelectorAll('link[rel="manifest"]').forEach((l) => l.remove());
+    const link = document.createElement("link"); link.rel = "manifest"; link.href = "/companion.webmanifest"; document.head.appendChild(link);
+    const onPrompt = (e) => { e.preventDefault(); setInstallEvt(e); };
+    const onInstalled = () => { setInstalled(true); setInstallEvt(null); toast.success("ACASO Companion installed - find it in your Start menu / dock"); };
+    window.addEventListener("beforeinstallprompt", onPrompt);
+    window.addEventListener("appinstalled", onInstalled);
+    return () => { window.removeEventListener("beforeinstallprompt", onPrompt); window.removeEventListener("appinstalled", onInstalled); };
+  }, [standalone]);
+  const install = async () => {
+    if (installEvt) { installEvt.prompt(); const r = await installEvt.userChoice.catch(() => null); if (r?.outcome === "accepted") setInstallEvt(null); return; }
+    toast("Chrome: menu (⋮) → Cast, save and share → Install page as app. Or run the Local Node with --companion for an always-on-top window.", { duration: 9000 });
+  };
+
+  // ---- screen / window share ----
+  const startShare = async () => {
+    try {
+      const stream = await navigator.mediaDevices.getDisplayMedia({ video: { frameRate: 5 }, audio: false });
+      streamRef.current = stream;
+      if (videoRef.current) { videoRef.current.srcObject = stream; await videoRef.current.play(); }
+      const track = stream.getVideoTracks()[0];
+      const s = track.getSettings();
+      setShareLabel(track.label || (s.displaySurface ? `${s.displaySurface}` : "shared screen"));
+      setSharing(true);
+      track.onended = () => stopShare();
+      toast.success("Sharing started - ask anything about what you see");
+    } catch (e) { if (e?.name !== "NotAllowedError") toast.error("Could not start sharing"); }
+  };
+  const stopShare = useCallback(() => {
+    try { streamRef.current?.getTracks().forEach((t) => t.stop()); } catch { /* ignore */ }
+    streamRef.current = null; setSharing(false); setShareLabel(""); setWatch(false);
+    if (videoRef.current) videoRef.current.srcObject = null;
+  }, []);
+  const captureFrame = () => {
+    const v = videoRef.current;
+    if (!v || !streamRef.current || !v.videoWidth) return null;
+    const maxW = 1280;
+    const scale = Math.min(1, maxW / v.videoWidth);
+    const c = document.createElement("canvas");
+    c.width = Math.round(v.videoWidth * scale); c.height = Math.round(v.videoHeight * scale);
+    c.getContext("2d").drawImage(v, 0, 0, c.width, c.height);
+    return c.toDataURL("image/jpeg", 0.72).split(",")[1];
+  };
+  /** 16x16 grayscale fingerprint - lets watch mode skip frames that barely changed (no model call). */
+  const frameHash = () => {
+    const v = videoRef.current;
+    if (!v || !v.videoWidth) return null;
+    const c = document.createElement("canvas"); c.width = 16; c.height = 16;
+    const ctx = c.getContext("2d"); ctx.drawImage(v, 0, 0, 16, 16);
+    const d = ctx.getImageData(0, 0, 16, 16).data; const out = [];
+    for (let i = 0; i < d.length; i += 4) out.push((d[i] + d[i + 1] + d[i + 2]) / 3);
+    return out;
+  };
+  const hashDiff = (a, b) => { if (!a || !b) return 1; let s = 0; for (let i = 0; i < a.length; i++) s += Math.abs(a[i] - b[i]); return s / (a.length * 255); };
+
+
+  // ---- TTS ----
+  const say = useCallback((t, onDone) => {
+    if (!TTS || !t) { onDone?.(); return; }
+    TTS.cancel();
+    const u = new SpeechSynthesisUtterance(t.replace(/\*\*/g, ""));
+    const pref = localStorage.getItem("acaso_voice_name");
+    const v = TTS.getVoices().find((x) => x.name === pref);
+    if (v) u.voice = v;
+    u.onstart = () => setSpeaking(true);
+    u.onend = () => { setSpeaking(false); onDone?.(); };
+    u.onerror = () => { setSpeaking(false); onDone?.(); };
+    TTS.speak(u);
+  }, []);
+
+  // ---- watch mode loop: glance every 30s, only call the model when the screen changed, speak only if notable ----
+  useEffect(() => {
+    if (!watch || !sharing) return undefined;
+    let cancelled = false;
+    const glance = async () => {
+      if (cancelled || watchRef.current.busy || busy) return;
+      const h = frameHash();
+      if (!h) return;
+      const changed = hashDiff(watchRef.current.prevHash, h) > 0.04; // ~4% average pixel change
+      if (!changed) { setWatchState((w) => ({ ...w, skipped: w.skipped + 1, last: new Date() })); return; }
+      const frame = captureFrame();
+      if (!frame) return;
+      watchRef.current.busy = true; setWatchState((w) => ({ ...w, checking: true }));
+      try {
+        const r = await axios.post(`${API}/companion/watch`, { image_b64: frame, session_id: sessionId, share_label: shareLabel,
+          previous_summary: watchRef.current.prevSummary, last_spoken: watchRef.current.lastSpoken }, { timeout: 60000 });
+        watchRef.current.prevHash = h; watchRef.current.prevSummary = r.data.summary;
+        setWatchState((w) => ({ ...w, glances: w.glances + 1, last: new Date(), checking: false }));
+        if (r.data.notable && r.data.message) {
+          watchRef.current.lastSpoken = r.data.message;
+          setMessages((m) => [...m, { id: `w-${Date.now()}`, role: "assistant", content: r.data.message, model_label: r.data.model_label, watch: true, kind: r.data.kind, created_at: r.data.at }]);
+          if (speak) say(r.data.message);
+        }
+      } catch { setWatchState((w) => ({ ...w, checking: false })); }
+      finally { watchRef.current.busy = false; }
+    };
+    const t0 = setTimeout(glance, 1500);
+    const iv = setInterval(glance, 30000);
+    return () => { cancelled = true; clearTimeout(t0); clearInterval(iv); };
+  }, [watch, sharing, sessionId, shareLabel, speak, say, busy]);
+
+  // ---- send (SSE stream) ----
+  const send = useCallback(async (msg, withFrame = includeFrame) => {
+    const content = (msg || "").trim();
+    const frame = withFrame && sharing ? captureFrame() : null;
+    if (!content && !frame) return;
+    setBusy(true); setStreaming("");
+    setMessages((m) => [...m, { id: `u-${Date.now()}`, role: "user", content: content || "(shared screen)", had_image: !!frame, created_at: new Date().toISOString() }]);
+    try {
+      const res = await fetch(`${API}/companion/chat`, { method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ message: content, session_id: sessionId, image_b64: frame, share_label: frame ? shareLabel : null }) });
+      if (!res.ok) throw new Error((await res.json().catch(() => ({})))?.detail || `HTTP ${res.status}`);
+      const reader = res.body.getReader(); const dec = new TextDecoder(); let buf = ""; let full = ""; let label = null;
+      for (;;) {
+        const { value, done } = await reader.read(); if (done) break;
+        buf += dec.decode(value, { stream: true });
+        const parts = buf.split("\n\n"); buf = parts.pop();
+        for (const p of parts) {
+          if (!p.startsWith("data: ")) continue;
+          const ev = JSON.parse(p.slice(6));
+          if (ev.type === "delta") { full += ev.content; setStreaming(full); }
+          else if (ev.type === "done") { full = ev.content || full; label = ev.model_label; }
+        }
+      }
+      setStreaming("");
+      setMessages((m) => [...m, { id: `a-${Date.now()}`, role: "assistant", content: full, model_label: label, created_at: new Date().toISOString() }]);
+      const after = () => { if (handsFreeRef.current) startListening(); }; // eslint-disable-line no-use-before-define
+      if (speak) say(full, after); else after();
+    } catch (e) {
+      toast.error(e.message || "Companion failed");
+      setStreaming("");
+    } finally { setBusy(false); }
+  }, [includeFrame, sharing, sessionId, shareLabel, speak, say]);
+
+  // ---- STT ----
+  const stopListening = useCallback(() => { try { recRef.current?.stop(); } catch { /* ignore */ } setListening(false); }, []);
+  const startListening = useCallback(() => {
+    if (!SR) { toast.error("Speech recognition needs Chrome, Edge or Safari"); return; }
+    try { TTS?.cancel(); } catch { /* ignore */ }
+    const rec = new SR(); rec.lang = "en-US"; rec.interimResults = true; rec.continuous = false;
+    let fin = "";
+    rec.onstart = () => setListening(true);
+    rec.onresult = (ev) => { fin = ""; let inter = ""; for (let i = 0; i < ev.results.length; i++) { const t = ev.results[i][0].transcript; if (ev.results[i].isFinal) fin += t + " "; else inter += t; } setText((fin + inter).trim()); };
+    rec.onerror = (ev) => { setListening(false); if (ev.error === "not-allowed") { toast.error("Microphone permission denied"); setHandsFree(false); } else if (ev.error === "no-speech" && handsFreeRef.current) setTimeout(() => startListening(), 400); };
+    rec.onend = () => { setListening(false); const heard = fin.trim(); if (heard) { setText(""); send(heard); } else if (handsFreeRef.current && !busy) setTimeout(() => startListening(), 300); };
+    recRef.current = rec;
+    try { rec.start(); } catch { /* ignore */ }
+  }, [send, busy]);
+
+  const toggleHandsFree = () => {
+    if (handsFree) { setHandsFree(false); handsFreeRef.current = false; stopListening(); TTS?.cancel(); }
+    else { setHandsFree(true); handsFreeRef.current = true; startListening(); }
+  };
+  const clear = async () => { try { await axios.delete(`${API}/companion/history`, { params: { session_id: sessionId } }); } catch { /* ignore */ } const s = crypto.randomUUID(); localStorage.setItem("acaso_companion_session", s); setSessionId(s); setMessages([]); };
+  useEffect(() => () => { stopShare(); try { recRef.current?.abort(); TTS?.cancel(); } catch { /* ignore */ } }, [stopShare]);
+
+  return (
+    <div className={`cp ${standalone ? "standalone" : ""}`} data-testid="companion">
+      <header className="cp-head">
+        <div className="cp-brand"><Castle size={16} /> ACASO Companion <span className={`cp-dot ${busy ? "busy" : sharing ? "on" : ""}`} /></div>
+        <div className="cp-head-actions">
+          <button className="cp-ic" title={speak ? "Mute replies" : "Speak replies"} onClick={() => { setSpeak((s) => !s); TTS?.cancel(); }} data-testid="cp-mute">{speak ? <Volume2 size={14} /> : <VolumeX size={14} />}</button>
+          <button className="cp-ic" title="Clear conversation" onClick={clear} data-testid="cp-clear"><Trash2 size={14} /></button>
+          {!standalone && <button className="cp-ic" title="Open as its own window" onClick={openCompanionWindow} data-testid="cp-popout"><ExternalLink size={14} /></button>}
+          {standalone && !installed && <button className="cp-install" onClick={install} title="Install as a desktop app" data-testid="cp-install"><Download size={12} /> Install app</button>}
+          {standalone && installed && <span className="cp-pin" title="Running as an installed desktop app"><Pin size={12} /> desktop app</span>}
+        </div>
+      </header>
+
+      <div className={`cp-share ${sharing ? "on" : ""}`} data-testid="cp-share">
+        <video ref={videoRef} muted playsInline className="cp-video" style={{ display: sharing ? "block" : "none" }} />
+        {!sharing ? (
+          <button className="cp-share-btn" onClick={startShare} data-testid="cp-share-start"><MonitorUp size={16} /> Share a window, tab or screen</button>
+        ) : (
+          <div className="cp-share-bar">
+            <span title={shareLabel}><Radio size={11} /> {shareLabel.slice(0, 38) || "sharing"}</span>
+            <label className="cp-chk" title="Attach a frame of the shared window to each message"><input type="checkbox" checked={includeFrame} onChange={(e) => setIncludeFrame(e.target.checked)} data-testid="cp-include-frame" /> see it</label>
+            <button className={`cp-ic ${watch ? "on" : ""}`} title={watch ? "Watch mode on - glances every 30s, speaks only for errors, forms or action prompts" : "Watch mode: glance every 30s and speak up only when something notable appears"} onClick={() => setWatch((w) => !w)} data-testid="cp-watch">{watch ? <Eye size={14} /> : <EyeOff size={14} />}</button>
+            <button className="cp-ic" title="Describe what's on screen now" onClick={() => send("", true)} disabled={busy} data-testid="cp-look"><Camera size={14} /></button>
+            <button className="cp-ic" title="Stop sharing" onClick={stopShare} data-testid="cp-share-stop"><MonitorOff size={14} /></button>
+          </div>
+        )}
+      </div>
+
+      {watch && sharing && (
+        <div className="cp-watchbar" data-testid="cp-watch-status">
+          <Eye size={11} /> watching · {watchState.glances} glance{watchState.glances === 1 ? "" : "s"} · {watchState.skipped} unchanged skipped{watchState.checking ? " · checking..." : ""}
+        </div>
+      )}
+      <div className="cp-log" data-testid="cp-log">
+        {messages.length === 0 && !streaming && (
+          <div className="cp-empty">Talk or type. Share a window and I can read what's on it - errors, forms, documents, dashboards - and tell you what to do next.</div>
+        )}
+        {messages.map((m) => (
+          <div key={m.id} className={`cp-msg ${m.role}`} data-testid={`cp-msg-${m.role}`}>
+            {m.had_image && <span className="cp-tag"><Camera size={10} /> frame</span>}
+            {m.watch && <span className={`cp-tag k-${m.kind}`}><Eye size={10} /> watch · {m.kind}</span>}
+            <div>{m.content}</div>
+            {m.role === "assistant" && <button className="cp-replay" onClick={() => say(m.content)} title="Speak"><Volume2 size={11} /></button>}
+          </div>
+        ))}
+        {streaming && <div className="cp-msg assistant streaming" data-testid="cp-streaming">{streaming}</div>}
+        {busy && !streaming && <div className="cp-thinking"><Loader2 className="spin" size={12} /> looking...</div>}
+        <div ref={endRef} />
+      </div>
+
+      <form className="cp-input" onSubmit={(e) => { e.preventDefault(); const t = text; setText(""); send(t); }}>
+        <button type="button" className={`cp-mic ${handsFree ? "on" : ""} ${listening ? "live" : ""}`} onClick={toggleHandsFree} title={handsFree ? "Stop hands-free" : "Hands-free conversation"} data-testid="cp-handsfree">
+          {handsFree ? <Square size={15} /> : <Mic size={15} />}
+        </button>
+        <input value={text} onChange={(e) => setText(e.target.value)} placeholder={listening ? "listening..." : sharing ? "Ask about what you see..." : "Ask ACASO..."} data-testid="cp-text" />
+        <button type="submit" className="cp-send" disabled={busy || (!text.trim() && !sharing)} data-testid="cp-send">{busy ? <Loader2 className="spin" size={15} /> : <Send size={15} />}</button>
+      </form>
+      {speaking && <button className="cp-stopvoice" onClick={() => TTS?.cancel()}>stop voice</button>}
+    </div>
+  );
+}
+
+```
+
+
 ### `frontend/src/components/LocalNode.js`
 ```javascript
 import React, { useCallback, useEffect, useState } from "react";
@@ -9858,6 +10810,8 @@ Safety, enforced HERE on your machine (the server enforces the same rules again)
   * Browser tasks fill forms and STOP. Nothing is submitted until you approve a separate submit step.
   * Passwords / 2FA: type them yourself in the Chrome window that opens. This program never sees or stores them.
   * --shell is off unless you pass it. Shell commands run inside the allowed root with a timeout.
+  * --companion opens the ACASO Companion as its own small always-on-top desktop window (real Chrome in app mode,
+    separate profile, so it survives closing your normal browser). Works with or without pairing.
 """
 import argparse
 import base64
@@ -10152,6 +11106,87 @@ class Node:
         return {"closed": sid or "all"}
 
 
+# ----------------------------------------------------------------------------------------------
+# Companion desktop window: Chrome --app mode + best-effort always-on-top
+# ----------------------------------------------------------------------------------------------
+def _find_chrome():
+    cands = []
+    if platform.system() == "Windows":
+        pf = [os.environ.get("PROGRAMFILES", r"C:\Program Files"), os.environ.get("PROGRAMFILES(X86)", r"C:\Program Files (x86)"), os.environ.get("LOCALAPPDATA", "")]
+        for base in pf:
+            cands += [os.path.join(base, r"Google\Chrome\Application\chrome.exe"), os.path.join(base, r"Microsoft\Edge\Application\msedge.exe"),
+                      os.path.join(base, r"BraveSoftware\Brave-Browser\Application\brave.exe")]
+    elif platform.system() == "Darwin":
+        cands += ["/Applications/Google Chrome.app/Contents/MacOS/Google Chrome", "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge"]
+    else:
+        for n in ("google-chrome", "google-chrome-stable", "chromium", "chromium-browser", "microsoft-edge", "brave-browser"):
+            path = shutil.which(n)
+            if path:
+                cands.append(path)
+    for c in cands:
+        if c and os.path.exists(c):
+            return c
+    return None
+
+
+def _keep_on_top_windows(title_part: str, stop):
+    import ctypes
+    from ctypes import wintypes
+    user32 = ctypes.windll.user32
+    HWND_TOPMOST, SWP_NOMOVE, SWP_NOSIZE, SWP_NOACTIVATE = -1, 0x0002, 0x0001, 0x0010
+    EnumWindowsProc = ctypes.WINFUNCTYPE(ctypes.c_bool, wintypes.HWND, wintypes.LPARAM)
+
+    def find():
+        found = []
+        def cb(hwnd, _):
+            n = user32.GetWindowTextLengthW(hwnd)
+            if n:
+                buf = ctypes.create_unicode_buffer(n + 1); user32.GetWindowTextW(hwnd, buf, n + 1)
+                if title_part.lower() in buf.value.lower() and user32.IsWindowVisible(hwnd):
+                    found.append(hwnd)
+            return True
+        user32.EnumWindows(EnumWindowsProc(cb), 0)
+        return found
+    while not stop.is_set():
+        for hwnd in find():
+            user32.SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE)
+        time.sleep(3)
+
+
+def _keep_on_top_linux(title_part: str, stop):
+    if not shutil.which("wmctrl"):
+        print("   (install 'wmctrl' for always-on-top on Linux: sudo apt install wmctrl)")
+        return
+    while not stop.is_set():
+        subprocess.run(["wmctrl", "-r", title_part, "-b", "add,above"], capture_output=True)
+        time.sleep(3)
+
+
+def launch_companion(url: str, on_top: bool = True):
+    """Open the Companion as its own app window; returns the Popen (or None)."""
+    import threading
+    chrome = _find_chrome()
+    target = url.rstrip("/") + "/?mode=companion"
+    if not chrome:
+        print("No Chrome/Edge found - opening the Companion in your default browser instead.")
+        import webbrowser; webbrowser.open(target)
+        return None
+    profile = Path.home() / ".acaso_companion_profile"
+    args = [chrome, f"--app={target}", f"--user-data-dir={profile}", "--window-size=440,760", "--window-position=40,40",
+            "--no-first-run", "--no-default-browser-check", "--disable-features=TranslateUI"]
+    proc = subprocess.Popen(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    print(f"Companion window opened ({os.path.basename(chrome)} app mode, profile {profile})")
+    if on_top:
+        stop = threading.Event()
+        fn = _keep_on_top_windows if platform.system() == "Windows" else (_keep_on_top_linux if platform.system() == "Linux" else None)
+        if fn:
+            threading.Thread(target=fn, args=("ACASO Companion", stop), daemon=True).start()
+            print("   always-on-top: enabled")
+        else:
+            print("   always-on-top: not available on this OS (window still opens as an app)")
+    return proc
+
+
 def main():
     ap = argparse.ArgumentParser(description="ACASO Local Node")
     ap.add_argument("--url", default=os.environ.get("ACASO_URL"), help="ACASO site URL (or env ACASO_URL)")
@@ -10160,9 +11195,22 @@ def main():
     ap.add_argument("--shell", action="store_true", help="Allow approved shell commands inside the root")
     ap.add_argument("--browser", action="store_true", help="Allow approved browser tasks in a real Chrome window")
     ap.add_argument("--name", default=None)
+    ap.add_argument("--companion", action="store_true", help="Open the ACASO Companion as its own always-on-top desktop window")
+    ap.add_argument("--no-top", action="store_true", help="With --companion: do not force always-on-top")
     a = ap.parse_args()
-    if not a.url or not a.key:
-        print("Need --url/ACASO_URL and --key/ACASO_KEY (key is on the Agent Bridge tab)."); sys.exit(1)
+    if not a.url:
+        print("Need --url or ACASO_URL."); sys.exit(1)
+    proc = launch_companion(a.url, on_top=not a.no_top) if a.companion else None
+    if not a.key:
+        if a.companion:
+            print("No ACASO_KEY given - running Companion window only (no file/browser tasks). Ctrl+C to close.")
+            try:
+                while proc is None or proc.poll() is None:
+                    time.sleep(1)
+            except KeyboardInterrupt:
+                pass
+            return
+        print("Need --key/ACASO_KEY (key is on the Agent Bridge tab)."); sys.exit(1)
     roots = a.root or [str(Path.home() / "ACASO")]
     Node(a.url, a.key, roots, a.shell, a.browser, a.name).run()
 

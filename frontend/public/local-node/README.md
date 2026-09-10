@@ -44,3 +44,9 @@ uploads them. The Chrome profile lives at `~/.acaso_chrome_profile` so your logi
 
 ## Stop
 Ctrl+C. Nothing runs when the node is off; queued tasks simply wait.
+
+## Companion desktop window
+Add `--companion` (the launchers already do) to open the ACASO Companion as its own small **always-on-top** window:
+real Chrome/Edge in app mode with a separate profile, so it stays open even if you close your normal browser.
+`--no-top` disables always-on-top. Without a key, `python acaso_node.py --url <site> --companion` opens just the window.
+Alternative without the node: open `<site>/?mode=companion` in Chrome and click **Install app**.
