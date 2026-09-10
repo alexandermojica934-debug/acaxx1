@@ -1,5 +1,5 @@
 # ACASO — Next Agent Brief
-_Generated: 2026-09-10T01:47:03.648779+00:00_
+_Generated: 2026-09-10T02:17:38.887738+00:00_
 
 Read this first. The app is a Directive-to-Payment OS (FastAPI+React+Mongo). All routes under `/api`.
 

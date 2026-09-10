@@ -382,4 +382,4 @@ async def research(req: ResearchRequest):
 
 @browse_router.get("/history")
 async def research_history(limit: int = Query(20, ge=1, le=100)):
-    return await db.research_pages.find({}, {"_id": 0, "text_excerpt": 0, "links": 0, "forms": 0}).sort("retrieved_at", -1).to_list(limit)
+    return await db.research_pages.find({}, {"_id": 0, "text_excerpt": 0, "links": 0, "forms": 0, "screenshot_b64": 0}).sort("retrieved_at", -1).to_list(limit)

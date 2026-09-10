@@ -2594,6 +2594,97 @@ node_module.init(db, require_key, llm_call_failover, extract_json)
 api_router.include_router(node_module.router)
 api_router.include_router(node_module.browse_router)
 
+# ---------------- Companion: small desktop window - voice + screen/window share + vision ----------------
+# Frames are captured in the owner's browser (getDisplayMedia -> canvas -> JPEG base64), sent per message only
+# when the owner includes them, analysed with a vision model, and NOT stored (only a thumbnail hash + text).
+from emergentintegrations.llm.chat import ImageContent, TextDelta, StreamDone  # noqa: E402
+from fastapi.responses import StreamingResponse  # noqa: E402
+
+COMPANION_SYSTEM = (
+    "You are ACASO Companion - a small always-available assistant window on the owner's desktop. The owner may share a "
+    "window or screen; when a screenshot is attached, ground your answer in what is visibly there: read text, identify the "
+    "app/site, spot errors, summarise, suggest the next click, or draft what they need. If something is not visible, say so. "
+    "Spoken-friendly style: plain sentences, short paragraphs, no heavy markdown, no emojis. Be concise unless asked to go deep. "
+    "You know the ACASO app: Sovereign Home (missions), Bug Bounty, Council of Weavers, Voice, Radar (real grants/contracts), "
+    "Ask All AIs, File Analyzer, Self-Directive, Chronicle, Local Node (acts on the owner's PC with approval), Agent Bridge. "
+    "Never claim to have taken an action yourself; suggest the tab or Local Node task that would do it."
+)
+
+
+class CompanionRequest(BaseModel):
+    message: str
+    session_id: Optional[str] = None
+    image_b64: Optional[str] = None  # JPEG/PNG base64 (no data: prefix) - optional shared-screen frame
+    share_label: Optional[str] = None
+
+
+@api_router.post("/companion/chat")
+async def companion_chat(req: CompanionRequest):
+    text = (req.message or "").strip()
+    if not text and not req.image_b64:
+        raise HTTPException(400, "Message or image required")
+    if req.image_b64 and len(req.image_b64) > 6_000_000:
+        raise HTTPException(413, "Frame too large - downscale before sending")
+    session = req.session_id or str(uuid.uuid4())
+    now = datetime.now(timezone.utc).isoformat()
+    hist = await db.companion_messages.find({"session_id": session}, {"_id": 0}).sort("created_at", -1).to_list(10)
+    hist.reverse()
+    hist_txt = "\n".join([f"{'Owner' if h['role']=='user' else 'Companion'}: {h['content'][:600]}" for h in hist])
+    prompt = ((f"Conversation so far:\n{hist_txt}\n\n" if hist_txt else "")
+              + (f"[Owner is sharing: {req.share_label}] " if req.share_label else "")
+              + (f"Owner: {text}" if text else "Owner shared their screen without a question - describe what you see and anything notable."))
+    img = None
+    if req.image_b64:
+        b64 = req.image_b64.split(",", 1)[1] if req.image_b64.startswith("data:") else req.image_b64
+        img = ImageContent(image_base64=b64)
+    await db.companion_messages.insert_one({"id": str(uuid.uuid4()), "session_id": session, "role": "user", "content": text or "(shared screen)",
+                                            "had_image": bool(img), "share_label": req.share_label, "created_at": now})
+
+    async def gen():
+        full = []
+        used = None
+        order = [("openai", "gpt-4o-mini", "Companion · GPT-4o"), ("gemini", "gemini-2.5-flash", "Companion · Gemini 2.5")]
+        yield f"data: {json.dumps({'type': 'session', 'session_id': session})}\n\n"
+        for prov, model, label in order:
+            try:
+                chat = LlmChat(api_key=EMERGENT_LLM_KEY, session_id=f"companion-{session}-{uuid.uuid4().hex[:6]}", system_message=COMPANION_SYSTEM).with_model(prov, model)
+                msg = UserMessage(text=prompt, file_contents=[img]) if img else UserMessage(text=prompt)
+                async for ev in chat.stream_message(msg):
+                    if isinstance(ev, TextDelta):
+                        full.append(ev.content)
+                        yield f"data: {json.dumps({'type': 'delta', 'content': ev.content})}\n\n"
+                    elif isinstance(ev, StreamDone):
+                        break
+                used = label
+                break
+            except Exception as e:
+                logger.error(f"companion {prov} failed: {e}")
+                full = []
+                continue
+        reply = "".join(full).strip()
+        if not reply:
+            reply = "I could not reach a vision model just now. Try again in a moment."
+            yield f"data: {json.dumps({'type': 'delta', 'content': reply})}\n\n"
+        await db.companion_messages.insert_one({"id": str(uuid.uuid4()), "session_id": session, "role": "assistant", "content": reply,
+                                                "model_label": used, "created_at": datetime.now(timezone.utc).isoformat()})
+        yield f"data: {json.dumps({'type': 'done', 'model_label': used, 'content': reply})}\n\n"
+
+    return StreamingResponse(gen(), media_type="text/event-stream", headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+
+@api_router.get("/companion/history")
+async def companion_history(session_id: str = Query(...), limit: int = Query(60, ge=1, le=300)):
+    msgs = await db.companion_messages.find({"session_id": session_id}, {"_id": 0}).sort("created_at", -1).to_list(limit)
+    msgs.reverse()
+    return msgs
+
+
+@api_router.delete("/companion/history")
+async def companion_clear(session_id: str = Query(...)):
+    r = await db.companion_messages.delete_many({"session_id": session_id})
+    return {"ok": True, "deleted": r.deleted_count}
+
+
 app.include_router(api_router)
 
 app.add_middleware(

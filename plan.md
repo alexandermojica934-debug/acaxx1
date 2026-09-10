@@ -291,7 +291,7 @@ User choice: both dictation and commands. Global floating widget (components/Voi
 Propose-only scheduler in server.py (_self_scan_loop, run_self_scan, /api/self/scan/*). Verified: clean scan -> no
 proposal; planted console.log -> 1 proposal (origin scheduled_scan), live file untouched. UI in SelfDirective.js.
 
-## Phase: Local Node + browser agent (Status: IMPLEMENTED, testing pending)
+## Phase: Local Node + browser agent (Status: COMPLETED - iteration_4 + manual protocol re-verify)
 User choices: Local Node with approval on every write; browser BOTH (server headless for research, owner's PC Chrome
 via node for accounts); Windows + Linux; fill forms and stop before every Submit.
 - backend/node.py: /api/node/* (owner + key-auth node routes), /api/browse/research (Playwright headless; browsers
@@ -307,3 +307,11 @@ via node for accounts); Windows + Linux; fill forms and stop before every Submit
 ## Queue
 - NEXT: Apex Nexus tab (#6 RFP Kit, #2 Prompt Libraries, #10 SEO Packs) with order/unlock flow; Stripe Checkout
   when user supplies keys (integration playbook first).
+
+## Phase: Companion window (Status: COMPLETED - iteration_4: vision SSE read 7421 test image)
+Chrome-Gemini-style small desktop assistant: /?mode=companion renders components/Companion.js standalone; header
+"Companion" button opens it as a popup window (440x760). Voice (Web Speech hands-free), screen/window/tab share via
+getDisplayMedia -> frame captured to JPEG (<=1280px) per message when "see it" is on -> POST /api/companion/chat
+(SSE stream, X-Accel-Buffering: no) -> vision via emergentintegrations ImageContent (gpt-4o-mini -> gemini-2.5-flash
+failover). Frames are NOT stored; transcript per session in db.companion_messages. Verified: synthetic invoice frame
+read correctly (number/total/status); streaming 33 events; standalone UI + launcher render.

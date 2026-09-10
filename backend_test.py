@@ -1,727 +1,661 @@
 #!/usr/bin/env python3
 """
-ACASO Omniverse Backend API Test Suite
-Tests Council of Weavers, Voice Chat, Voice Commander, and Opportunity Radar
+ACASO Omniverse Backend Testing - Round with Self-Scan, Local Node, Research Browser, Companion
 """
 import requests
 import sys
+import json
 import time
+import base64
+from io import BytesIO
 from datetime import datetime
 
 # Read backend URL from frontend/.env
 try:
-    with open("/app/frontend/.env") as f:
+    with open('/app/frontend/.env', 'r') as f:
         for line in f:
-            if line.startswith("REACT_APP_BACKEND_URL="):
-                BASE_URL = line.split("=", 1)[1].strip()
+            if line.startswith('REACT_APP_BACKEND_URL='):
+                BASE_URL = line.split('=', 1)[1].strip() + '/api'
                 break
 except Exception as e:
-    print(f"❌ Could not read REACT_APP_BACKEND_URL from /app/frontend/.env: {e}")
+    print(f"Could not read backend URL: {e}")
     sys.exit(1)
 
-API = f"{BASE_URL}/api"
-print(f"🔗 Testing against: {API}\n")
+print(f"Testing backend at: {BASE_URL}")
 
 class TestRunner:
     def __init__(self):
         self.tests_run = 0
         self.tests_passed = 0
         self.tests_failed = 0
-        self.critical_failures = []
-        
-        # Store IDs for later tests
-        self.deliberation_id = None
-        self.mission_id = None
-        self.voice_session_id = f"test-{int(time.time())}"
-        self.opportunity_id = None
+        self.failed_tests = []
 
-    def test(self, name, method, endpoint, expected_status, data=None, params=None, timeout=30, critical=False):
-        """Run a single API test"""
-        url = f"{API}/{endpoint}"
-        headers = {'Content-Type': 'application/json'}
-        
+    def test(self, name, fn):
+        """Run a single test"""
         self.tests_run += 1
         print(f"\n🔍 Test {self.tests_run}: {name}")
-        
         try:
-            if method == 'GET':
-                response = requests.get(url, headers=headers, params=params, timeout=timeout)
-            elif method == 'POST':
-                response = requests.post(url, json=data, headers=headers, params=params, timeout=timeout)
-            elif method == 'PUT':
-                response = requests.put(url, json=data, headers=headers, timeout=timeout)
-            elif method == 'PATCH':
-                response = requests.patch(url, json=data, headers=headers, timeout=timeout)
-            elif method == 'DELETE':
-                response = requests.delete(url, headers=headers, params=params, timeout=timeout)
-            else:
-                print(f"❌ Unknown method: {method}")
-                self.tests_failed += 1
-                return False, {}
-
-            success = response.status_code == expected_status
-            if success:
-                self.tests_passed += 1
-                print(f"✅ PASS - Status: {response.status_code}")
-                try:
-                    return True, response.json()
-                except:
-                    return True, {}
-            else:
-                self.tests_failed += 1
-                print(f"❌ FAIL - Expected {expected_status}, got {response.status_code}")
-                try:
-                    print(f"   Response: {response.json()}")
-                except:
-                    print(f"   Response: {response.text[:200]}")
-                if critical:
-                    self.critical_failures.append(name)
-                return False, {}
-
-        except requests.exceptions.Timeout:
+            fn()
+            self.tests_passed += 1
+            print(f"✅ PASSED")
+            return True
+        except AssertionError as e:
             self.tests_failed += 1
-            print(f"❌ FAIL - Request timeout after {timeout}s")
-            if critical:
-                self.critical_failures.append(name)
-            return False, {}
+            self.failed_tests.append({"name": name, "error": str(e)})
+            print(f"❌ FAILED: {e}")
+            return False
         except Exception as e:
             self.tests_failed += 1
-            print(f"❌ FAIL - Error: {str(e)}")
-            if critical:
-                self.critical_failures.append(name)
-            return False, {}
+            self.failed_tests.append({"name": name, "error": f"Exception: {e}"})
+            print(f"❌ FAILED with exception: {e}")
+            return False
 
-    def run_all_tests(self):
-        print("=" * 80)
-        print("ACASO OMNIVERSE BACKEND API TEST SUITE")
-        print("=" * 80)
-        
-        # ===== COUNCIL OF WEAVERS =====
-        print("\n" + "=" * 80)
-        print("COUNCIL OF WEAVERS TESTS")
-        print("=" * 80)
-        
-        # Test 1: Get presets
-        success, data = self.test(
-            "GET /api/acaso/presets returns 3 presets",
-            "GET", "acaso/presets", 200, critical=True
-        )
-        if success:
-            if len(data) == 3:
-                print(f"   ✓ Found 3 presets: {[p.get('id') for p in data]}")
-                if all(p.get('id') in ['genesis', 'hunter', 'foresight'] for p in data):
-                    print(f"   ✓ All expected preset IDs present")
-                else:
-                    print(f"   ⚠ Unexpected preset IDs")
-            else:
-                print(f"   ⚠ Expected 3 presets, got {len(data)}")
-        
-        # Test 2: Deliberate with short challenge (should fail)
-        success, data = self.test(
-            "POST /api/acaso/deliberate with challenge <20 chars returns 400",
-            "POST", "acaso/deliberate", 400,
-            data={"challenge": "short", "challenge_type": "test"}
-        )
-        
-        # Test 3: Real deliberation (ONE CALL ONLY - brevity mode)
-        print("\n⚠️  Running ONE deliberation (30-120s) - brevity mode to conserve budget")
-        success, data = self.test(
-            "POST /api/acaso/deliberate with real challenge",
-            "POST", "acaso/deliberate", 200,
-            data={
-                "challenge": "Should we launch a micro-SaaS for indie hackers or focus on consulting? Budget: $5k, 3 months.",
-                "challenge_type": "product_strategy",
-                "preset_id": "genesis"
-            },
-            timeout=180,
-            critical=True
-        )
-        if success:
-            self.deliberation_id = data.get('id')
-            print(f"   ✓ Deliberation ID: {self.deliberation_id}")
-            print(f"   ✓ Duration: {data.get('duration_s')}s")
-            print(f"   ✓ Weavers: {len(data.get('weavers', []))} (expected 4)")
-            if data.get('sovereign_directive'):
-                print(f"   ✓ Sovereign directive present ({len(data.get('sovereign_directive'))} chars)")
-            if data.get('weak_signals'):
-                print(f"   ✓ Weak signals present")
-            if data.get('council_consulted'):
-                print(f"   ✓ Council consulted: {data.get('council_consulted')}")
-        
-        # Test 4: List deliberations
-        success, data = self.test(
-            "GET /api/acaso/deliberations lists deliberations",
-            "GET", "acaso/deliberations", 200
-        )
-        if success and self.deliberation_id:
-            found = any(d.get('id') == self.deliberation_id for d in data)
-            if found:
-                print(f"   ✓ Found our deliberation in the list")
-            else:
-                print(f"   ⚠ Our deliberation not in list")
-        
-        # Test 5: Export deliberation
-        if self.deliberation_id:
-            success, data = self.test(
-                f"GET /api/acaso/deliberations/{self.deliberation_id}/export returns markdown",
-                "GET", f"acaso/deliberations/{self.deliberation_id}/export", 200
-            )
-        
-        # Test 6: Deliberation to mission (idempotent)
-        if self.deliberation_id:
-            success, data = self.test(
-                "POST /api/acaso/deliberations/{id}/to-mission creates mission",
-                "POST", f"acaso/deliberations/{self.deliberation_id}/to-mission", 200,
-                data={"mode": "Move"},
-                timeout=120,
-                critical=True
-            )
-            if success:
-                self.mission_id = data.get('id')
-                print(f"   ✓ Mission ID: {self.mission_id}")
-                print(f"   ✓ Mission title: {data.get('title')}")
-                if data.get('source_deliberation_id') == self.deliberation_id:
-                    print(f"   ✓ source_deliberation_id matches")
-            
-            # Test idempotency
-            success2, data2 = self.test(
-                "POST /api/acaso/deliberations/{id}/to-mission is idempotent",
-                "POST", f"acaso/deliberations/{self.deliberation_id}/to-mission", 200,
-                data={"mode": "Move"},
-                timeout=120
-            )
-            if success and success2:
-                if data.get('id') == data2.get('id'):
-                    print(f"   ✓ Idempotent: same mission ID returned")
-                else:
-                    print(f"   ⚠ Not idempotent: different mission IDs")
-        
-        # Test 7: Verify mission in missions list
-        if self.mission_id:
-            success, data = self.test(
-                "GET /api/missions includes the mission from deliberation",
-                "GET", "missions", 200
-            )
-            if success:
-                found = any(m.get('id') == self.mission_id for m in data)
-                if found:
-                    print(f"   ✓ Mission found in /api/missions")
-                else:
-                    print(f"   ⚠ Mission not found in /api/missions")
-        
-        # ===== VOICE CHAT =====
-        print("\n" + "=" * 80)
-        print("VOICE CHAT TESTS")
-        print("=" * 80)
-        
-        # Test 8: Voice chat fast mode
-        success, data = self.test(
-            "POST /api/voice/chat with mode:fast returns reply",
-            "POST", "voice/chat", 200,
-            data={
-                "message": "What is ACASO?",
-                "session_id": self.voice_session_id,
-                "mode": "fast"
-            },
-            timeout=60,
-            critical=True
-        )
-        if success:
-            reply = data.get('reply', {})
-            if reply.get('content'):
-                print(f"   ✓ Reply content present ({len(reply.get('content'))} chars)")
-            if reply.get('mode') == 'fast':
-                print(f"   ✓ Reply mode is 'fast'")
-        
-        # Test 9: Get voice history
-        success, data = self.test(
-            "GET /api/voice/history returns messages",
-            "GET", "voice/history", 200,
-            params={"session_id": self.voice_session_id}
-        )
-        if success:
-            if len(data) >= 2:
-                print(f"   ✓ Found {len(data)} messages (expected ≥2)")
-            else:
-                print(f"   ⚠ Expected ≥2 messages, got {len(data)}")
-        
-        # Test 10: Delete voice history
-        success, data = self.test(
-            "DELETE /api/voice/history clears messages",
-            "DELETE", "voice/history", 200,
-            params={"session_id": self.voice_session_id}
-        )
-        
-        # ===== VOICE COMMANDER =====
-        print("\n" + "=" * 80)
-        print("VOICE COMMANDER TESTS")
-        print("=" * 80)
-        
-        # Test 11: Command parsing - open radar (no LLM)
-        success, data = self.test(
-            "POST /api/voice/command 'open radar' returns intent open_tab",
-            "POST", "voice/command", 200,
-            data={"transcript": "open radar", "session_id": None}
-        )
-        if success:
-            if data.get('intent') == 'open_tab':
-                print(f"   ✓ Intent: open_tab")
-            if data.get('args', {}).get('tab') == 'radar':
-                print(f"   ✓ Args.tab: radar")
-            if data.get('parser') == 'rules':
-                print(f"   ✓ Parser: rules (no LLM)")
-            if data.get('navigate_tab') == 'radar':
-                print(f"   ✓ navigate_tab: radar")
-        
-        # Test 12: Command parsing - go to council tab with execute:false
-        success, data = self.test(
-            "POST /api/voice/command 'go to the council tab' with execute:false",
-            "POST", "voice/command", 200,
-            data={"transcript": "go to the council tab", "execute": False}
-        )
-        if success:
-            if data.get('intent') == 'open_tab':
-                print(f"   ✓ Intent: open_tab")
-            if data.get('args', {}).get('tab') == 'council':
-                print(f"   ✓ Args.tab: council")
-        
-        # Test 13: Empty transcript returns 400
-        success, data = self.test(
-            "POST /api/voice/command with empty transcript returns 400",
-            "POST", "voice/command", 400,
-            data={"transcript": ""}
-        )
-        
-        # ===== OPPORTUNITY RADAR =====
-        print("\n" + "=" * 80)
-        print("OPPORTUNITY RADAR TESTS")
-        print("=" * 80)
-        
-        # Test 14: Get sources
-        success, data = self.test(
-            "GET /api/radar/sources returns 3 sources",
-            "GET", "radar/sources", 200,
-            critical=True
-        )
-        if success:
-            if len(data) == 3:
-                print(f"   ✓ Found 3 sources")
-                sources = {s.get('id'): s for s in data}
-                
-                # Check sam_gov configured false
-                if 'sam_gov' in sources and sources['sam_gov'].get('configured') == False:
-                    print(f"   ✓ sam_gov configured: false (SAM_GOV_API_KEY not set)")
-                
-                # Check grants_gov and github_bounties configured true
-                if 'grants_gov' in sources and sources['grants_gov'].get('configured') == True:
-                    print(f"   ✓ grants_gov configured: true")
-                if 'github_bounties' in sources and sources['github_bounties'].get('configured') == True:
-                    print(f"   ✓ github_bounties configured: true")
-            else:
-                print(f"   ⚠ Expected 3 sources, got {len(data)}")
-        
-        # Test 15: Save profile
-        success, data = self.test(
-            "PUT /api/radar/profile saves profile",
-            "PUT", "radar/profile", 200,
-            data={
-                "entity_type": "llc",
-                "state": "MA",
-                "skills": ["AI", "software"],
-                "keywords": ["small business technology"]
-            }
-        )
-        if success:
-            if data.get('entity_type') == 'llc':
-                print(f"   ✓ entity_type saved: llc")
-            if data.get('state') == 'MA':
-                print(f"   ✓ state saved: MA")
-        
-        # Test 16: Get profile
-        success, data = self.test(
-            "GET /api/radar/profile returns saved profile",
-            "GET", "radar/profile", 200
-        )
-        if success:
-            if data.get('entity_type') == 'llc':
-                print(f"   ✓ entity_type: llc")
-        
-        # Test 17: Discover opportunities (FIRST CALL - max 2 total due to GitHub rate limit)
-        print("\n⚠️  Running FIRST /api/radar/discover (30-60s) - live external APIs")
-        success, data = self.test(
-            "POST /api/radar/discover returns runs for 3 sources",
-            "POST", "radar/discover", 200,
-            data={"limit": 8},
-            timeout=120,
-            critical=True
-        )
-        if success:
-            runs = data.get('runs', [])
-            print(f"   ✓ Got {len(runs)} source runs")
-            
-            for run in runs:
-                source = run.get('source')
-                http_status = run.get('http_status')
-                error = run.get('error')
-                fetched = run.get('fetched', 0)
-                
-                if source == 'sam_gov':
-                    if error and error.startswith('not_configured'):
-                        print(f"   ✓ sam_gov: not_configured error (expected)")
-                    else:
-                        print(f"   ⚠ sam_gov: expected not_configured error, got: {error or 'success'}")
-                
-                elif source in ['grants_gov', 'github_bounties']:
-                    if http_status == 200 and fetched > 0:
-                        print(f"   ✓ {source}: HTTP 200, fetched {fetched} records")
-                    elif error:
-                        print(f"   ⚠ {source}: error (may be live API issue): {error[:100]}")
-                    else:
-                        print(f"   ⚠ {source}: HTTP {http_status}, fetched {fetched}")
-        
-        # Test 18: List opportunities
-        success, data = self.test(
-            "GET /api/radar/opportunities returns records",
-            "GET", "radar/opportunities", 200,
-            critical=True
-        )
-        if success and len(data) > 0:
-            print(f"   ✓ Found {len(data)} opportunities")
-            
-            # Check first record for required fields
-            opp = data[0]
-            self.opportunity_id = opp.get('id')
-            
-            required_fields = [
-                'source_url', 'retrieved_at', 'http_status', 'parser_version',
-                'evidence', 'score', 'barrier', 'status', 'is_demo', 'days_remaining'
-            ]
-            
-            for field in required_fields:
-                if field in opp:
-                    print(f"   ✓ Field '{field}' present")
-                else:
-                    print(f"   ⚠ Field '{field}' missing")
-            
-            # Check source_url starts with http
-            if opp.get('source_url', '').startswith('http'):
-                print(f"   ✓ source_url starts with http")
-            
-            # Check evidence array non-empty with source_location
-            evidence = opp.get('evidence', [])
-            if evidence and len(evidence) > 0:
-                print(f"   ✓ evidence array non-empty ({len(evidence)} items)")
-                if all('source_location' in e for e in evidence):
-                    print(f"   ✓ All evidence items have source_location")
-            
-            # Check score
-            score = opp.get('score', {})
-            if 0 <= score.get('total', -1) <= 100:
-                print(f"   ✓ score.total in range 0-100: {score.get('total')}")
-            if score.get('label') in ['Strong fit', 'Possible fit', 'Possible fit (Skeptic pending)', 'Needs verification', 'Poor fit']:
-                print(f"   ✓ score.label valid: {score.get('label')}")
-            if score.get('breakdown') and len(score.get('breakdown')) == 8:
-                print(f"   ✓ score.breakdown has 8 keys")
-            
-            # Check is_demo false
-            if opp.get('is_demo') == False:
-                print(f"   ✓ is_demo: false")
-        
-        # Test 19: Filter by type
-        success, data = self.test(
-            "GET /api/radar/opportunities?type=grant filters by type",
-            "GET", "radar/opportunities", 200,
-            params={"type": "grant"}
-        )
-        if success:
-            if all(o.get('opportunity_type') == 'grant' for o in data):
-                print(f"   ✓ All records are type 'grant'")
-        
-        # Test 20: Filter by source
-        success, data = self.test(
-            "GET /api/radar/opportunities?source=github_bounties filters by source",
-            "GET", "radar/opportunities", 200,
-            params={"source": "github_bounties"}
-        )
-        if success:
-            if all(o.get('source') == 'github_bounties' for o in data):
-                print(f"   ✓ All records are from 'github_bounties'")
-        
-        # Test 21: Filter by min_score
-        success, data = self.test(
-            "GET /api/radar/opportunities?min_score=50 filters by score",
-            "GET", "radar/opportunities", 200,
-            params={"min_score": 50}
-        )
-        if success:
-            if all(o.get('score', {}).get('total', 0) >= 50 for o in data):
-                print(f"   ✓ All records have score ≥50")
-        
-        # Test 22: Filter by low_barrier
-        success, data = self.test(
-            "GET /api/radar/opportunities?low_barrier=true filters by barrier",
-            "GET", "radar/opportunities", 200,
-            params={"low_barrier": True}
-        )
-        if success:
-            if all(o.get('barrier', {}).get('label') == 'lower observed barrier' for o in data):
-                print(f"   ✓ All records have lower observed barrier")
-        
-        # Test 23: Search by keyword
-        if self.opportunity_id:
-            # Get the opportunity to find a word from its title
-            success_get, opp_data = self.test(
-                f"GET /api/radar/opportunities/{self.opportunity_id} for keyword search",
-                "GET", f"radar/opportunities/{self.opportunity_id}", 200
-            )
-            if success_get and opp_data.get('title'):
-                # Extract a word from the title
-                words = opp_data.get('title', '').split()
-                if words:
-                    keyword = words[0]
-                    success, data = self.test(
-                        f"GET /api/radar/opportunities?q={keyword} searches by keyword",
-                        "GET", "radar/opportunities", 200,
-                        params={"q": keyword}
-                    )
-                    if success and len(data) > 0:
-                        print(f"   ✓ Found {len(data)} records matching '{keyword}'")
-        
-        # Test 24: Sort by deadline
-        success, data = self.test(
-            "GET /api/radar/opportunities?sort=deadline orders by deadline",
-            "GET", "radar/opportunities", 200,
-            params={"sort": "deadline", "limit": 10}
-        )
-        
-        # Test 25: Get opportunity detail
-        if self.opportunity_id:
-            success, data = self.test(
-                f"GET /api/radar/opportunities/{self.opportunity_id} returns full record",
-                "GET", f"radar/opportunities/{self.opportunity_id}", 200,
-                critical=True
-            )
-            if success:
-                if 'description' in data:
-                    print(f"   ✓ description field present")
-                if 'similar' in data:
-                    print(f"   ✓ similar[] field present ({len(data.get('similar', []))} items)")
-        
-        # Test 26: Patch opportunity - save
-        if self.opportunity_id:
-            success, data = self.test(
-                f"PATCH /api/radar/opportunities/{self.opportunity_id} user_status:saved",
-                "PATCH", f"radar/opportunities/{self.opportunity_id}", 200,
-                data={"user_status": "saved"}
-            )
-            if success:
-                if data.get('user_status') == 'saved':
-                    print(f"   ✓ user_status: saved")
-                if data.get('stage') == 'Reviewed':
-                    print(f"   ✓ stage auto-updated to Reviewed")
-        
-        # Test 27: Patch opportunity - notes
-        if self.opportunity_id:
-            success, data = self.test(
-                f"PATCH /api/radar/opportunities/{self.opportunity_id} notes",
-                "PATCH", f"radar/opportunities/{self.opportunity_id}", 200,
-                data={"notes": "test note"}
-            )
-            if success:
-                if data.get('notes') == 'test note':
-                    print(f"   ✓ notes persisted")
-        
-        # Test 28: Invalid user_status returns 400
-        if self.opportunity_id:
-            success, data = self.test(
-                f"PATCH /api/radar/opportunities/{self.opportunity_id} invalid user_status returns 400",
-                "PATCH", f"radar/opportunities/{self.opportunity_id}", 400,
-                data={"user_status": "invalid"}
-            )
-        
-        # Test 29: Filter saved opportunities
-        success, data = self.test(
-            "GET /api/radar/opportunities?saved=true includes saved",
-            "GET", "radar/opportunities", 200,
-            params={"saved": True}
-        )
-        if success and self.opportunity_id:
-            found = any(o.get('id') == self.opportunity_id for o in data)
-            if found:
-                print(f"   ✓ Saved opportunity found in ?saved=true")
-        
-        # Test 30: Dismiss and filter
-        if self.opportunity_id:
-            success, data = self.test(
-                f"PATCH /api/radar/opportunities/{self.opportunity_id} user_status:dismissed",
-                "PATCH", f"radar/opportunities/{self.opportunity_id}", 200,
-                data={"user_status": "dismissed"}
-            )
-            
-            # Check it's hidden from default list
-            success2, data2 = self.test(
-                "GET /api/radar/opportunities excludes dismissed by default",
-                "GET", "radar/opportunities", 200
-            )
-            if success2:
-                found = any(o.get('id') == self.opportunity_id for o in data2)
-                if not found:
-                    print(f"   ✓ Dismissed opportunity hidden from default list")
-            
-            # Check it appears with include_dismissed
-            success3, data3 = self.test(
-                "GET /api/radar/opportunities?user_status=dismissed&include_dismissed=true shows dismissed",
-                "GET", "radar/opportunities", 200,
-                params={"user_status": "dismissed", "include_dismissed": True}
-            )
-            if success3:
-                found = any(o.get('id') == self.opportunity_id for o in data3)
-                if found:
-                    print(f"   ✓ Dismissed opportunity found with include_dismissed=true")
-        
-        # Test 31: Analyze opportunity (ONE CALL ONLY)
-        if self.opportunity_id:
-            print("\n⚠️  Running ONE /api/radar/opportunities/{id}/analyze (30-120s)")
-            success, data = self.test(
-                f"POST /api/radar/opportunities/{self.opportunity_id}/analyze",
-                "POST", f"radar/opportunities/{self.opportunity_id}/analyze", 200,
-                data={"include_checklist": True},
-                timeout=180,
-                critical=True
-            )
-            if success:
-                ai = data.get('ai', {})
-                if 'fit' in ai:
-                    print(f"   ✓ ai.fit present")
-                if 'skeptic' in ai:
-                    skeptic = ai['skeptic']
-                    print(f"   ✓ ai.skeptic present")
-                    if skeptic.get('verdict') in ['clear', 'caution', 'block']:
-                        print(f"   ✓ skeptic.verdict: {skeptic.get('verdict')}")
-                if 'checklist' in ai:
-                    print(f"   ✓ ai.checklist present")
-                if 'score' in data:
-                    print(f"   ✓ score recomputed")
-                if data.get('stage') == 'Reviewed':
-                    print(f"   ✓ stage updated to Reviewed")
-        
-        # Test 32: Draft email (ONE CALL ONLY)
-        if self.opportunity_id:
-            print("\n⚠️  Running ONE /api/radar/opportunities/{id}/draft (30-120s)")
-            success, data = self.test(
-                f"POST /api/radar/opportunities/{self.opportunity_id}/draft kind:email",
-                "POST", f"radar/opportunities/{self.opportunity_id}/draft", 200,
-                data={"kind": "email"},
-                timeout=180,
-                critical=True
-            )
-            if success:
-                if data.get('content'):
-                    print(f"   ✓ content non-empty ({len(data.get('content'))} chars)")
-                if 'placeholders' in data:
-                    print(f"   ✓ placeholders: {data.get('placeholders')}")
-                if data.get('model_label'):
-                    print(f"   ✓ model_label: {data.get('model_label')}")
-        
-        # Test 33: Draft with invalid kind returns 400
-        if self.opportunity_id:
-            success, data = self.test(
-                f"POST /api/radar/opportunities/{self.opportunity_id}/draft kind:bogus returns 400",
-                "POST", f"radar/opportunities/{self.opportunity_id}/draft", 400,
-                data={"kind": "bogus"}
-            )
-        
-        # Test 34: Draft form_answers without form_text returns 400
-        if self.opportunity_id:
-            success, data = self.test(
-                f"POST /api/radar/opportunities/{self.opportunity_id}/draft kind:form_answers without form_text returns 400",
-                "POST", f"radar/opportunities/{self.opportunity_id}/draft", 400,
-                data={"kind": "form_answers"}
-            )
-        
-        # Test 35: Opportunity to mission (idempotent)
-        if self.opportunity_id:
-            success, data = self.test(
-                f"POST /api/radar/opportunities/{self.opportunity_id}/to-mission creates mission",
-                "POST", f"radar/opportunities/{self.opportunity_id}/to-mission", 200,
-                timeout=120,
-                critical=True
-            )
-            if success:
-                opp_mission_id = data.get('id')
-                print(f"   ✓ Mission ID: {opp_mission_id}")
-                if data.get('source_opportunity_id') == self.opportunity_id:
-                    print(f"   ✓ source_opportunity_id matches")
-            
-            # Check opportunity stage updated
-            success2, opp_data = self.test(
-                f"GET /api/radar/opportunities/{self.opportunity_id} after to-mission",
-                "GET", f"radar/opportunities/{self.opportunity_id}", 200
-            )
-            if success2:
-                if opp_data.get('stage') == 'Preparing':
-                    print(f"   ✓ opportunity stage updated to Preparing")
-            
-            # Test idempotency
-            success3, data3 = self.test(
-                f"POST /api/radar/opportunities/{self.opportunity_id}/to-mission is idempotent",
-                "POST", f"radar/opportunities/{self.opportunity_id}/to-mission", 200,
-                timeout=120
-            )
-            if success and success3:
-                if data.get('id') == data3.get('id'):
-                    print(f"   ✓ Idempotent: same mission ID returned")
-        
-        # Test 36: Export opportunity
-        if self.opportunity_id:
-            success, data = self.test(
-                f"GET /api/radar/opportunities/{self.opportunity_id}/export returns markdown",
-                "GET", f"radar/opportunities/{self.opportunity_id}/export", 200
-            )
-        
-        # Test 37: Natural language search (ONE CALL - allowed)
-        print("\n⚠️  Running ONE /api/radar/search/nl (may use 1 LLM call)")
-        success, data = self.test(
-            "POST /api/radar/search/nl with query",
-            "POST", "radar/search/nl", 200,
-            data={"query": "small technology grants under $250,000 closing in 60 days"},
-            timeout=60
-        )
-        if success:
-            if 'proposed_filters' in data:
-                print(f"   ✓ proposed_filters: {data.get('proposed_filters')}")
-            if 'note' in data:
-                print(f"   ✓ note present (not auto-applied)")
-        
-        # Test 38: Get runs
-        success, data = self.test(
-            "GET /api/radar/runs lists source runs",
-            "GET", "radar/runs", 200
-        )
-        if success and len(data) > 0:
-            print(f"   ✓ Found {len(data)} runs")
-            run = data[0]
-            if 'http_status' in run:
-                print(f"   ✓ run has http_status")
-            if 'parser_version' in run:
-                print(f"   ✓ run has parser_version")
-        
-        # ===== SUMMARY =====
-        print("\n" + "=" * 80)
-        print("TEST SUMMARY")
-        print("=" * 80)
-        print(f"Total tests: {self.tests_run}")
-        print(f"✅ Passed: {self.tests_passed}")
-        print(f"❌ Failed: {self.tests_failed}")
-        print(f"Success rate: {(self.tests_passed / self.tests_run * 100):.1f}%")
-        
-        if self.critical_failures:
-            print(f"\n🚨 CRITICAL FAILURES ({len(self.critical_failures)}):")
-            for failure in self.critical_failures:
-                print(f"   - {failure}")
-        
+    def summary(self):
+        print(f"\n{'='*60}")
+        print(f"📊 Test Summary")
+        print(f"{'='*60}")
+        print(f"Total: {self.tests_run}")
+        print(f"Passed: {self.tests_passed} ✅")
+        print(f"Failed: {self.tests_failed} ❌")
+        if self.failed_tests:
+            print(f"\nFailed tests:")
+            for ft in self.failed_tests:
+                print(f"  - {ft['name']}: {ft['error']}")
         return 0 if self.tests_failed == 0 else 1
 
-if __name__ == "__main__":
-    runner = TestRunner()
-    sys.exit(runner.run_all_tests())
+runner = TestRunner()
+
+# ==================== SELF-SCAN TESTS ====================
+print("\n" + "="*60)
+print("SELF-SCAN TESTS")
+print("="*60)
+
+def test_self_scan_config_default():
+    """GET /api/self/scan/config returns default values"""
+    r = requests.get(f"{BASE_URL}/self/scan/config")
+    assert r.status_code == 200, f"Expected 200, got {r.status_code}"
+    data = r.json()
+    assert data['enabled'] == False, f"Expected enabled=false, got {data['enabled']}"
+    assert data['interval_hours'] == 24, f"Expected interval_hours=24, got {data['interval_hours']}"
+    assert data['running'] == False, f"Expected running=false, got {data['running']}"
+    print(f"   Config: enabled={data['enabled']}, interval_hours={data['interval_hours']}, running={data['running']}")
+
+runner.test("Self-scan config default values", test_self_scan_config_default)
+
+def test_self_scan_config_enable():
+    """PUT /api/self/scan/config enable with interval 12"""
+    r = requests.put(f"{BASE_URL}/self/scan/config", json={"enabled": True, "interval_hours": 12})
+    assert r.status_code == 200, f"Expected 200, got {r.status_code}"
+    data = r.json()
+    assert data['enabled'] == True, f"Expected enabled=true, got {data['enabled']}"
+    assert data['interval_hours'] == 12, f"Expected interval_hours=12, got {data['interval_hours']}"
+    assert data['next_run_at'] is not None, f"Expected next_run_at to be set, got None"
+    print(f"   Enabled: next_run_at={data['next_run_at']}")
+
+runner.test("Self-scan config enable with interval 12", test_self_scan_config_enable)
+
+def test_self_scan_config_invalid_interval():
+    """PUT /api/self/scan/config with interval_hours=0 should return 400"""
+    r = requests.put(f"{BASE_URL}/self/scan/config", json={"enabled": True, "interval_hours": 0})
+    assert r.status_code == 400, f"Expected 400, got {r.status_code}"
+    print(f"   Correctly rejected interval_hours=0")
+
+runner.test("Self-scan config reject interval_hours=0", test_self_scan_config_invalid_interval)
+
+def test_self_scan_config_disable():
+    """PUT /api/self/scan/config disable"""
+    r = requests.put(f"{BASE_URL}/self/scan/config", json={"enabled": False})
+    assert r.status_code == 200, f"Expected 200, got {r.status_code}"
+    data = r.json()
+    assert data['enabled'] == False, f"Expected enabled=false, got {data['enabled']}"
+    assert data['next_run_at'] is None, f"Expected next_run_at=null, got {data['next_run_at']}"
+    print(f"   Disabled: next_run_at={data['next_run_at']}")
+
+runner.test("Self-scan config disable", test_self_scan_config_disable)
+
+def test_self_scan_run():
+    """POST /api/self/scan/run and verify no source modifications"""
+    # Get git status before scan
+    import subprocess
+    before = subprocess.run(['git', 'status', '--short'], cwd='/app', capture_output=True, text=True).stdout
+    
+    print(f"   Running scan (may take up to 60s)...")
+    r = requests.post(f"{BASE_URL}/self/scan/run", json={}, timeout=120)
+    assert r.status_code == 200, f"Expected 200, got {r.status_code}"
+    data = r.json()
+    assert data['status'] == 'done', f"Expected status=done, got {data['status']}"
+    assert 'counts' in data, "Expected counts object"
+    assert 'findings' in data, "Expected findings array"
+    assert 'proposal_ids' in data, "Expected proposal_ids array"
+    assert 'duration_s' in data, "Expected duration_s"
+    
+    counts = data['counts']
+    print(f"   Scan results: critical={counts.get('critical', 0)}, high={counts.get('high', 0)}, low={counts.get('low', 0)}, info={counts.get('info', 0)}")
+    print(f"   Proposals: {len(data['proposal_ids'])}, Duration: {data['duration_s']}s")
+    
+    # Check git status after scan
+    after = subprocess.run(['git', 'status', '--short'], cwd='/app', capture_output=True, text=True).stdout
+    
+    # Filter out test_reports and backend_test.py changes
+    before_filtered = '\n'.join([l for l in before.split('\n') if 'test_reports' not in l and 'backend_test.py' not in l])
+    after_filtered = '\n'.join([l for l in after.split('\n') if 'test_reports' not in l and 'backend_test.py' not in l])
+    
+    assert before_filtered == after_filtered, f"Source files were modified by scan!\nBefore:\n{before_filtered}\nAfter:\n{after_filtered}"
+    print(f"   ✓ No source files modified by scan")
+
+runner.test("Self-scan run and verify no modifications", test_self_scan_run)
+
+def test_self_scan_list():
+    """GET /api/self/scans lists scans"""
+    r = requests.get(f"{BASE_URL}/self/scans")
+    assert r.status_code == 200, f"Expected 200, got {r.status_code}"
+    data = r.json()
+    assert isinstance(data, list), f"Expected list, got {type(data)}"
+    assert len(data) > 0, "Expected at least one scan in history"
+    print(f"   Found {len(data)} scan(s) in history")
+
+runner.test("Self-scan list scans", test_self_scan_list)
+
+# ==================== LOCAL NODE (OWNER SIDE) TESTS ====================
+print("\n" + "="*60)
+print("LOCAL NODE (OWNER SIDE) TESTS")
+print("="*60)
+
+def test_node_setup():
+    """GET /api/node/setup returns protocol and download list"""
+    r = requests.get(f"{BASE_URL}/node/setup")
+    assert r.status_code == 200, f"Expected 200, got {r.status_code}"
+    data = r.json()
+    assert data['protocol'] == 'node-1.0', f"Expected protocol=node-1.0, got {data['protocol']}"
+    assert 'download' in data, "Expected download list"
+    assert isinstance(data['download'], list), "Expected download to be a list"
+    print(f"   Protocol: {data['protocol']}, Downloads: {len(data['download'])}")
+
+runner.test("Node setup info", test_node_setup)
+
+def test_node_list():
+    """GET /api/node/nodes returns list (may be empty)"""
+    r = requests.get(f"{BASE_URL}/node/nodes")
+    assert r.status_code == 200, f"Expected 200, got {r.status_code}"
+    data = r.json()
+    assert isinstance(data, list), f"Expected list, got {type(data)}"
+    print(f"   Found {len(data)} node(s)")
+
+runner.test("Node list nodes", test_node_list)
+
+def test_node_task_unknown_node():
+    """POST /api/node/tasks for unknown node_id returns 404"""
+    r = requests.post(f"{BASE_URL}/node/tasks", json={
+        "node_id": "unknown-node-id-12345",
+        "kind": "file_list",
+        "params": {"path": "/tmp"}
+    })
+    assert r.status_code == 404, f"Expected 404, got {r.status_code}"
+    print(f"   Correctly returned 404 for unknown node")
+
+runner.test("Node task for unknown node returns 404", test_node_task_unknown_node)
+
+# ==================== LOCAL NODE (PROTOCOL WITH REAL CLIENT) TESTS ====================
+print("\n" + "="*60)
+print("LOCAL NODE (PROTOCOL WITH REAL CLIENT) TESTS")
+print("="*60)
+
+# Get API key first
+def get_api_key():
+    r = requests.get(f"{BASE_URL}/bridge/info")
+    assert r.status_code == 200, f"Expected 200, got {r.status_code}"
+    return r.json()['api_key']
+
+api_key = get_api_key()
+print(f"API Key obtained: {api_key[:20]}...")
+
+# Clean up any previous test artifacts
+import subprocess
+subprocess.run(['rm', '-rf', '/tmp/acaso_ta_root'], capture_output=True)
+subprocess.run(['rm', '-f', str(subprocess.run(['bash', '-c', 'echo ~/.acaso_node.json'], capture_output=True, text=True).stdout.strip())], capture_output=True)
+subprocess.run(['mkdir', '-p', '/tmp/acaso_ta_root'], capture_output=True)
+
+# Start the client in background
+print("\n🚀 Starting Local Node client in background...")
+client_cmd = f"ACASO_URL=http://localhost:8001 ACASO_KEY={api_key} timeout 150 python /app/handoff/local_node/acaso_node.py --root /tmp/acaso_ta_root --shell --name ta-node &"
+subprocess.run(['bash', '-c', client_cmd])
+print("   Client started, waiting 6s for registration...")
+time.sleep(6)
+
+node_id = None
+
+def test_node_registered():
+    """Node should appear in list with online=true"""
+    global node_id
+    r = requests.get(f"{BASE_URL}/node/nodes")
+    assert r.status_code == 200, f"Expected 200, got {r.status_code}"
+    nodes = r.json()
+    assert len(nodes) > 0, "Expected at least one node"
+    node = nodes[0]
+    node_id = node['id']
+    assert node['online'] == True, f"Expected online=true, got {node['online']}"
+    assert 'files' in node['capabilities'], "Expected 'files' capability"
+    assert 'shell' in node['capabilities'], "Expected 'shell' capability"
+    assert '/tmp/acaso_ta_root' in node['allowed_roots'], "Expected /tmp/acaso_ta_root in allowed_roots"
+    print(f"   Node registered: {node['name']} ({node_id[:8]})")
+    print(f"   Capabilities: {node['capabilities']}")
+    print(f"   Allowed roots: {node['allowed_roots']}")
+
+runner.test("Node registered and online", test_node_registered)
+
+def test_node_file_list():
+    """POST file_list task (auto-approved, should complete)"""
+    r = requests.post(f"{BASE_URL}/node/tasks", json={
+        "node_id": node_id,
+        "kind": "file_list",
+        "params": {"path": "/tmp/acaso_ta_root"}
+    })
+    assert r.status_code == 200, f"Expected 200, got {r.status_code}"
+    task = r.json()
+    assert task['status'] == 'queued', f"Expected status=queued, got {task['status']}"
+    assert task['requires_approval'] == False, f"Expected requires_approval=false"
+    task_id = task['id']
+    print(f"   Task created: {task_id[:8]}, status={task['status']}")
+    
+    # Wait for completion
+    print(f"   Waiting 8s for task completion...")
+    time.sleep(8)
+    
+    r = requests.get(f"{BASE_URL}/node/tasks/{task_id}")
+    assert r.status_code == 200, f"Expected 200, got {r.status_code}"
+    task = r.json()
+    assert task['status'] == 'done', f"Expected status=done, got {task['status']}"
+    assert 'result' in task, "Expected result"
+    assert 'items' in task['result'], "Expected result.items"
+    print(f"   Task completed: {len(task['result']['items'])} items")
+
+runner.test("Node file_list task", test_node_file_list)
+
+def test_node_file_write_proposed():
+    """POST file_write task (should be proposed, not auto-approved)"""
+    r = requests.post(f"{BASE_URL}/node/tasks", json={
+        "node_id": node_id,
+        "kind": "file_write",
+        "params": {"path": "/tmp/acaso_ta_root/a.txt", "content": "hello"}
+    })
+    assert r.status_code == 200, f"Expected 200, got {r.status_code}"
+    task = r.json()
+    assert task['status'] == 'proposed', f"Expected status=proposed, got {task['status']}"
+    assert task['requires_approval'] == True, f"Expected requires_approval=true"
+    task_id = task['id']
+    print(f"   Task created: {task_id[:8]}, status={task['status']}")
+    
+    # Wait 6s and verify file does NOT exist yet
+    print(f"   Waiting 6s and verifying file does NOT exist...")
+    time.sleep(6)
+    import os
+    assert not os.path.exists('/tmp/acaso_ta_root/a.txt'), "File should not exist before approval"
+    print(f"   ✓ File does not exist (correctly waiting for approval)")
+    
+    # Approve the task
+    r = requests.post(f"{BASE_URL}/node/tasks/{task_id}/decision", json={"approved": True})
+    assert r.status_code == 200, f"Expected 200, got {r.status_code}"
+    print(f"   Task approved")
+    
+    # Wait for completion
+    print(f"   Waiting 8s for task completion...")
+    time.sleep(8)
+    
+    # Verify file exists with correct content
+    assert os.path.exists('/tmp/acaso_ta_root/a.txt'), "File should exist after approval"
+    with open('/tmp/acaso_ta_root/a.txt', 'r') as f:
+        content = f.read()
+    assert content == 'hello', f"Expected content='hello', got '{content}'"
+    print(f"   ✓ File created with correct content")
+    
+    # Verify task status
+    r = requests.get(f"{BASE_URL}/node/tasks/{task_id}")
+    assert r.status_code == 200, f"Expected 200, got {r.status_code}"
+    task = r.json()
+    assert task['status'] == 'done', f"Expected status=done, got {task['status']}"
+
+runner.test("Node file_write task (proposed, approved, executed)", test_node_file_write_proposed)
+
+def test_node_file_write_outside_root():
+    """POST file_write with path outside allowed roots returns 400"""
+    r = requests.post(f"{BASE_URL}/node/tasks", json={
+        "node_id": node_id,
+        "kind": "file_write",
+        "params": {"path": "/etc/hosts", "content": "test"}
+    })
+    assert r.status_code == 400, f"Expected 400, got {r.status_code}"
+    print(f"   Correctly rejected path outside allowed roots")
+
+runner.test("Node file_write outside allowed roots returns 400", test_node_file_write_outside_root)
+
+def test_node_shell_task():
+    """POST shell task (proposed, approve, execute)"""
+    r = requests.post(f"{BASE_URL}/node/tasks", json={
+        "node_id": node_id,
+        "kind": "shell",
+        "params": {"command": "echo ok-shell", "cwd": "/tmp/acaso_ta_root"}
+    })
+    assert r.status_code == 200, f"Expected 200, got {r.status_code}"
+    task = r.json()
+    assert task['status'] == 'proposed', f"Expected status=proposed, got {task['status']}"
+    task_id = task['id']
+    print(f"   Task created: {task_id[:8]}, status={task['status']}")
+    
+    # Approve
+    r = requests.post(f"{BASE_URL}/node/tasks/{task_id}/decision", json={"approved": True})
+    assert r.status_code == 200, f"Expected 200, got {r.status_code}"
+    print(f"   Task approved")
+    
+    # Wait for completion
+    print(f"   Waiting 8s for task completion...")
+    time.sleep(8)
+    
+    # Verify result
+    r = requests.get(f"{BASE_URL}/node/tasks/{task_id}")
+    assert r.status_code == 200, f"Expected 200, got {r.status_code}"
+    task = r.json()
+    assert task['status'] == 'done', f"Expected status=done, got {task['status']}"
+    assert 'result' in task, "Expected result"
+    assert 'stdout' in task['result'], "Expected result.stdout"
+    assert 'ok-shell' in task['result']['stdout'], f"Expected 'ok-shell' in stdout, got {task['result']['stdout']}"
+    print(f"   ✓ Shell command executed: {task['result']['stdout'].strip()}")
+
+runner.test("Node shell task", test_node_shell_task)
+
+def test_node_browser_no_capability():
+    """POST browser_open task should return 400 (node lacks browser capability)"""
+    r = requests.post(f"{BASE_URL}/node/tasks", json={
+        "node_id": node_id,
+        "kind": "browser_open",
+        "params": {"url": "https://example.com"}
+    })
+    assert r.status_code == 400, f"Expected 400, got {r.status_code}"
+    assert 'browser' in r.json()['detail'].lower(), "Expected error about browser capability"
+    print(f"   Correctly rejected browser task (no capability)")
+
+runner.test("Node browser_open without capability returns 400", test_node_browser_no_capability)
+
+def test_node_decision_on_non_proposed():
+    """POST decision on a done task returns 400"""
+    # Get a done task
+    r = requests.get(f"{BASE_URL}/node/tasks", params={"node_id": node_id, "status": "done", "limit": 1})
+    tasks = r.json()
+    if len(tasks) > 0:
+        task_id = tasks[0]['id']
+        r = requests.post(f"{BASE_URL}/node/tasks/{task_id}/decision", json={"approved": True})
+        assert r.status_code == 400, f"Expected 400, got {r.status_code}"
+        print(f"   Correctly rejected decision on done task")
+    else:
+        print(f"   Skipped (no done tasks)")
+
+runner.test("Node decision on non-proposed task returns 400", test_node_decision_on_non_proposed)
+
+def test_node_cancel_done_task():
+    """POST cancel on a done task returns 400"""
+    r = requests.get(f"{BASE_URL}/node/tasks", params={"node_id": node_id, "status": "done", "limit": 1})
+    tasks = r.json()
+    if len(tasks) > 0:
+        task_id = tasks[0]['id']
+        r = requests.post(f"{BASE_URL}/node/tasks/{task_id}/cancel")
+        assert r.status_code == 400, f"Expected 400, got {r.status_code}"
+        print(f"   Correctly rejected cancel on done task")
+    else:
+        print(f"   Skipped (no done tasks)")
+
+runner.test("Node cancel done task returns 400", test_node_cancel_done_task)
+
+def test_node_register_without_key():
+    """POST /api/node/register without X-ACASO-Key returns 401"""
+    r = requests.post(f"{BASE_URL}/node/register", json={
+        "name": "test-node",
+        "os": "Linux",
+        "allowed_roots": ["/tmp"],
+        "capabilities": ["files"]
+    })
+    assert r.status_code == 401, f"Expected 401, got {r.status_code}"
+    print(f"   Correctly rejected registration without key")
+
+runner.test("Node register without key returns 401", test_node_register_without_key)
+
+def test_node_plan():
+    """POST /api/node/plan generates tasks"""
+    r = requests.post(f"{BASE_URL}/node/plan", json={
+        "node_id": node_id,
+        "goal": "create a folder notes inside my root and write hello.md in it"
+    }, timeout=120)
+    assert r.status_code == 200, f"Expected 200, got {r.status_code}"
+    plan = r.json()
+    assert 'tasks' in plan, "Expected tasks array"
+    assert len(plan['tasks']) > 0, "Expected at least one task"
+    print(f"   Plan created: {len(plan['tasks'])} task(s)")
+    print(f"   Summary: {plan.get('summary', '')}")
+    
+    # All tasks should be proposed
+    for t in plan['tasks']:
+        if 'status' in t:
+            assert t['status'] == 'proposed', f"Expected status=proposed, got {t['status']}"
+    
+    # Reject all tasks
+    for t in plan['tasks']:
+        if 'id' in t:
+            r = requests.post(f"{BASE_URL}/node/tasks/{t['id']}/decision", json={"approved": False})
+            assert r.status_code == 200, f"Expected 200, got {r.status_code}"
+    print(f"   All tasks rejected")
+
+runner.test("Node plan tasks", test_node_plan)
+
+# Clean up node
+print("\n🧹 Cleaning up Local Node...")
+subprocess.run(['pkill', '-f', 'acaso_node.py'], capture_output=True)
+time.sleep(2)
+subprocess.run(['rm', '-rf', '/tmp/acaso_ta_root'], capture_output=True)
+home_dir = subprocess.run(['bash', '-c', 'echo ~'], capture_output=True, text=True).stdout.strip()
+subprocess.run(['rm', '-f', f'{home_dir}/.acaso_node.json'], capture_output=True)
+
+if node_id:
+    r = requests.delete(f"{BASE_URL}/node/nodes/{node_id}")
+    if r.status_code == 200:
+        print(f"   Node deleted: {node_id[:8]}")
+
+# ==================== RESEARCH BROWSER TESTS ====================
+print("\n" + "="*60)
+print("RESEARCH BROWSER TESTS")
+print("="*60)
+
+def test_browse_research_valid():
+    """POST /api/browse/research with valid URL and question"""
+    print(f"   Fetching page (may take 30s)...")
+    r = requests.post(f"{BASE_URL}/browse/research", json={
+        "url": "https://www.sba.gov/funding-programs/grants",
+        "question": "Who does SBA give grants to?",
+        "screenshot": True
+    }, timeout=60)
+    assert r.status_code == 200, f"Expected 200, got {r.status_code}"
+    data = r.json()
+    assert data['title'], "Expected non-empty title"
+    assert data['http_status'] == 200, f"Expected http_status=200, got {data['http_status']}"
+    assert data['chars'] > 500, f"Expected chars > 500, got {data['chars']}"
+    assert isinstance(data['links'], list), "Expected links array"
+    assert isinstance(data['forms'], list), "Expected forms array"
+    assert data['screenshot_b64'], "Expected non-empty screenshot_b64"
+    assert 'answer' in data, "Expected answer object"
+    assert data['answer']['text'], "Expected non-empty answer text"
+    assert data['answer']['model_label'], "Expected model_label"
+    print(f"   Page loaded: {data['title']}")
+    print(f"   HTTP {data['http_status']}, {data['chars']} chars, {len(data['links'])} links, {len(data['forms'])} forms")
+    print(f"   Answer: {data['answer']['text'][:100]}...")
+
+runner.test("Research browser with valid URL", test_browse_research_valid)
+
+def test_browse_research_invalid_url():
+    """POST /api/browse/research with invalid URL returns 502"""
+    r = requests.post(f"{BASE_URL}/browse/research", json={
+        "url": "not a url at all",
+        "screenshot": False
+    }, timeout=60)
+    assert r.status_code == 502, f"Expected 502, got {r.status_code}"
+    print(f"   Correctly returned 502 for invalid URL")
+
+runner.test("Research browser with invalid URL returns 502", test_browse_research_invalid_url)
+
+def test_browse_history():
+    """GET /api/browse/history lists pages"""
+    r = requests.get(f"{BASE_URL}/browse/history")
+    assert r.status_code == 200, f"Expected 200, got {r.status_code}"
+    data = r.json()
+    assert isinstance(data, list), f"Expected list, got {type(data)}"
+    assert len(data) > 0, "Expected at least one page in history"
+    print(f"   Found {len(data)} page(s) in history")
+
+runner.test("Research browser history", test_browse_history)
+
+# ==================== COMPANION TESTS ====================
+print("\n" + "="*60)
+print("COMPANION TESTS")
+print("="*60)
+
+def test_companion_empty_message():
+    """POST /api/companion/chat with empty message and no image returns 400"""
+    r = requests.post(f"{BASE_URL}/companion/chat", json={
+        "message": "",
+        "session_id": "test-empty"
+    })
+    assert r.status_code == 400, f"Expected 400, got {r.status_code}"
+    print(f"   Correctly rejected empty message")
+
+runner.test("Companion empty message returns 400", test_companion_empty_message)
+
+def test_companion_with_image():
+    """POST /api/companion/chat with message and image"""
+    # Generate test image with PIL
+    try:
+        from PIL import Image, ImageDraw, ImageFont
+    except ImportError:
+        print("   Skipped (PIL not available)")
+        return
+    
+    # Create image with number 7421
+    img = Image.new('RGB', (400, 300), color='white')
+    draw = ImageDraw.Draw(img)
+    
+    # Draw large text
+    try:
+        font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 80)
+    except:
+        font = ImageFont.load_default()
+    
+    draw.text((100, 100), "7421", fill='black', font=font)
+    
+    # Draw some shapes
+    draw.rectangle([50, 50, 150, 100], outline='red', width=3)
+    draw.ellipse([250, 150, 350, 250], outline='blue', width=3)
+    
+    # Convert to base64
+    buffer = BytesIO()
+    img.save(buffer, format='JPEG')
+    image_b64 = base64.b64encode(buffer.getvalue()).decode()
+    
+    print(f"   Sending message with image (may take time for vision model)...")
+    r = requests.post(f"{BASE_URL}/companion/chat", json={
+        "message": "What number is written in this image?",
+        "image_b64": image_b64,
+        "session_id": "ta-comp"
+    }, stream=True, timeout=120)
+    
+    assert r.status_code == 200, f"Expected 200, got {r.status_code}"
+    assert 'text/event-stream' in r.headers.get('content-type', ''), "Expected text/event-stream"
+    
+    # Parse SSE stream
+    events = []
+    full_content = ""
+    for line in r.iter_lines():
+        if line:
+            line = line.decode('utf-8')
+            if line.startswith('data: '):
+                try:
+                    event = json.loads(line[6:])
+                    events.append(event)
+                    if event['type'] == 'delta':
+                        full_content += event['content']
+                    elif event['type'] == 'done':
+                        full_content = event.get('content', full_content)
+                except:
+                    pass
+    
+    # Verify events
+    assert len(events) > 0, "Expected at least one event"
+    assert events[0]['type'] == 'session', f"Expected first event type=session, got {events[0]['type']}"
+    assert events[-1]['type'] == 'done', f"Expected last event type=done, got {events[-1]['type']}"
+    assert events[-1]['model_label'], "Expected model_label in done event"
+    
+    # Verify content mentions 7421
+    assert '7421' in full_content or '7,421' in full_content, f"Expected content to mention 7421, got: {full_content}"
+    print(f"   ✓ Response mentions 7421: {full_content[:100]}...")
+    print(f"   Model: {events[-1]['model_label']}")
+
+runner.test("Companion with message and image", test_companion_with_image)
+
+def test_companion_history():
+    """GET /api/companion/history returns messages"""
+    r = requests.get(f"{BASE_URL}/companion/history", params={"session_id": "ta-comp"})
+    assert r.status_code == 200, f"Expected 200, got {r.status_code}"
+    data = r.json()
+    assert isinstance(data, list), f"Expected list, got {type(data)}"
+    assert len(data) == 2, f"Expected 2 messages (user + assistant), got {len(data)}"
+    assert data[0]['role'] == 'user', f"Expected first message role=user, got {data[0]['role']}"
+    assert data[0]['had_image'] == True, f"Expected user message had_image=true"
+    assert data[1]['role'] == 'assistant', f"Expected second message role=assistant, got {data[1]['role']}"
+    print(f"   Found {len(data)} messages in history")
+
+runner.test("Companion history", test_companion_history)
+
+def test_companion_clear():
+    """DELETE /api/companion/history clears messages"""
+    r = requests.delete(f"{BASE_URL}/companion/history", params={"session_id": "ta-comp"})
+    assert r.status_code == 200, f"Expected 200, got {r.status_code}"
+    
+    # Verify cleared
+    r = requests.get(f"{BASE_URL}/companion/history", params={"session_id": "ta-comp"})
+    data = r.json()
+    assert len(data) == 0, f"Expected 0 messages after clear, got {len(data)}"
+    print(f"   History cleared")
+
+runner.test("Companion clear history", test_companion_clear)
+
+# ==================== REGRESSION TESTS ====================
+print("\n" + "="*60)
+print("REGRESSION TESTS")
+print("="*60)
+
+def test_radar_sources():
+    """GET /api/radar/sources returns 3 sources"""
+    r = requests.get(f"{BASE_URL}/radar/sources")
+    assert r.status_code == 200, f"Expected 200, got {r.status_code}"
+    data = r.json()
+    assert len(data) == 3, f"Expected 3 sources, got {len(data)}"
+    print(f"   Found {len(data)} sources")
+
+runner.test("Radar sources", test_radar_sources)
+
+def test_acaso_presets():
+    """GET /api/acaso/presets returns 3 presets"""
+    r = requests.get(f"{BASE_URL}/acaso/presets")
+    assert r.status_code == 200, f"Expected 200, got {r.status_code}"
+    data = r.json()
+    assert len(data) == 3, f"Expected 3 presets, got {len(data)}"
+    print(f"   Found {len(data)} presets")
+
+runner.test("ACASO presets", test_acaso_presets)
+
+def test_missions_list():
+    """GET /api/missions returns list"""
+    r = requests.get(f"{BASE_URL}/missions")
+    assert r.status_code == 200, f"Expected 200, got {r.status_code}"
+    data = r.json()
+    assert isinstance(data, list), f"Expected list, got {type(data)}"
+    print(f"   Found {len(data)} mission(s)")
+
+runner.test("Missions list", test_missions_list)
+
+# ==================== SUMMARY ====================
+sys.exit(runner.summary())

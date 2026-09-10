@@ -1,6 +1,6 @@
 # ACASO Omniverse — Complete Handoff
 
-_Generated: 2026-09-10T01:47:03.648779+00:00_
+_Generated: 2026-09-10T02:17:38.887738+00:00_
 
 ## What this is
 A contest-ready **Directive-to-Payment Operating System** (FastAPI + React + MongoDB).
@@ -2714,6 +2714,97 @@ node_module.init(db, require_key, llm_call_failover, extract_json)
 api_router.include_router(node_module.router)
 api_router.include_router(node_module.browse_router)
 
+# ---------------- Companion: small desktop window - voice + screen/window share + vision ----------------
+# Frames are captured in the owner's browser (getDisplayMedia -> canvas -> JPEG base64), sent per message only
+# when the owner includes them, analysed with a vision model, and NOT stored (only a thumbnail hash + text).
+from emergentintegrations.llm.chat import ImageContent, TextDelta, StreamDone  # noqa: E402
+from fastapi.responses import StreamingResponse  # noqa: E402
+
+COMPANION_SYSTEM = (
+    "You are ACASO Companion - a small always-available assistant window on the owner's desktop. The owner may share a "
+    "window or screen; when a screenshot is attached, ground your answer in what is visibly there: read text, identify the "
+    "app/site, spot errors, summarise, suggest the next click, or draft what they need. If something is not visible, say so. "
+    "Spoken-friendly style: plain sentences, short paragraphs, no heavy markdown, no emojis. Be concise unless asked to go deep. "
+    "You know the ACASO app: Sovereign Home (missions), Bug Bounty, Council of Weavers, Voice, Radar (real grants/contracts), "
+    "Ask All AIs, File Analyzer, Self-Directive, Chronicle, Local Node (acts on the owner's PC with approval), Agent Bridge. "
+    "Never claim to have taken an action yourself; suggest the tab or Local Node task that would do it."
+)
+
+
+class CompanionRequest(BaseModel):
+    message: str
+    session_id: Optional[str] = None
+    image_b64: Optional[str] = None  # JPEG/PNG base64 (no data: prefix) - optional shared-screen frame
+    share_label: Optional[str] = None
+
+
+@api_router.post("/companion/chat")
+async def companion_chat(req: CompanionRequest):
+    text = (req.message or "").strip()
+    if not text and not req.image_b64:
+        raise HTTPException(400, "Message or image required")
+    if req.image_b64 and len(req.image_b64) > 6_000_000:
+        raise HTTPException(413, "Frame too large - downscale before sending")
+    session = req.session_id or str(uuid.uuid4())
+    now = datetime.now(timezone.utc).isoformat()
+    hist = await db.companion_messages.find({"session_id": session}, {"_id": 0}).sort("created_at", -1).to_list(10)
+    hist.reverse()
+    hist_txt = "\n".join([f"{'Owner' if h['role']=='user' else 'Companion'}: {h['content'][:600]}" for h in hist])
+    prompt = ((f"Conversation so far:\n{hist_txt}\n\n" if hist_txt else "")
+              + (f"[Owner is sharing: {req.share_label}] " if req.share_label else "")
+              + (f"Owner: {text}" if text else "Owner shared their screen without a question - describe what you see and anything notable."))
+    img = None
+    if req.image_b64:
+        b64 = req.image_b64.split(",", 1)[1] if req.image_b64.startswith("data:") else req.image_b64
+        img = ImageContent(image_base64=b64)
+    await db.companion_messages.insert_one({"id": str(uuid.uuid4()), "session_id": session, "role": "user", "content": text or "(shared screen)",
+                                            "had_image": bool(img), "share_label": req.share_label, "created_at": now})
+
+    async def gen():
+        full = []
+        used = None
+        order = [("openai", "gpt-4o-mini", "Companion · GPT-4o"), ("gemini", "gemini-2.5-flash", "Companion · Gemini 2.5")]
+        yield f"data: {json.dumps({'type': 'session', 'session_id': session})}\n\n"
+        for prov, model, label in order:
+            try:
+                chat = LlmChat(api_key=EMERGENT_LLM_KEY, session_id=f"companion-{session}-{uuid.uuid4().hex[:6]}", system_message=COMPANION_SYSTEM).with_model(prov, model)
+                msg = UserMessage(text=prompt, file_contents=[img]) if img else UserMessage(text=prompt)
+                async for ev in chat.stream_message(msg):
+                    if isinstance(ev, TextDelta):
+                        full.append(ev.content)
+                        yield f"data: {json.dumps({'type': 'delta', 'content': ev.content})}\n\n"
+                    elif isinstance(ev, StreamDone):
+                        break
+                used = label
+                break
+            except Exception as e:
+                logger.error(f"companion {prov} failed: {e}")
+                full = []
+                continue
+        reply = "".join(full).strip()
+        if not reply:
+            reply = "I could not reach a vision model just now. Try again in a moment."
+            yield f"data: {json.dumps({'type': 'delta', 'content': reply})}\n\n"
+        await db.companion_messages.insert_one({"id": str(uuid.uuid4()), "session_id": session, "role": "assistant", "content": reply,
+                                                "model_label": used, "created_at": datetime.now(timezone.utc).isoformat()})
+        yield f"data: {json.dumps({'type': 'done', 'model_label': used, 'content': reply})}\n\n"
+
+    return StreamingResponse(gen(), media_type="text/event-stream", headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+
+@api_router.get("/companion/history")
+async def companion_history(session_id: str = Query(...), limit: int = Query(60, ge=1, le=300)):
+    msgs = await db.companion_messages.find({"session_id": session_id}, {"_id": 0}).sort("created_at", -1).to_list(limit)
+    msgs.reverse()
+    return msgs
+
+
+@api_router.delete("/companion/history")
+async def companion_clear(session_id: str = Query(...)):
+    r = await db.companion_messages.delete_many({"session_id": session_id})
+    return {"ok": True, "deleted": r.deleted_count}
+
+
 app.include_router(api_router)
 
 app.add_middleware(
@@ -3467,7 +3558,8 @@ import VoiceChat from "./components/VoiceChat";
 import Radar from "./components/Radar";
 import VoiceCommander from "./components/VoiceCommander";
 import LocalNode from "./components/LocalNode";
-import { Sparkles, LayoutGrid, MessagesSquare, BookOpen, ShieldAlert, Plug, Boxes, Wand2, Crown, Waves, Radar as RadarIcon, MonitorSmartphone } from "lucide-react";
+import Companion, { openCompanionWindow } from "./components/Companion";
+import { Sparkles, LayoutGrid, MessagesSquare, BookOpen, ShieldAlert, Plug, Boxes, Wand2, Crown, Waves, Radar as RadarIcon, MonitorSmartphone, Castle } from "lucide-react";
 
 const BACKEND_URL = process.env.REACT_APP_BACKEND_URL;
 export const API = `${BACKEND_URL}/api`;
@@ -3493,6 +3585,16 @@ function App() {
       return TABS.some((x) => x.key === t) ? t : "home";
     } catch { return "home"; }
   });
+
+  const companionMode = typeof window !== "undefined" && new URLSearchParams(window.location.search).get("mode") === "companion";
+  if (companionMode) {
+    return (
+      <div className="acaso-root companion-root">
+        <Toaster position="top-center" theme="dark" richColors />
+        <Companion standalone />
+      </div>
+    );
+  }
 
   return (
     <div className="acaso-root">
@@ -3523,6 +3625,7 @@ function App() {
             );
           })}
         </nav>
+        <button className="companion-launch" onClick={openCompanionWindow} title="Open ACASO Companion in its own small window" data-testid="companion-launch"><Castle size={14} /> Companion</button>
         <div className="owner-badge"><span className="dot" /> Owner · Sovereign</div>
       </header>
 
@@ -4606,6 +4709,43 @@ body {
 .ln-forms { font-size: 12px; color: var(--muted); } .ln-forms code { display: inline-block; margin: 2px 6px 2px 0; font-size: 11px; color: var(--cyan); }
 .ln-detail h2 { font-size: 17px; margin: 0 0 4px; }
 @media (max-width: 900px) { .ln-page-grid { grid-template-columns: 1fr; } }
+
+/* ===== Companion (small desktop window) ===== */
+.companion-launch { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; font-weight: 700; color: #06060f; background: linear-gradient(135deg, var(--gold), #f5843c); border: 0; border-radius: 999px; padding: 7px 12px; cursor: pointer; margin-right: 10px; transition: transform .12s, box-shadow .18s; }
+.companion-launch:hover { transform: translateY(-1px); box-shadow: 0 6px 18px rgba(245,196,81,0.3); }
+.companion-root { min-height: 100vh; display: flex; }
+.cp { display: flex; flex-direction: column; background: var(--panel); border: 1px solid var(--border); border-radius: 16px; overflow: hidden; height: 100%; min-height: 0; }
+.cp.standalone { flex: 1; border-radius: 0; border: 0; height: 100vh; }
+.cp-head { display: flex; justify-content: space-between; align-items: center; padding: 10px 12px; border-bottom: 1px solid var(--border); background: rgba(4,6,16,0.5); }
+.cp-brand { display: flex; align-items: center; gap: 8px; font-weight: 800; font-size: 13.5px; color: var(--gold); letter-spacing: .01em; }
+.cp-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--dim); } .cp-dot.on { background: var(--green); box-shadow: 0 0 10px var(--green); } .cp-dot.busy { background: var(--cyan); animation: vcpulse 1.2s infinite; }
+.cp-head-actions { display: flex; align-items: center; gap: 6px; }
+.cp-pin { display: inline-flex; align-items: center; gap: 4px; font-size: 10.5px; color: var(--dim); cursor: help; }
+.cp-ic { width: 30px; height: 30px; border-radius: 8px; border: 1px solid var(--border); background: transparent; color: var(--muted); display: grid; place-items: center; cursor: pointer; transition: color .16s, border-color .16s; }
+.cp-ic:hover:not(:disabled) { color: var(--text); border-color: var(--border-lit); } .cp-ic:disabled { opacity: .5; }
+.cp-share { border-bottom: 1px solid var(--border); background: rgba(4,6,16,0.35); }
+.cp-share-btn { width: 100%; display: flex; align-items: center; justify-content: center; gap: 8px; font-size: 12.5px; font-weight: 600; color: var(--cyan); background: transparent; border: 0; padding: 12px; cursor: pointer; }
+.cp-share-btn:hover { background: rgba(79,209,255,0.06); }
+.cp-video { width: 100%; max-height: 180px; object-fit: contain; background: #000; }
+.cp-share-bar { display: flex; align-items: center; gap: 8px; padding: 6px 10px; font-size: 11.5px; color: var(--muted); }
+.cp-share-bar > span { display: inline-flex; align-items: center; gap: 5px; color: var(--green); flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cp-chk { display: inline-flex; align-items: center; gap: 5px; cursor: pointer; } .cp-chk input { accent-color: var(--gold); }
+.cp-log { flex: 1; min-height: 0; overflow-y: auto; padding: 12px; display: flex; flex-direction: column; gap: 8px; }
+.cp-empty { font-size: 12.5px; line-height: 1.6; color: var(--muted); padding: 14px; border: 1px dashed var(--border); border-radius: 12px; text-align: left; }
+.cp-msg { position: relative; max-width: 88%; font-size: 13px; line-height: 1.55; padding: 9px 12px; border-radius: 12px; border: 1px solid var(--border); white-space: pre-wrap; word-break: break-word; }
+.cp-msg.user { align-self: flex-end; background: rgba(245,196,81,0.10); border-color: rgba(245,196,81,0.35); }
+.cp-msg.assistant { align-self: flex-start; background: rgba(4,6,16,0.5); padding-right: 30px; }
+.cp-msg.streaming { border-style: dashed; }
+.cp-tag { display: inline-flex; align-items: center; gap: 3px; font-size: 9.5px; color: var(--gold); text-transform: uppercase; letter-spacing: .06em; margin-bottom: 3px; }
+.cp-replay { position: absolute; right: 6px; bottom: 6px; width: 22px; height: 22px; border-radius: 6px; border: 1px solid var(--border); background: transparent; color: var(--dim); display: grid; place-items: center; cursor: pointer; }
+.cp-thinking { display: flex; align-items: center; gap: 6px; font-size: 11.5px; color: var(--cyan); }
+.cp-input { display: flex; align-items: center; gap: 8px; padding: 10px; border-top: 1px solid var(--border); background: rgba(4,6,16,0.5); }
+.cp-input input { flex: 1; min-width: 0; font-size: 13px; color: var(--text); background: rgba(4,6,16,0.6); border: 1px solid var(--border); border-radius: 999px; padding: 10px 14px; }
+.cp-input input:focus { outline: none; border-color: var(--border-lit); }
+.cp-mic, .cp-send { width: 38px; height: 38px; border-radius: 50%; border: 1px solid var(--border-lit); background: rgba(255,255,255,0.04); color: var(--text); display: grid; place-items: center; cursor: pointer; flex-shrink: 0; }
+.cp-mic.on { color: #06060f; background: linear-gradient(135deg, var(--gold), #f5843c); border-color: transparent; } .cp-mic.live { animation: vcpulse 1.4s infinite; }
+.cp-send { color: #06060f; background: linear-gradient(135deg, var(--violet), var(--cyan)); border-color: transparent; } .cp-send:disabled { opacity: .45; cursor: default; }
+.cp-stopvoice { position: absolute; bottom: 64px; right: 14px; font-size: 11px; color: var(--muted); background: rgba(10,14,34,0.9); border: 1px solid var(--border); border-radius: 999px; padding: 4px 10px; cursor: pointer; }
 
 ```
 
@@ -9451,7 +9591,7 @@ async def research(req: ResearchRequest):
 
 @browse_router.get("/history")
 async def research_history(limit: int = Query(20, ge=1, le=100)):
-    return await db.research_pages.find({}, {"_id": 0, "text_excerpt": 0, "links": 0, "forms": 0}).sort("retrieved_at", -1).to_list(limit)
+    return await db.research_pages.find({}, {"_id": 0, "text_excerpt": 0, "links": 0, "forms": 0, "screenshot_b64": 0}).sort("retrieved_at", -1).to_list(limit)
 
 ```
 

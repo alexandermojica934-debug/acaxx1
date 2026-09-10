@@ -13,7 +13,8 @@ import VoiceChat from "./components/VoiceChat";
 import Radar from "./components/Radar";
 import VoiceCommander from "./components/VoiceCommander";
 import LocalNode from "./components/LocalNode";
-import { Sparkles, LayoutGrid, MessagesSquare, BookOpen, ShieldAlert, Plug, Boxes, Wand2, Crown, Waves, Radar as RadarIcon, MonitorSmartphone } from "lucide-react";
+import Companion, { openCompanionWindow } from "./components/Companion";
+import { Sparkles, LayoutGrid, MessagesSquare, BookOpen, ShieldAlert, Plug, Boxes, Wand2, Crown, Waves, Radar as RadarIcon, MonitorSmartphone, Castle } from "lucide-react";
 
 const BACKEND_URL = process.env.REACT_APP_BACKEND_URL;
 export const API = `${BACKEND_URL}/api`;
@@ -39,6 +40,16 @@ function App() {
       return TABS.some((x) => x.key === t) ? t : "home";
     } catch { return "home"; }
   });
+
+  const companionMode = typeof window !== "undefined" && new URLSearchParams(window.location.search).get("mode") === "companion";
+  if (companionMode) {
+    return (
+      <div className="acaso-root companion-root">
+        <Toaster position="top-center" theme="dark" richColors />
+        <Companion standalone />
+      </div>
+    );
+  }
 
   return (
     <div className="acaso-root">
@@ -69,6 +80,7 @@ function App() {
             );
           })}
         </nav>
+        <button className="companion-launch" onClick={openCompanionWindow} title="Open ACASO Companion in its own small window" data-testid="companion-launch"><Castle size={14} /> Companion</button>
         <div className="owner-badge"><span className="dot" /> Owner · Sovereign</div>
       </header>
 
