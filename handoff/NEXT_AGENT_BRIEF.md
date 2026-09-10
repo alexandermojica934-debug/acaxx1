@@ -1,5 +1,5 @@
 # ACASO — Next Agent Brief
-_Generated: 2026-09-10T00:24:06.782518+00:00_
+_Generated: 2026-09-10T00:38:58.673281+00:00_
 
 Read this first. The app is a Directive-to-Payment OS (FastAPI+React+Mongo). All routes under `/api`.
 
@@ -21,6 +21,7 @@ curl -s $BURL/api/self/manifest | head -c 300
 - File Analyzer follow-up chat: grounded answers that cite exact `path:line` (clickable -> opens a file viewer that highlights the line) and quote snippets
 - Analysis Export: one-click download of the analysis + chat thread + file list as a Markdown report
 - Google Drive ingestion (user OAuth): connect, browse, SEARCH by name, import selected files OR an entire folder (recursive) in one click, auto-analyzes after import. Requires user-supplied Web-app OAuth client.
+- Council of Weavers deliberation engine (POST /api/acaso/deliberate): Architect(Gemini)/Shadow(Claude, veto)/Muse(GPT)/Finance(GPT) in parallel -> Meta-Weaver synthesis -> Sovereign Directive + inferred weak signals; journaled, exportable to .md; presets Genesis Engine / Sovereign Hunter / Foresight Thesis; runner scripts in handoff/scripts. LLM reasoning only - no live market/lead data.
 
 ## Models
 - openai: `gpt-4o-mini` (do NOT downgrade)

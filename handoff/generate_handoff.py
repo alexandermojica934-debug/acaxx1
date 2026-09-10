@@ -40,6 +40,10 @@ SOURCE_FILES = [
     "frontend/src/components/AgentBridge.js",
     "frontend/src/components/FileAnalyzer.js",
     "frontend/src/components/SelfDirective.js",
+    "frontend/src/components/Council.js",
+    "handoff/scripts/acaso_client.py",
+    "handoff/scripts/script_01_genesis_engine.py",
+    "handoff/scripts/script_03_sovereign_hunter.py",
 ]
 
 LANG = {".py": "python", ".js": "javascript", ".css": "css", ".json": "json",
@@ -57,6 +61,7 @@ FEATURES = [
     "File Analyzer follow-up chat: grounded answers that cite exact `path:line` (clickable -> opens a file viewer that highlights the line) and quote snippets",
     "Analysis Export: one-click download of the analysis + chat thread + file list as a Markdown report",
     "Google Drive ingestion (user OAuth): connect, browse, SEARCH by name, import selected files OR an entire folder (recursive) in one click, auto-analyzes after import. Requires user-supplied Web-app OAuth client.",
+    "Council of Weavers deliberation engine (POST /api/acaso/deliberate): Architect(Gemini)/Shadow(Claude, veto)/Muse(GPT)/Finance(GPT) in parallel -> Meta-Weaver synthesis -> Sovereign Directive + inferred weak signals; journaled, exportable to .md; presets Genesis Engine / Sovereign Hunter / Foresight Thesis; runner scripts in handoff/scripts. LLM reasoning only - no live market/lead data.",
 ]
 
 MODELS = {
@@ -66,6 +71,9 @@ MODELS = {
 }
 
 KEY_ENDPOINTS = [
+    ["GET", "/api/acaso/presets", "council presets (genesis/hunter/foresight)"],
+    ["POST", "/api/acaso/deliberate", "run Council of Weavers -> sovereign_directive, weak_signals, weavers, council_consulted"],
+    ["GET", "/api/acaso/deliberations[/{id}][/export]", "list / open / export .md a deliberation"],
     ["POST", "/api/compile-directive", "compile a revenue directive into a mission"],
     ["POST", "/api/compile-bounty", "compile a bug-bounty engagement"],
     ["GET", "/api/missions?kind=bugbounty", "list engagements"],

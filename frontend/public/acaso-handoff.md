@@ -1,6 +1,6 @@
 # ACASO Omniverse — Complete Handoff
 
-_Generated: 2026-09-10T00:24:06.782518+00:00_
+_Generated: 2026-09-10T00:38:58.673281+00:00_
 
 ## What this is
 A contest-ready **Directive-to-Payment Operating System** (FastAPI + React + MongoDB).
@@ -17,6 +17,7 @@ A contest-ready **Directive-to-Payment Operating System** (FastAPI + React + Mon
 - File Analyzer follow-up chat: grounded answers that cite exact `path:line` (clickable -> opens a file viewer that highlights the line) and quote snippets
 - Analysis Export: one-click download of the analysis + chat thread + file list as a Markdown report
 - Google Drive ingestion (user OAuth): connect, browse, SEARCH by name, import selected files OR an entire folder (recursive) in one click, auto-analyzes after import. Requires user-supplied Web-app OAuth client.
+- Council of Weavers deliberation engine (POST /api/acaso/deliberate): Architect(Gemini)/Shadow(Claude, veto)/Muse(GPT)/Finance(GPT) in parallel -> Meta-Weaver synthesis -> Sovereign Directive + inferred weak signals; journaled, exportable to .md; presets Genesis Engine / Sovereign Hunter / Foresight Thesis; runner scripts in handoff/scripts. LLM reasoning only - no live market/lead data.
 
 ## Tech & Integrations
 - Backend: FastAPI + Motor (MongoDB), Pydantic, UUID ids, timezone-aware UTC.
@@ -43,6 +44,9 @@ sudo supervisorctl restart backend frontend
 Hot-reload is enabled; restart only after dependency/.env changes.
 
 ## Key API Endpoints
+- `GET /api/acaso/presets` — council presets (genesis/hunter/foresight)
+- `POST /api/acaso/deliberate` — run Council of Weavers -> sovereign_directive, weak_signals, weavers, council_consulted
+- `GET /api/acaso/deliberations[/{id}][/export]` — list / open / export .md a deliberation
 - `POST /api/compile-directive` — compile a revenue directive into a mission
 - `POST /api/compile-bounty` — compile a bug-bounty engagement
 - `GET /api/missions?kind=bugbounty` — list engagements
@@ -1963,6 +1967,263 @@ async def export_fileset(fsid: str):
     return Response(content=md, media_type="text/markdown", headers=headers)
 
 
+# ---------------- ACASO Deliberation Engine: Council of Weavers ----------------
+# Real multi-model council (Architect / Shadow / Muse / Finance) + Meta-Weaver synthesis.
+# This is the endpoint the ACASO King runner scripts (Genesis Engine, Sovereign Hunter) call.
+# HONESTY: every output here is LLM reasoning. No live market feeds, order books, on-chain
+# data or lead databases are connected. "weak_signals" are model-inferred, not measured.
+
+WEAVERS = [
+    {
+        "id": "architect", "name": "Architect", "role": "Thesis / Bull Case",
+        "failover": ["gemini", "openai", "anthropic"],
+        "system": ("You are the ARCHITECT weaver of the ACASO Council. You build the strongest constructive thesis: "
+                   "the opportunity, the mechanism, the setup, and why it works. Concrete, specific, structured. "
+                   "Never use certainty language ('will'); use probabilities and scenarios. 350-500 words."),
+    },
+    {
+        "id": "shadow", "name": "Shadow", "role": "Risk Officer (veto power)",
+        "failover": ["anthropic", "openai", "gemini"],
+        "system": ("You are the SHADOW weaver of the ACASO Council - the risk officer and the most important voice. "
+                   "Stress-test the challenge: what could go wrong, what the operator is not seeing, failure modes, "
+                   "downside sizing, invalidation conditions, regulatory/legal exposure, and survival-first constraints. "
+                   "You may VETO with 'SHADOW VETO:' if the idea is unsurvivable. 300-450 words."),
+    },
+    {
+        "id": "muse", "name": "Muse", "role": "Contrarian / Asymmetry",
+        "failover": ["openai", "anthropic", "gemini"],
+        "system": ("You are the MUSE weaver of the ACASO Council - the contrarian. Find the non-obvious angle, the "
+                   "crowded assumption to bet against, the convergence nobody combined, the asymmetric expression. "
+                   "Also list 3-6 WEAK SIGNALS: early, under-noticed indicators relevant to this challenge (label them "
+                   "clearly as inferred from reasoning, not from live data). 300-450 words."),
+    },
+    {
+        "id": "finance", "name": "Finance", "role": "Unit Economics / Capital",
+        "failover": ["openai", "gemini", "anthropic"],
+        "system": ("You are the FINANCE weaver of the ACASO Council. Translate the challenge into numbers: revenue "
+                   "model, pricing, CAC/LTV or position sizing, capital required, break-even, and conservative / "
+                   "realistic / optimistic scenarios with explicit assumptions. 300-450 words."),
+    },
+]
+
+META_WEAVER_SYSTEM = (
+    "You are the META-WEAVER, allocator and synthesizer of the ACASO Council of Weavers (Architect, Shadow, Muse, "
+    "Finance). You weigh each weaver's analysis, resolve disagreements explicitly, and produce the SOVEREIGN DIRECTIVE. "
+    "Rules: risk-first (honor a Shadow veto if present), no certainty language, every recommendation ships with its "
+    "invalidation condition. Follow the DELIVER format requested in the challenge exactly, in Markdown. "
+    "After the directive, on its own line write exactly ===WEAK_SIGNALS=== and then 3-6 bullet weak signals "
+    "(state they are inferred, not measured). Do not add anything after the weak signals."
+)
+
+DELIBERATION_PRESETS = [
+    {
+        "id": "genesis", "name": "Genesis Engine", "challenge_type": "product_strategy",
+        "tagline": "Invent something that does not exist yet - buildable, defensible, revenue in 90 days.",
+        "additional_context": "Invention mandate. Generate something genuinely new. Not an iteration.",
+        "challenge": (
+            "GENESIS DIRECTIVE - INVENTION MANDATE\n\n"
+            "Founder Profile:\nFounder: Alexander Mojica\nCompanies: MediaLinxS (sovereign AI platform), OmniTrackX (logistics SaaS, Boston)\n"
+            "Skills: Product design, AI architecture, branding, full-stack go-to-market\n"
+            "Infrastructure: ACASO King sovereign AI, FastAPI, MongoDB, multi-model AI council\n"
+            "Budget: Lean startup. 1-2 developers. Sub-$50K build capacity.\n"
+            "Goal: Discover and launch something the world urgently needs that doesn't exist yet.\n\n"
+            "MISSION:\nInvent something that does not yet exist. Not an iteration - a creation. The world needs it RIGHT NOW in 2026. "
+            "Alexander can build it. It can generate revenue within 90 days of launch.\n\n"
+            "Search these dimensions for the gap:\n1. PAIN POINTS technology has not solved\n2. REGULATORY GAPS - new 2024-2026 laws that created problems nobody built solutions for\n"
+            "3. BEHAVIORAL SHIFTS - post-COVID, remote work, AI proliferation, economic anxiety\n4. CONVERGENCE OPPORTUNITIES - two existing technologies nobody has combined yet\n"
+            "5. SILENT SUFFERING - groups experiencing a real problem with no words for it yet\n\n"
+            "CONSTRAINTS:\n- Buildable by a lean team in under 90 days for under $50,000\n- Revenue-generating within 90 days of launch\n"
+            "- Defensible moat: network effect, data flywheel, proprietary method, or regulatory advantage\n- AI is the foundation, not a feature\n"
+            "- Alexander's existing infrastructure gives an unfair build advantage\n\n"
+            "DELIVER:\n## THE INVENTION\n## THE WORLD PROBLEM IT SOLVES\n## HOW IT WORKS\n## BUSINESS MODEL\n## UNFAIR ADVANTAGES\n"
+            "## THE MOAT\n## 90-DAY LAUNCH PLAN\n## FINANCIAL PROJECTION\n## SOVEREIGN VERDICT"
+        ),
+    },
+    {
+        "id": "hunter", "name": "Sovereign Hunter", "challenge_type": "market_entry",
+        "tagline": "Profile 3 high-value targets and generate bespoke outreach sequences.",
+        "additional_context": ("Sovereign Hunter mode - clients. Identify 3 real, specific, high-value targets. "
+                               "Generate outreach that is specific, human, and conversion-optimized. No generic templates."),
+        "challenge": (
+            "SOVEREIGN HUNTER DIRECTIVE - TARGET ACQUISITION\n\nHunt Mode: CLIENTS - Find 3 high-value clients\n\n"
+            "What is being offered:\nProduct/Service: OmniTrackX - AI-powered logistics SaaS for courier delivery, furniture moving, and office relocation companies.\n"
+            "Core value proposition:\n- Real-time job tracking with live map\n- AI-powered damage reports and claim filing\n- Client-facing dashboard with transparent status updates\n"
+            "- QR + condition-based inventory tracking\n- Competitive with Track-POD + Routific + Supermove combined at lower cost\n"
+            "Pricing: Starter $149/mo | Growth $349/mo | Pro $749/mo | Enterprise custom\nMarket: Initially Boston, MA\n\n"
+            "Target market:\nBoston, MA area logistics and moving companies: last-mile couriers (10-50 drivers), furniture movers and storage, "
+            "office relocation specialists, B2B delivery for medical/legal/tech, companies on spreadsheets/paper/basic apps.\n\n"
+            "PHASE 1 - TARGET IDENTIFICATION: 3 specific, realistic target categories. For each: Profile (type, size, pain points, decision maker, "
+            "where they gather, trigger events, objections + neutralizers), Why they need this specifically, Credibility signals.\n\n"
+            "PHASE 2 - OUTREACH GENERATION: per target - Version A cold email (subject + <150 words), Version B LinkedIn DM (<80 words), Version C follow-up.\n\n"
+            "PHASE 3 - SEQUENCE STRATEGY: Day 1 / Day 3 / Day 7 / Day 14 per target.\n\n"
+            "PHASE 4 - EXECUTION TOOLKIT: search strings, associations, events; the single highest-leverage zero-cost action for TODAY.\n\n"
+            "## SOVEREIGN VERDICT\nWhich target is the highest-probability first close and exactly what to send them tomorrow morning."
+        ),
+    },
+    {
+        "id": "foresight", "name": "Foresight Thesis", "challenge_type": "market_foresight",
+        "tagline": "Regime read + risk-defined thesis + invalidation. Reasoning only - no live market data connected.",
+        "additional_context": ("Foresight Engine doctrine: Shadow owns risk and may veto. Output is setup + risk-defined expression + "
+                               "invalidation condition, never a price target or 'buy'. Not financial advice. No live data is connected: "
+                               "state clearly what data would be required to confirm each claim."),
+        "challenge": (
+            "FORESIGHT DIRECTIVE - REGIME & THESIS\n\nAsset / market: [EDIT ME - e.g. BTC/USD, a sector, an equity]\n"
+            "Operator constraints: [EDIT ME - capital at risk, time horizon, max drawdown tolerated]\n\n"
+            "DELIVER:\n## REGIME READ\n(trending / mean-reverting / high-vol / risk-on-off / illiquid - with confidence band and what would change it)\n"
+            "## NOWCAST DIVERGENCE\n(where perceived fair state may diverge from price; the half-life of that gap; data needed to confirm)\n"
+            "## THESIS (Architect)\n## RISK EXPRESSION (Shadow)\n(size cap, stop, tail hedge, slippage assumption)\n## CONTRARIAN VIEW (Muse)\n"
+            "## INVALIDATION CONDITION\n(the exact observable that kills the thesis)\n## CHRONICLE ENTRY\n(journal-ready summary: reasoning, regime, size, invalidation)\n"
+            "## SOVEREIGN VERDICT"
+        ),
+    },
+]
+
+class DeliberateRequest(BaseModel):
+    challenge: str
+    challenge_type: Optional[str] = "general"
+    context: Optional[dict] = None
+    preset_id: Optional[str] = None
+
+def _split_weak_signals(text: str):
+    marker = "===WEAK_SIGNALS==="
+    if marker in text:
+        directive, ws = text.split(marker, 1)
+        return directive.strip(), ws.strip()
+    return text.strip(), ""
+
+@api_router.get("/acaso/presets")
+async def acaso_presets():
+    return DELIBERATION_PRESETS
+
+@api_router.post("/acaso/deliberate")
+async def acaso_deliberate(req: DeliberateRequest):
+    challenge = (req.challenge or "").strip()
+    if len(challenge) < 20:
+        raise HTTPException(400, "challenge must be at least 20 characters")
+    if len(challenge) > 20000:
+        raise HTTPException(400, "challenge too long (max 20000 chars)")
+    extra = ""
+    if req.context and isinstance(req.context, dict):
+        extra = str(req.context.get("additional_context") or "").strip()
+    did = str(uuid.uuid4())
+    started = datetime.now(timezone.utc)
+
+    weaver_prompt = (
+        f"CHALLENGE TYPE: {req.challenge_type or 'general'}\n"
+        + (f"OPERATOR CONTEXT: {extra}\n" if extra else "")
+        + f"\nCHALLENGE:\n{challenge}\n\nDeliver your analysis in your role. Markdown allowed."
+    )
+
+    async def run_weaver(w):
+        try:
+            ans, used, label = await llm_call_failover(w["system"], weaver_prompt, w["failover"], session=f"{did}-{w['id']}")
+            return {"id": w["id"], "name": w["name"], "role": w["role"], "provider": used,
+                    "model_label": label, "analysis": ans.strip(), "ok": True}
+        except Exception as e:
+            logger.error(f"weaver {w['id']} failed: {e}")
+            return {"id": w["id"], "name": w["name"], "role": w["role"], "provider": None,
+                    "model_label": "—", "analysis": f"Weaver unreachable: {e}", "ok": False}
+
+    weavers = await asyncio.gather(*[run_weaver(w) for w in WEAVERS])
+    ok = [w for w in weavers if w["ok"]]
+    if not ok:
+        raise HTTPException(502, "All weavers failed to respond")
+
+    synthesis_input = "\n\n".join([f"### [{w['name']} · {w['role']} · {w['model_label']}]\n{w['analysis']}" for w in ok])
+    meta_prompt = (
+        f"CHALLENGE TYPE: {req.challenge_type or 'general'}\n"
+        + (f"OPERATOR CONTEXT: {extra}\n" if extra else "")
+        + f"\nORIGINAL CHALLENGE:\n{challenge}\n\nCOUNCIL ANALYSES:\n{synthesis_input}\n\n"
+        "Now produce the SOVEREIGN DIRECTIVE (then ===WEAK_SIGNALS=== and the bullets)."
+    )
+    try:
+        meta_text, meta_used, meta_label = await llm_call_failover(
+            META_WEAVER_SYSTEM, meta_prompt, ["openai", "anthropic", "gemini"], session=f"{did}-meta")
+    except Exception as e:
+        raise HTTPException(502, f"Meta-Weaver synthesis failed: {e}")
+
+    directive, weak_signals = _split_weak_signals(meta_text)
+    if not weak_signals:
+        # fall back to Muse's own weak-signal section if the meta-weaver skipped the marker
+        muse = next((w for w in ok if w["id"] == "muse"), None)
+        if muse and "WEAK SIGNAL" in muse["analysis"].upper():
+            idx = muse["analysis"].upper().find("WEAK SIGNAL")
+            weak_signals = muse["analysis"][idx:].strip()[:2500]
+
+    council_labels = sorted({w["model_label"] for w in ok} | {meta_label})
+    shadow = next((w for w in ok if w["id"] == "shadow"), None)
+    vetoed = bool(shadow and "SHADOW VETO" in shadow["analysis"].upper())
+    finished = datetime.now(timezone.utc)
+
+    doc = {
+        "id": did,
+        "deliberation_id": did,
+        "timestamp": finished.isoformat(),
+        "created_at": finished.isoformat(),
+        "duration_s": round((finished - started).total_seconds(), 1),
+        "challenge_type": req.challenge_type or "general",
+        "preset_id": req.preset_id,
+        "challenge": challenge,
+        "additional_context": extra,
+        "weavers": weavers,
+        "weavers_synthesis": synthesis_input,
+        "meta_weaver": {"provider": meta_used, "model_label": meta_label},
+        "sovereign_directive": directive,
+        "weak_signals": weak_signals,
+        "shadow_veto": vetoed,
+        "council_consulted": council_labels,
+        "title": challenge.split("\n", 1)[0][:90],
+        "data_provenance": "LLM reasoning only. No live market feeds, on-chain data, or lead databases are connected. Not financial advice.",
+    }
+    await db.deliberations.insert_one(dict(doc))
+    return doc
+
+@api_router.get("/acaso/deliberations")
+async def list_deliberations(limit: int = Query(30, ge=1, le=200)):
+    return await db.deliberations.find(
+        {}, {"_id": 0, "weavers": 0, "weavers_synthesis": 0, "sovereign_directive": 0, "challenge": 0}
+    ).sort("created_at", -1).to_list(limit)
+
+@api_router.get("/acaso/deliberations/{did}")
+async def get_deliberation(did: str):
+    doc = await db.deliberations.find_one({"id": did}, {"_id": 0})
+    if not doc:
+        raise HTTPException(404, "Deliberation not found")
+    return doc
+
+@api_router.delete("/acaso/deliberations/{did}")
+async def delete_deliberation(did: str):
+    r = await db.deliberations.delete_one({"id": did})
+    if r.deleted_count == 0:
+        raise HTTPException(404, "Deliberation not found")
+    return {"ok": True}
+
+@api_router.get("/acaso/deliberations/{did}/export")
+async def export_deliberation(did: str):
+    d = await db.deliberations.find_one({"id": did}, {"_id": 0})
+    if not d:
+        raise HTTPException(404, "Deliberation not found")
+    preset = next((p["name"] for p in DELIBERATION_PRESETS if p["id"] == d.get("preset_id")), "Custom")
+    lines = [
+        f"# ACASO COUNCIL DELIBERATION - {preset}",
+        f"Generated: {d['timestamp'][:19]} | Deliberation: {d['id']} | Type: {d['challenge_type']}",
+        f"Council: {', '.join(d.get('council_consulted') or [])}",
+        f"Shadow veto: {'YES' if d.get('shadow_veto') else 'no'}",
+        "", f"> {d.get('data_provenance', '')}", "",
+        "---", "## WEAK SIGNALS (inferred)", d.get("weak_signals") or "_none_", "",
+        "---", d.get("sovereign_directive") or "", "",
+        "---", "## COUNCIL OF WEAVERS - INDIVIDUAL ANALYSES",
+    ]
+    for w in d.get("weavers", []):
+        lines += [f"### {w['name']} - {w['role']} ({w.get('model_label', '')})", w.get("analysis", ""), ""]
+    lines += ["---", "## ORIGINAL CHALLENGE", "```", d.get("challenge", ""), "```", "",
+              "*ACASO Omniverse - Council of Weavers Deliberation Engine*"]
+    md = "\n".join(lines)
+    safe = f"acaso-{(d.get('preset_id') or 'deliberation')}-{d['id'][:8]}"
+    return Response(content=md, media_type="text/markdown",
+                    headers={"Content-Disposition": f'attachment; filename="{safe}.md"'})
+
+
 
 
 app.include_router(api_router)
@@ -2609,7 +2870,8 @@ import BugBounty from "./components/BugBounty";
 import AgentBridge from "./components/AgentBridge";
 import FileAnalyzer from "./components/FileAnalyzer";
 import SelfDirective from "./components/SelfDirective";
-import { Sparkles, LayoutGrid, MessagesSquare, BookOpen, ShieldAlert, Plug, Boxes, Wand2 } from "lucide-react";
+import Council from "./components/Council";
+import { Sparkles, LayoutGrid, MessagesSquare, BookOpen, ShieldAlert, Plug, Boxes, Wand2, Crown } from "lucide-react";
 
 const BACKEND_URL = process.env.REACT_APP_BACKEND_URL;
 export const API = `${BACKEND_URL}/api`;
@@ -2617,6 +2879,7 @@ export const API = `${BACKEND_URL}/api`;
 const TABS = [
   { key: "home", label: "Sovereign Home", icon: LayoutGrid },
   { key: "bounty", label: "Bug Bounty", icon: ShieldAlert },
+  { key: "council", label: "Council", icon: Crown },
   { key: "askai", label: "Ask All AIs", icon: MessagesSquare },
   { key: "analyzer", label: "File Analyzer", icon: Boxes },
   { key: "self", label: "Self-Directive", icon: Wand2 },
@@ -2667,6 +2930,7 @@ function App() {
       <main className="stage">
         {tab === "home" && <SovereignHome />}
         {tab === "bounty" && <BugBounty />}
+        {tab === "council" && <Council />}
         {tab === "askai" && <AskAllAIs />}
         {tab === "analyzer" && <FileAnalyzer />}
         {tab === "self" && <SelfDirective />}
@@ -3436,6 +3700,56 @@ body {
   .fa-grid, .sd-grid { grid-template-columns: 1fr; }
 }
 
+
+/* ===== Council of Weavers ===== */
+.cw-wrap { display: flex; flex-direction: column; gap: 16px; }
+.cw-wrap .chr-hero-left p b { color: var(--text); }
+.cw-wrap .chr-hero-left p code { font-family: ui-monospace, monospace; font-size: 12px; color: var(--cyan); background: rgba(4,6,16,0.5); padding: 1px 6px; border-radius: 6px; }
+.cw-honesty { display: flex; align-items: flex-start; gap: 8px; font-size: 12px; line-height: 1.5; color: var(--muted); background: rgba(245,196,81,0.06); border: 1px solid rgba(245,196,81,0.25); border-radius: 11px; padding: 10px 13px; }
+.cw-honesty svg { color: var(--gold); flex-shrink: 0; margin-top: 2px; }
+.cw-presets { display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: 10px; margin-top: 14px; }
+.cw-preset { display: flex; align-items: flex-start; gap: 10px; text-align: left; background: rgba(255,255,255,0.03); border: 1px solid var(--border); border-radius: 12px; padding: 12px 14px; color: var(--text); cursor: pointer; transition: border-color .18s, background .18s, transform .12s; }
+.cw-preset svg { color: var(--violet2); flex-shrink: 0; margin-top: 2px; }
+.cw-preset span { display: flex; flex-direction: column; gap: 3px; }
+.cw-preset b { font-size: 13.5px; }
+.cw-preset small { font-size: 11.5px; line-height: 1.4; color: var(--muted); }
+.cw-preset:hover { border-color: var(--border-lit); transform: translateY(-1px); }
+.cw-preset.active { border-color: var(--violet); background: rgba(139,124,255,0.12); box-shadow: 0 0 0 1px rgba(139,124,255,0.3) inset; }
+.cw-preset:focus-visible { outline: 2px solid var(--cyan); outline-offset: 2px; }
+.cw-textarea { width: 100%; margin-top: 14px; box-sizing: border-box; resize: vertical; font-family: ui-monospace, monospace; font-size: 12.5px; line-height: 1.55; color: var(--text); background: rgba(4,6,16,0.55); border: 1px solid var(--border); border-radius: 12px; padding: 12px 14px; }
+.cw-textarea:focus { outline: none; border-color: var(--border-lit); }
+.cw-row { display: flex; gap: 10px; margin-top: 12px; flex-wrap: wrap; align-items: center; }
+.cw-input { font-size: 12.5px; color: var(--text); background: rgba(4,6,16,0.55); border: 1px solid var(--border); border-radius: 10px; padding: 10px 12px; min-width: 200px; }
+.cw-input.grow { flex: 1; min-width: 240px; }
+.cw-input:focus { outline: none; border-color: var(--border-lit); }
+.cw-running { display: flex; gap: 14px; align-items: center; margin-top: 14px; font-size: 12.5px; font-weight: 600; color: var(--violet2); }
+.cw-arrow { color: var(--muted); font-weight: 500; }
+.cw-result { background: var(--panel); border: 1px solid var(--border-lit); border-radius: 16px; padding: 20px; }
+.cw-result-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 14px; flex-wrap: wrap; }
+.cw-meta { margin-top: 6px; font-size: 11.5px; color: var(--dim); }
+.cw-veto { margin-left: 10px; font-size: 10.5px; letter-spacing: .08em; color: #ff7a90; background: rgba(255,84,112,0.12); border: 1px solid rgba(255,84,112,0.4); border-radius: 6px; padding: 3px 8px; }
+.cw-grid { display: grid; grid-template-columns: minmax(0, 1.7fr) minmax(280px, 1fr); gap: 18px; margin-top: 16px; }
+.cw-directive { min-width: 0; font-size: 13.5px; line-height: 1.65; }
+.cw-side { display: flex; flex-direction: column; gap: 10px; min-width: 0; }
+.cw-side-title { display: flex; align-items: center; gap: 7px; font-size: 12px; font-weight: 700; color: var(--violet2); text-transform: uppercase; letter-spacing: .06em; margin-top: 4px; }
+.cw-side-title small { font-weight: 500; text-transform: none; letter-spacing: 0; color: var(--dim); }
+.cw-signals { font-size: 12.5px; line-height: 1.55; background: rgba(79,209,255,0.05); border: 1px solid var(--border); border-radius: 12px; padding: 12px 14px; }
+.cw-weaver { border: 1px solid var(--border); border-radius: 11px; background: rgba(4,6,16,0.4); overflow: hidden; }
+.cw-weaver.down { opacity: .55; }
+.cw-weaver-h { width: 100%; display: flex; align-items: center; gap: 8px; text-align: left; background: transparent; border: 0; color: var(--text); padding: 10px 12px; cursor: pointer; font-size: 12.5px; }
+.cw-weaver-h:hover { background: rgba(139,124,255,0.08); }
+.cw-weaver-h svg { color: var(--violet2); flex-shrink: 0; transition: transform .18s; }
+.cw-weaver-h svg.rot { transform: rotate(90deg); }
+.cw-weaver-h span { color: var(--muted); font-size: 11.5px; }
+.cw-weaver-h em { margin-left: auto; font-style: normal; font-size: 10.5px; color: var(--dim); white-space: nowrap; }
+.cw-weaver-b { padding: 4px 14px 14px; font-size: 12.5px; line-height: 1.55; border-top: 1px solid var(--border); }
+.cw-history { display: flex; flex-direction: column; gap: 8px; margin-top: 12px; }
+.cw-hrow { display: flex; align-items: center; gap: 8px; }
+.cw-hmain { flex: 1; min-width: 0; display: flex; align-items: center; gap: 10px; text-align: left; background: rgba(255,255,255,0.02); border: 1px solid var(--border); border-radius: 10px; padding: 9px 12px; color: var(--text); cursor: pointer; transition: border-color .16s, background .16s; }
+.cw-hmain:hover { border-color: var(--border-lit); background: rgba(139,124,255,0.06); }
+.cw-htitle { flex: 1; min-width: 0; font-size: 12.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.cw-hmeta { font-size: 11px; color: var(--dim); white-space: nowrap; }
+@media (max-width: 900px) { .cw-grid { grid-template-columns: 1fr; } }
 
 ```
 
@@ -4800,7 +5114,7 @@ const fmtBytes = (n) => {
   return `${(n / (1024 * 1024)).toFixed(1)} MB`;
 };
 
-function Markdown({ text, onCite }) {
+export function Markdown({ text, onCite }) {
   if (!text) return null;
   const CITE = /^([A-Za-z0-9_.\/-]+\.[A-Za-z0-9]+):(\d+)(?:-(\d+))?$/;
   const inline = (t) => {
@@ -5587,5 +5901,458 @@ export default function SelfDirective() {
     </div>
   );
 }
+
+```
+
+
+### `frontend/src/components/Council.js`
+```javascript
+import React, { useCallback, useEffect, useState } from "react";
+import axios from "axios";
+import { toast } from "sonner";
+import { motion, AnimatePresence } from "framer-motion";
+import {
+  Crown, Loader2, Play, Download, History, Sparkles, ShieldAlert, Lightbulb,
+  Compass, Coins, Radar, Trash2, ChevronRight, X, Info
+} from "lucide-react";
+import { API } from "../App";
+import { Markdown } from "./FileAnalyzer";
+
+const WEAVER_ICON = { architect: Compass, shadow: ShieldAlert, muse: Lightbulb, finance: Coins };
+const PRESET_ICON = { genesis: Sparkles, hunter: Radar, foresight: Compass };
+
+const fmtDate = (iso) => {
+  try { return new Date(iso).toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" }); }
+  catch { return ""; }
+};
+
+export default function Council() {
+  const [presets, setPresets] = useState([]);
+  const [presetId, setPresetId] = useState("genesis");
+  const [challenge, setChallenge] = useState("");
+  const [challengeType, setChallengeType] = useState("product_strategy");
+  const [extra, setExtra] = useState("");
+  const [running, setRunning] = useState(false);
+  const [result, setResult] = useState(null);
+  const [history, setHistory] = useState([]);
+  const [openWeaver, setOpenWeaver] = useState(null);
+
+  const applyPreset = useCallback((p) => {
+    setPresetId(p.id);
+    setChallenge(p.challenge);
+    setChallengeType(p.challenge_type);
+    setExtra(p.additional_context || "");
+  }, []);
+
+  const loadHistory = useCallback(async () => {
+    try { const r = await axios.get(`${API}/acaso/deliberations`); setHistory(r.data); } catch { /* silent */ }
+  }, []);
+
+  useEffect(() => {
+    (async () => {
+      try {
+        const r = await axios.get(`${API}/acaso/presets`);
+        setPresets(r.data);
+        const g = r.data.find((p) => p.id === "genesis") || r.data[0];
+        if (g) applyPreset(g);
+      } catch { toast.error("Could not load council presets"); }
+      loadHistory();
+    })();
+  }, [applyPreset, loadHistory]);
+
+  const run = async () => {
+    if (challenge.trim().length < 20) { toast.error("Describe the challenge in at least 20 characters"); return; }
+    setRunning(true); setResult(null);
+    try {
+      const r = await axios.post(`${API}/acaso/deliberate`, {
+        challenge, challenge_type: challengeType, preset_id: presetId,
+        context: extra ? { additional_context: extra } : null,
+      }, { timeout: 300000 });
+      setResult(r.data);
+      toast.success(`Council resolved in ${r.data.duration_s}s`);
+      loadHistory();
+    } catch (e) {
+      toast.error(e?.response?.data?.detail || "Deliberation failed");
+    } finally { setRunning(false); }
+  };
+
+  const openPast = async (id) => {
+    try { const r = await axios.get(`${API}/acaso/deliberations/${id}`); setResult(r.data); window.scrollTo({ top: 0, behavior: "smooth" }); }
+    catch { toast.error("Could not open deliberation"); }
+  };
+
+  const removePast = async (id) => {
+    try {
+      await axios.delete(`${API}/acaso/deliberations/${id}`);
+      if (result?.id === id) setResult(null);
+      loadHistory();
+    } catch { toast.error("Delete failed"); }
+  };
+
+  const exportMd = (id) => { window.open(`${API}/acaso/deliberations/${id}/export`, "_blank"); };
+
+  return (
+    <div className="cw-wrap" data-testid="council-page">
+      <div className="chr-hero">
+        <div className="chr-hero-left">
+          <div className="chr-title"><Crown size={18} /> Council of Weavers</div>
+          <p>
+            Four weavers on four models argue the challenge in parallel - <b>Architect</b> (thesis), <b>Shadow</b> (risk, can veto),
+            <b> Muse</b> (contrarian + weak signals), <b>Finance</b> (numbers). The <b>Meta-Weaver</b> reconciles them into a
+            Sovereign Directive with invalidation conditions. This is the live <code>/api/acaso/deliberate</code> engine
+            the Genesis Engine and Sovereign Hunter scripts call.
+          </p>
+        </div>
+        <div className="chr-hero-stats">
+          <div className="chr-stat"><span className="v">{history.length}</span><span className="l">Deliberations</span></div>
+          <div className="chr-stat gold"><span className="v">4+1</span><span className="l">Weavers</span></div>
+        </div>
+      </div>
+
+      <div className="cw-honesty" data-testid="council-honesty">
+        <Info size={14} /> Outputs are multi-model reasoning only. No live market feeds, on-chain data or lead databases are connected;
+        "weak signals" are inferred, not measured. Not financial advice - the operator owns every decision.
+      </div>
+
+      <div className="fa-console">
+        <div className="fa-head"><Sparkles size={16} /> Directive <em>pick a preset, edit freely, then convene</em></div>
+        <div className="cw-presets">
+          {presets.map((p) => {
+            const Icon = PRESET_ICON[p.id] || Sparkles;
+            return (
+              <button key={p.id} data-testid={`preset-${p.id}`}
+                className={presetId === p.id ? "cw-preset active" : "cw-preset"} onClick={() => applyPreset(p)}>
+                <Icon size={15} />
+                <span><b>{p.name}</b><small>{p.tagline}</small></span>
+              </button>
+            );
+          })}
+          <button data-testid="preset-custom" className={presetId === "custom" ? "cw-preset active" : "cw-preset"}
+            onClick={() => { setPresetId("custom"); setChallenge(""); setChallengeType("general"); setExtra(""); }}>
+            <Play size={15} /><span><b>Custom</b><small>Any challenge - strategy, launch, hire, pricing, threat.</small></span>
+          </button>
+        </div>
+
+        <textarea data-testid="council-challenge" className="cw-textarea" rows={12} value={challenge}
+          onChange={(e) => setChallenge(e.target.value)} placeholder="State the challenge the council must resolve..." />
+        <div className="cw-row">
+          <input data-testid="council-type" className="cw-input" value={challengeType} onChange={(e) => setChallengeType(e.target.value)}
+            placeholder="challenge_type (e.g. product_strategy)" />
+          <input data-testid="council-context" className="cw-input grow" value={extra} onChange={(e) => setExtra(e.target.value)}
+            placeholder="Operator context (optional)" />
+          <button data-testid="council-run" className="fa-btn primary" onClick={run} disabled={running}>
+            {running ? <Loader2 className="spin" size={15} /> : <Crown size={15} />} {running ? "Council in session..." : "Convene Council"}
+          </button>
+        </div>
+        {running && (
+          <div className="cw-running" data-testid="council-running">
+            {["Architect", "Shadow", "Muse", "Finance"].map((n, i) => (
+              <motion.span key={n} initial={{ opacity: 0.3 }} animate={{ opacity: [0.3, 1, 0.3] }} transition={{ repeat: Infinity, duration: 1.6, delay: i * 0.3 }}>{n}</motion.span>
+            ))}
+            <span className="cw-arrow">→ Meta-Weaver</span>
+          </div>
+        )}
+      </div>
+
+      <AnimatePresence>
+        {result && (
+          <motion.div className="cw-result" initial={{ opacity: 0, y: 14 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0 }} data-testid="council-result">
+            <div className="cw-result-head">
+              <div>
+                <div className="fa-head"><Crown size={16} /> Sovereign Directive
+                  {result.shadow_veto && <span className="cw-veto" data-testid="shadow-veto">SHADOW VETO</span>}
+                </div>
+                <div className="cw-meta">
+                  {fmtDate(result.timestamp)} · {result.duration_s}s · {result.challenge_type} · Council: {(result.council_consulted || []).join(", ")}
+                </div>
+              </div>
+              <button className="fa-btn" data-testid="council-export" onClick={() => exportMd(result.id)}><Download size={14} /> Export .md</button>
+            </div>
+
+            <div className="cw-grid">
+              <div className="cw-directive"><Markdown text={result.sovereign_directive} /></div>
+              <aside className="cw-side">
+                <div className="cw-signals">
+                  <div className="cw-side-title"><Radar size={14} /> Weak signals <small>inferred</small></div>
+                  <Markdown text={result.weak_signals || "_The council did not surface distinct weak signals._"} />
+                </div>
+                <div className="cw-side-title"><History size={14} /> Weavers</div>
+                {(result.weavers || []).map((w) => {
+                  const Icon = WEAVER_ICON[w.id] || Sparkles;
+                  const open = openWeaver === w.id;
+                  return (
+                    <div key={w.id} className={`cw-weaver ${w.ok ? "" : "down"}`} data-testid={`weaver-${w.id}`}>
+                      <button className="cw-weaver-h" onClick={() => setOpenWeaver(open ? null : w.id)}>
+                        <Icon size={14} /> <b>{w.name}</b> <span>{w.role}</span>
+                        <em>{w.model_label}</em> <ChevronRight size={14} className={open ? "rot" : ""} />
+                      </button>
+                      {open && <div className="cw-weaver-b"><Markdown text={w.analysis} /></div>}
+                    </div>
+                  );
+                })}
+              </aside>
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      <div className="fa-console">
+        <div className="fa-head"><History size={16} /> Past deliberations <em>{history.length} stored</em></div>
+        {history.length === 0 ? (
+          <div className="attach-empty" data-testid="council-history-empty">No deliberations yet. Convene the council above - every session is journaled here.</div>
+        ) : (
+          <div className="cw-history" data-testid="council-history">
+            {history.map((h) => (
+              <div key={h.id} className="cw-hrow">
+                <button className="cw-hmain" onClick={() => openPast(h.id)} data-testid={`history-${h.id}`}>
+                  <span className={`bb-tag`}>{h.preset_id || "custom"}</span>
+                  <span className="cw-htitle">{h.title}</span>
+                  <span className="cw-hmeta">{fmtDate(h.timestamp)} · {h.duration_s}s{h.shadow_veto ? " · VETO" : ""}</span>
+                </button>
+                <button className="attach-btn" title="Export" onClick={() => exportMd(h.id)}><Download size={13} /></button>
+                <button className="attach-btn danger" title="Delete" onClick={() => removePast(h.id)}><Trash2 size={13} /></button>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
+      {openWeaver && !result && <button className="cw-close" onClick={() => setOpenWeaver(null)}><X size={14} /></button>}
+    </div>
+  );
+}
+
+```
+
+
+### `handoff/scripts/acaso_client.py`
+```python
+"""
+ACASO Omniverse - shared client for the runner scripts.
+
+Set ACASO_URL to your deployment, e.g.
+    export ACASO_URL=https://contest-ready-app.preview.emergentagent.com
+Defaults to the hosted preview. All routes live under /api.
+"""
+import os, sys
+from datetime import datetime
+import httpx
+
+ACASO_URL = os.environ.get("ACASO_URL", "https://contest-ready-app.preview.emergentagent.com").rstrip("/")
+API = f"{ACASO_URL}/api"
+
+
+def check_online() -> bool:
+    try:
+        return httpx.get(f"{API}/acaso/presets", timeout=10.0).status_code == 200
+    except Exception:
+        return False
+
+
+def deliberate(challenge: str, challenge_type: str, additional_context: str = "", preset_id: str | None = None) -> dict:
+    with httpx.Client(timeout=320.0) as client:
+        r = client.post(f"{API}/acaso/deliberate", json={
+            "challenge": challenge,
+            "challenge_type": challenge_type,
+            "preset_id": preset_id,
+            "context": {"additional_context": additional_context} if additional_context else None,
+        })
+        r.raise_for_status()
+        return r.json()
+
+
+def fetch_preset(preset_id: str) -> dict:
+    r = httpx.get(f"{API}/acaso/presets", timeout=10.0)
+    r.raise_for_status()
+    for p in r.json():
+        if p["id"] == preset_id:
+            return p
+    raise SystemExit(f"preset {preset_id!r} not found on server")
+
+
+def write_report(result: dict, title: str, out_file: str, extra_sections: str = "") -> str:
+    council = result.get("council_consulted", [])
+    md = f"""# {title}
+Generated: {result.get('timestamp', datetime.now().isoformat())[:19]} | Deliberation: {result.get('deliberation_id')}
+Council: {', '.join(council) if council else 'n/a'} | Shadow veto: {'YES' if result.get('shadow_veto') else 'no'}
+
+> {result.get('data_provenance', '')}
+
+---
+## WEAK SIGNALS (inferred)
+{result.get('weak_signals') or '_none_'}
+
+---
+{result.get('sovereign_directive', '')}
+
+---
+## INTERNAL WEAVERS ANALYSIS
+{result.get('weavers_synthesis', '')}
+{extra_sections}
+---
+*ACASO Omniverse - Council of Weavers - (c) 2026 Alexander Mojica / MediaLinxS*
+"""
+    with open(out_file, "w", encoding="utf-8") as f:
+        f.write(md)
+    return out_file
+
+
+def require_online():
+    print(f"Checking ACASO at {ACASO_URL} ...")
+    if not check_online():
+        print("ACASO is not reachable. Set ACASO_URL to your running deployment.")
+        sys.exit(1)
+    print("ACASO Omniverse online.\n")
+
+```
+
+
+### `handoff/scripts/script_01_genesis_engine.py`
+```python
+"""
+ACASO KING - SCRIPT 01: THE GENESIS ENGINE  (ACASO Omniverse edition)
+One-Of-A-Kind Product / Service / Invention Generator.
+
+Calls the live Council of Weavers at POST /api/acaso/deliberate using the server-side
+'genesis' preset (edit FOUNDER_OVERRIDE below to customise the founder profile).
+
+HOW TO RUN:
+    pip install httpx
+    export ACASO_URL=https://<your-acaso-host>
+    python script_01_genesis_engine.py
+"""
+import sys
+from datetime import datetime
+from acaso_client import require_online, fetch_preset, deliberate, write_report
+
+FOUNDER_OVERRIDE = ""  # optional: paste a new 'Founder Profile' block to replace the preset's
+
+
+def main():
+    print("ACASO GENESIS ENGINE - INVENTION DISCOVERY")
+    require_online()
+    preset = fetch_preset("genesis")
+    challenge = preset["challenge"]
+    if FOUNDER_OVERRIDE.strip():
+        head, _, tail = challenge.partition("MISSION:")
+        challenge = f"GENESIS DIRECTIVE - INVENTION MANDATE\n\nFounder Profile:\n{FOUNDER_OVERRIDE.strip()}\n\nMISSION:{tail}"
+    print("Convening Architect / Shadow / Muse / Finance -> Meta-Weaver (60-180s)...\n")
+    try:
+        result = deliberate(challenge, preset["challenge_type"], preset.get("additional_context", ""), preset_id="genesis")
+    except Exception as e:
+        print(f"Error: {e}")
+        sys.exit(1)
+    print("=" * 65)
+    print(result.get("sovereign_directive", ""))
+    print("=" * 65)
+    out = write_report(result, "ACASO GENESIS ENGINE - INVENTION BRIEF",
+                       f"genesis_invention_{datetime.now().strftime('%Y%m%d_%H%M%S')}.md")
+    print(f"\nInvention brief saved: {out}")
+    print(f"Also stored server-side: {result.get('deliberation_id')} (open the Council tab -> Past deliberations)")
+
+
+if __name__ == "__main__":
+    main()
+
+```
+
+
+### `handoff/scripts/script_03_sovereign_hunter.py`
+```python
+"""
+ACASO KING - SCRIPT 03: THE SOVEREIGN HUNTER  (ACASO Omniverse edition)
+Client / Contract / Job Profile Builder + Outreach Engine.
+
+EDIT HUNT_MODE, YOUR_OFFER, TARGET_MARKET below, then:
+    pip install httpx
+    export ACASO_URL=https://<your-acaso-host>
+    python script_03_sovereign_hunter.py
+"""
+import sys
+from datetime import datetime
+from acaso_client import require_online, deliberate, write_report
+
+HUNT_MODE = "clients"  # "clients" | "contracts" | "jobs"
+
+YOUR_OFFER = """
+Product/Service: OmniTrackX - AI-powered logistics SaaS for courier delivery,
+furniture moving, and office relocation companies.
+- Real-time job tracking with live map
+- AI-powered damage reports and claim filing
+- Client-facing dashboard with transparent status updates
+- QR + condition-based inventory tracking
+Pricing: Starter $149/mo | Growth $349/mo | Pro $749/mo | Enterprise custom
+Market: Initially Boston, MA
+Founder: Alexander Mojica / MediaLinxS
+"""
+
+TARGET_MARKET = """
+Boston, MA area logistics and moving companies: last-mile couriers (10-50 drivers),
+furniture movers and storage, office relocation specialists, B2B delivery for
+medical/legal/tech, companies still on spreadsheets, paper, or basic apps like Track-POD.
+"""
+
+HUNT_LABEL = {"clients": "high-value clients", "contracts": "lucrative contracts or RFPs",
+              "jobs": "premium job opportunities or partnerships"}
+
+CHALLENGE = f"""SOVEREIGN HUNTER DIRECTIVE - TARGET ACQUISITION
+
+Hunt Mode: {HUNT_MODE.upper()} - Find 3 {HUNT_LABEL.get(HUNT_MODE, 'targets')}
+
+What is being offered:
+{YOUR_OFFER}
+Target market:
+{TARGET_MARKET}
+PHASE 1 - TARGET IDENTIFICATION: 3 specific, realistic target categories. For each:
+### TARGET [N] - [Category]
+**Profile:** type, size, pain points the offer solves, decision maker, where they gather, trigger events, objections + neutralizers.
+**Why they need this specifically:** 2-3 sentences.
+**Credibility signals that will resonate.**
+
+PHASE 2 - OUTREACH GENERATION (per target): Version A cold email (subject + body <150 words); Version B LinkedIn DM (<80 words); Version C follow-up (day 3).
+
+PHASE 3 - SEQUENCE STRATEGY (per target): Day 1 / Day 3 / Day 7 / Day 14.
+
+PHASE 4 - EXECUTION TOOLKIT: search strings, associations, directories, events; the single highest-leverage near-zero-cost action for TODAY.
+
+## SOVEREIGN VERDICT
+Which target is the highest-probability first close and exactly what to send tomorrow morning.
+"""
+
+CHECKLIST = """
+---
+## NEXT ACTIONS CHECKLIST
+- [ ] Review Target 1 profile and send Version A outreach
+- [ ] Review Target 2 profile and send Version A outreach
+- [ ] Review Target 3 profile and send Version A outreach
+- [ ] Calendar: Day 3 follow-ups
+- [ ] Calendar: Day 7 pattern interrupt
+- [ ] Calendar: Day 14 breakup messages
+"""
+
+
+def main():
+    print(f"ACASO SOVEREIGN HUNTER - hunt mode: {HUNT_MODE.upper()}")
+    require_online()
+    print("Profiling targets and drafting outreach via the Council (60-180s)...\n")
+    try:
+        result = deliberate(CHALLENGE, "market_entry",
+                            f"Sovereign Hunter mode - {HUNT_MODE}. Identify 3 real, specific, high-value targets. "
+                            "Outreach must be specific, human, conversion-optimized. No generic templates.",
+                            preset_id="hunter")
+    except Exception as e:
+        print(f"Error: {e}")
+        sys.exit(1)
+    print("=" * 65)
+    print(result.get("sovereign_directive", ""))
+    print("=" * 65)
+    out = write_report(result, f"ACASO SOVEREIGN HUNTER - TARGET ACQUISITION PACKAGE ({HUNT_MODE.upper()})",
+                       f"sovereign_hunter_{datetime.now().strftime('%Y%m%d_%H%M%S')}.md", CHECKLIST)
+    print(f"\nOutreach package saved: {out}")
+    print(f"Also stored server-side: {result.get('deliberation_id')}")
+
+
+if __name__ == "__main__":
+    main()
 
 ```

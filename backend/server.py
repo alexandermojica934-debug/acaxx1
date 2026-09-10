@@ -1868,6 +1868,263 @@ async def export_fileset(fsid: str):
     return Response(content=md, media_type="text/markdown", headers=headers)
 
 
+# ---------------- ACASO Deliberation Engine: Council of Weavers ----------------
+# Real multi-model council (Architect / Shadow / Muse / Finance) + Meta-Weaver synthesis.
+# This is the endpoint the ACASO King runner scripts (Genesis Engine, Sovereign Hunter) call.
+# HONESTY: every output here is LLM reasoning. No live market feeds, order books, on-chain
+# data or lead databases are connected. "weak_signals" are model-inferred, not measured.
+
+WEAVERS = [
+    {
+        "id": "architect", "name": "Architect", "role": "Thesis / Bull Case",
+        "failover": ["gemini", "openai", "anthropic"],
+        "system": ("You are the ARCHITECT weaver of the ACASO Council. You build the strongest constructive thesis: "
+                   "the opportunity, the mechanism, the setup, and why it works. Concrete, specific, structured. "
+                   "Never use certainty language ('will'); use probabilities and scenarios. 350-500 words."),
+    },
+    {
+        "id": "shadow", "name": "Shadow", "role": "Risk Officer (veto power)",
+        "failover": ["anthropic", "openai", "gemini"],
+        "system": ("You are the SHADOW weaver of the ACASO Council - the risk officer and the most important voice. "
+                   "Stress-test the challenge: what could go wrong, what the operator is not seeing, failure modes, "
+                   "downside sizing, invalidation conditions, regulatory/legal exposure, and survival-first constraints. "
+                   "You may VETO with 'SHADOW VETO:' if the idea is unsurvivable. 300-450 words."),
+    },
+    {
+        "id": "muse", "name": "Muse", "role": "Contrarian / Asymmetry",
+        "failover": ["openai", "anthropic", "gemini"],
+        "system": ("You are the MUSE weaver of the ACASO Council - the contrarian. Find the non-obvious angle, the "
+                   "crowded assumption to bet against, the convergence nobody combined, the asymmetric expression. "
+                   "Also list 3-6 WEAK SIGNALS: early, under-noticed indicators relevant to this challenge (label them "
+                   "clearly as inferred from reasoning, not from live data). 300-450 words."),
+    },
+    {
+        "id": "finance", "name": "Finance", "role": "Unit Economics / Capital",
+        "failover": ["openai", "gemini", "anthropic"],
+        "system": ("You are the FINANCE weaver of the ACASO Council. Translate the challenge into numbers: revenue "
+                   "model, pricing, CAC/LTV or position sizing, capital required, break-even, and conservative / "
+                   "realistic / optimistic scenarios with explicit assumptions. 300-450 words."),
+    },
+]
+
+META_WEAVER_SYSTEM = (
+    "You are the META-WEAVER, allocator and synthesizer of the ACASO Council of Weavers (Architect, Shadow, Muse, "
+    "Finance). You weigh each weaver's analysis, resolve disagreements explicitly, and produce the SOVEREIGN DIRECTIVE. "
+    "Rules: risk-first (honor a Shadow veto if present), no certainty language, every recommendation ships with its "
+    "invalidation condition. Follow the DELIVER format requested in the challenge exactly, in Markdown. "
+    "After the directive, on its own line write exactly ===WEAK_SIGNALS=== and then 3-6 bullet weak signals "
+    "(state they are inferred, not measured). Do not add anything after the weak signals."
+)
+
+DELIBERATION_PRESETS = [
+    {
+        "id": "genesis", "name": "Genesis Engine", "challenge_type": "product_strategy",
+        "tagline": "Invent something that does not exist yet - buildable, defensible, revenue in 90 days.",
+        "additional_context": "Invention mandate. Generate something genuinely new. Not an iteration.",
+        "challenge": (
+            "GENESIS DIRECTIVE - INVENTION MANDATE\n\n"
+            "Founder Profile:\nFounder: Alexander Mojica\nCompanies: MediaLinxS (sovereign AI platform), OmniTrackX (logistics SaaS, Boston)\n"
+            "Skills: Product design, AI architecture, branding, full-stack go-to-market\n"
+            "Infrastructure: ACASO King sovereign AI, FastAPI, MongoDB, multi-model AI council\n"
+            "Budget: Lean startup. 1-2 developers. Sub-$50K build capacity.\n"
+            "Goal: Discover and launch something the world urgently needs that doesn't exist yet.\n\n"
+            "MISSION:\nInvent something that does not yet exist. Not an iteration - a creation. The world needs it RIGHT NOW in 2026. "
+            "Alexander can build it. It can generate revenue within 90 days of launch.\n\n"
+            "Search these dimensions for the gap:\n1. PAIN POINTS technology has not solved\n2. REGULATORY GAPS - new 2024-2026 laws that created problems nobody built solutions for\n"
+            "3. BEHAVIORAL SHIFTS - post-COVID, remote work, AI proliferation, economic anxiety\n4. CONVERGENCE OPPORTUNITIES - two existing technologies nobody has combined yet\n"
+            "5. SILENT SUFFERING - groups experiencing a real problem with no words for it yet\n\n"
+            "CONSTRAINTS:\n- Buildable by a lean team in under 90 days for under $50,000\n- Revenue-generating within 90 days of launch\n"
+            "- Defensible moat: network effect, data flywheel, proprietary method, or regulatory advantage\n- AI is the foundation, not a feature\n"
+            "- Alexander's existing infrastructure gives an unfair build advantage\n\n"
+            "DELIVER:\n## THE INVENTION\n## THE WORLD PROBLEM IT SOLVES\n## HOW IT WORKS\n## BUSINESS MODEL\n## UNFAIR ADVANTAGES\n"
+            "## THE MOAT\n## 90-DAY LAUNCH PLAN\n## FINANCIAL PROJECTION\n## SOVEREIGN VERDICT"
+        ),
+    },
+    {
+        "id": "hunter", "name": "Sovereign Hunter", "challenge_type": "market_entry",
+        "tagline": "Profile 3 high-value targets and generate bespoke outreach sequences.",
+        "additional_context": ("Sovereign Hunter mode - clients. Identify 3 real, specific, high-value targets. "
+                               "Generate outreach that is specific, human, and conversion-optimized. No generic templates."),
+        "challenge": (
+            "SOVEREIGN HUNTER DIRECTIVE - TARGET ACQUISITION\n\nHunt Mode: CLIENTS - Find 3 high-value clients\n\n"
+            "What is being offered:\nProduct/Service: OmniTrackX - AI-powered logistics SaaS for courier delivery, furniture moving, and office relocation companies.\n"
+            "Core value proposition:\n- Real-time job tracking with live map\n- AI-powered damage reports and claim filing\n- Client-facing dashboard with transparent status updates\n"
+            "- QR + condition-based inventory tracking\n- Competitive with Track-POD + Routific + Supermove combined at lower cost\n"
+            "Pricing: Starter $149/mo | Growth $349/mo | Pro $749/mo | Enterprise custom\nMarket: Initially Boston, MA\n\n"
+            "Target market:\nBoston, MA area logistics and moving companies: last-mile couriers (10-50 drivers), furniture movers and storage, "
+            "office relocation specialists, B2B delivery for medical/legal/tech, companies on spreadsheets/paper/basic apps.\n\n"
+            "PHASE 1 - TARGET IDENTIFICATION: 3 specific, realistic target categories. For each: Profile (type, size, pain points, decision maker, "
+            "where they gather, trigger events, objections + neutralizers), Why they need this specifically, Credibility signals.\n\n"
+            "PHASE 2 - OUTREACH GENERATION: per target - Version A cold email (subject + <150 words), Version B LinkedIn DM (<80 words), Version C follow-up.\n\n"
+            "PHASE 3 - SEQUENCE STRATEGY: Day 1 / Day 3 / Day 7 / Day 14 per target.\n\n"
+            "PHASE 4 - EXECUTION TOOLKIT: search strings, associations, events; the single highest-leverage zero-cost action for TODAY.\n\n"
+            "## SOVEREIGN VERDICT\nWhich target is the highest-probability first close and exactly what to send them tomorrow morning."
+        ),
+    },
+    {
+        "id": "foresight", "name": "Foresight Thesis", "challenge_type": "market_foresight",
+        "tagline": "Regime read + risk-defined thesis + invalidation. Reasoning only - no live market data connected.",
+        "additional_context": ("Foresight Engine doctrine: Shadow owns risk and may veto. Output is setup + risk-defined expression + "
+                               "invalidation condition, never a price target or 'buy'. Not financial advice. No live data is connected: "
+                               "state clearly what data would be required to confirm each claim."),
+        "challenge": (
+            "FORESIGHT DIRECTIVE - REGIME & THESIS\n\nAsset / market: [EDIT ME - e.g. BTC/USD, a sector, an equity]\n"
+            "Operator constraints: [EDIT ME - capital at risk, time horizon, max drawdown tolerated]\n\n"
+            "DELIVER:\n## REGIME READ\n(trending / mean-reverting / high-vol / risk-on-off / illiquid - with confidence band and what would change it)\n"
+            "## NOWCAST DIVERGENCE\n(where perceived fair state may diverge from price; the half-life of that gap; data needed to confirm)\n"
+            "## THESIS (Architect)\n## RISK EXPRESSION (Shadow)\n(size cap, stop, tail hedge, slippage assumption)\n## CONTRARIAN VIEW (Muse)\n"
+            "## INVALIDATION CONDITION\n(the exact observable that kills the thesis)\n## CHRONICLE ENTRY\n(journal-ready summary: reasoning, regime, size, invalidation)\n"
+            "## SOVEREIGN VERDICT"
+        ),
+    },
+]
+
+class DeliberateRequest(BaseModel):
+    challenge: str
+    challenge_type: Optional[str] = "general"
+    context: Optional[dict] = None
+    preset_id: Optional[str] = None
+
+def _split_weak_signals(text: str):
+    marker = "===WEAK_SIGNALS==="
+    if marker in text:
+        directive, ws = text.split(marker, 1)
+        return directive.strip(), ws.strip()
+    return text.strip(), ""
+
+@api_router.get("/acaso/presets")
+async def acaso_presets():
+    return DELIBERATION_PRESETS
+
+@api_router.post("/acaso/deliberate")
+async def acaso_deliberate(req: DeliberateRequest):
+    challenge = (req.challenge or "").strip()
+    if len(challenge) < 20:
+        raise HTTPException(400, "challenge must be at least 20 characters")
+    if len(challenge) > 20000:
+        raise HTTPException(400, "challenge too long (max 20000 chars)")
+    extra = ""
+    if req.context and isinstance(req.context, dict):
+        extra = str(req.context.get("additional_context") or "").strip()
+    did = str(uuid.uuid4())
+    started = datetime.now(timezone.utc)
+
+    weaver_prompt = (
+        f"CHALLENGE TYPE: {req.challenge_type or 'general'}\n"
+        + (f"OPERATOR CONTEXT: {extra}\n" if extra else "")
+        + f"\nCHALLENGE:\n{challenge}\n\nDeliver your analysis in your role. Markdown allowed."
+    )
+
+    async def run_weaver(w):
+        try:
+            ans, used, label = await llm_call_failover(w["system"], weaver_prompt, w["failover"], session=f"{did}-{w['id']}")
+            return {"id": w["id"], "name": w["name"], "role": w["role"], "provider": used,
+                    "model_label": label, "analysis": ans.strip(), "ok": True}
+        except Exception as e:
+            logger.error(f"weaver {w['id']} failed: {e}")
+            return {"id": w["id"], "name": w["name"], "role": w["role"], "provider": None,
+                    "model_label": "—", "analysis": f"Weaver unreachable: {e}", "ok": False}
+
+    weavers = await asyncio.gather(*[run_weaver(w) for w in WEAVERS])
+    ok = [w for w in weavers if w["ok"]]
+    if not ok:
+        raise HTTPException(502, "All weavers failed to respond")
+
+    synthesis_input = "\n\n".join([f"### [{w['name']} · {w['role']} · {w['model_label']}]\n{w['analysis']}" for w in ok])
+    meta_prompt = (
+        f"CHALLENGE TYPE: {req.challenge_type or 'general'}\n"
+        + (f"OPERATOR CONTEXT: {extra}\n" if extra else "")
+        + f"\nORIGINAL CHALLENGE:\n{challenge}\n\nCOUNCIL ANALYSES:\n{synthesis_input}\n\n"
+        "Now produce the SOVEREIGN DIRECTIVE (then ===WEAK_SIGNALS=== and the bullets)."
+    )
+    try:
+        meta_text, meta_used, meta_label = await llm_call_failover(
+            META_WEAVER_SYSTEM, meta_prompt, ["openai", "anthropic", "gemini"], session=f"{did}-meta")
+    except Exception as e:
+        raise HTTPException(502, f"Meta-Weaver synthesis failed: {e}")
+
+    directive, weak_signals = _split_weak_signals(meta_text)
+    if not weak_signals:
+        # fall back to Muse's own weak-signal section if the meta-weaver skipped the marker
+        muse = next((w for w in ok if w["id"] == "muse"), None)
+        if muse and "WEAK SIGNAL" in muse["analysis"].upper():
+            idx = muse["analysis"].upper().find("WEAK SIGNAL")
+            weak_signals = muse["analysis"][idx:].strip()[:2500]
+
+    council_labels = sorted({w["model_label"] for w in ok} | {meta_label})
+    shadow = next((w for w in ok if w["id"] == "shadow"), None)
+    vetoed = bool(shadow and "SHADOW VETO" in shadow["analysis"].upper())
+    finished = datetime.now(timezone.utc)
+
+    doc = {
+        "id": did,
+        "deliberation_id": did,
+        "timestamp": finished.isoformat(),
+        "created_at": finished.isoformat(),
+        "duration_s": round((finished - started).total_seconds(), 1),
+        "challenge_type": req.challenge_type or "general",
+        "preset_id": req.preset_id,
+        "challenge": challenge,
+        "additional_context": extra,
+        "weavers": weavers,
+        "weavers_synthesis": synthesis_input,
+        "meta_weaver": {"provider": meta_used, "model_label": meta_label},
+        "sovereign_directive": directive,
+        "weak_signals": weak_signals,
+        "shadow_veto": vetoed,
+        "council_consulted": council_labels,
+        "title": challenge.split("\n", 1)[0][:90],
+        "data_provenance": "LLM reasoning only. No live market feeds, on-chain data, or lead databases are connected. Not financial advice.",
+    }
+    await db.deliberations.insert_one(dict(doc))
+    return doc
+
+@api_router.get("/acaso/deliberations")
+async def list_deliberations(limit: int = Query(30, ge=1, le=200)):
+    return await db.deliberations.find(
+        {}, {"_id": 0, "weavers": 0, "weavers_synthesis": 0, "sovereign_directive": 0, "challenge": 0}
+    ).sort("created_at", -1).to_list(limit)
+
+@api_router.get("/acaso/deliberations/{did}")
+async def get_deliberation(did: str):
+    doc = await db.deliberations.find_one({"id": did}, {"_id": 0})
+    if not doc:
+        raise HTTPException(404, "Deliberation not found")
+    return doc
+
+@api_router.delete("/acaso/deliberations/{did}")
+async def delete_deliberation(did: str):
+    r = await db.deliberations.delete_one({"id": did})
+    if r.deleted_count == 0:
+        raise HTTPException(404, "Deliberation not found")
+    return {"ok": True}
+
+@api_router.get("/acaso/deliberations/{did}/export")
+async def export_deliberation(did: str):
+    d = await db.deliberations.find_one({"id": did}, {"_id": 0})
+    if not d:
+        raise HTTPException(404, "Deliberation not found")
+    preset = next((p["name"] for p in DELIBERATION_PRESETS if p["id"] == d.get("preset_id")), "Custom")
+    lines = [
+        f"# ACASO COUNCIL DELIBERATION - {preset}",
+        f"Generated: {d['timestamp'][:19]} | Deliberation: {d['id']} | Type: {d['challenge_type']}",
+        f"Council: {', '.join(d.get('council_consulted') or [])}",
+        f"Shadow veto: {'YES' if d.get('shadow_veto') else 'no'}",
+        "", f"> {d.get('data_provenance', '')}", "",
+        "---", "## WEAK SIGNALS (inferred)", d.get("weak_signals") or "_none_", "",
+        "---", d.get("sovereign_directive") or "", "",
+        "---", "## COUNCIL OF WEAVERS - INDIVIDUAL ANALYSES",
+    ]
+    for w in d.get("weavers", []):
+        lines += [f"### {w['name']} - {w['role']} ({w.get('model_label', '')})", w.get("analysis", ""), ""]
+    lines += ["---", "## ORIGINAL CHALLENGE", "```", d.get("challenge", ""), "```", "",
+              "*ACASO Omniverse - Council of Weavers Deliberation Engine*"]
+    md = "\n".join(lines)
+    safe = f"acaso-{(d.get('preset_id') or 'deliberation')}-{d['id'][:8]}"
+    return Response(content=md, media_type="text/markdown",
+                    headers={"Content-Disposition": f'attachment; filename="{safe}.md"'})
+
+
 
 
 app.include_router(api_router)

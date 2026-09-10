@@ -216,3 +216,23 @@ After Sub-Features A–C are complete and tests pass:
   - file analyzer + self-directive modules
   - updated verified-state + smoke tests
 - Ensure no secrets are included in artifacts.
+
+## Phase: Council of Weavers Deliberation Engine (Status: COMPLETED)
+Triggered by user-uploaded artifacts (Foresight Engine spec, evolving.skill, Core Engine v5 manual,
+script_01_genesis_engine.py, script_03_sovereign_hunter.py). Both scripts call POST /acaso/deliberate,
+which did not exist -> built it for real.
+- Backend (server.py): WEAVERS (Architect/Gemini, Shadow/Claude w/ veto, Muse/GPT, Finance/GPT) run in
+  parallel via llm_call_failover -> Meta-Weaver synthesis -> sovereign_directive + weak_signals
+  (===WEAK_SIGNALS=== marker, Muse fallback). Persisted in db.deliberations (UUID, UTC).
+  Routes: GET /api/acaso/presets, POST /api/acaso/deliberate, GET/DELETE /api/acaso/deliberations[/{id}],
+  GET /api/acaso/deliberations/{id}/export (.md).
+- Frontend: components/Council.js + "Council" tab (App.js), CSS .cw-* in App.css. Markdown renderer
+  exported from FileAnalyzer.js and reused.
+- Runner scripts re-targeted to /api: handoff/scripts/* (also served at /scripts/* from frontend/public).
+- Source specs kept at handoff/specs/. Handoff bundle regenerated (181 KB).
+- Verified (agent): live run 54s, 4/4 weavers ok on 3 distinct models, meta synthesis, weak signals parsed,
+  Shadow veto flagged, export headers correct, UI screenshot OK. Testing agent skipped to honor the user's
+  credit cap; direct curl + screenshot verification used instead.
+- Honesty: LLM reasoning only; no market/on-chain/lead data connected. Not implemented from the specs:
+  Foresight Layer 1-3 data ingestion/nowcast/regime ML, ElevenLabs/Whisper/ChromaDB local kiosk (v5 manual).
+- Google Drive OAuth: still connected:false - user must click Connect Google Drive in File Analyzer.

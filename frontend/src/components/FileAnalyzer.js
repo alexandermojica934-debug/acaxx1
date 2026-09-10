@@ -16,7 +16,7 @@ const fmtBytes = (n) => {
   return `${(n / (1024 * 1024)).toFixed(1)} MB`;
 };
 
-function Markdown({ text, onCite }) {
+export function Markdown({ text, onCite }) {
   if (!text) return null;
   const CITE = /^([A-Za-z0-9_.\/-]+\.[A-Za-z0-9]+):(\d+)(?:-(\d+))?$/;
   const inline = (t) => {
