@@ -1119,3 +1119,31 @@ body {
 .ax-order-price { font-weight: 700; color: var(--gold); }
 @media (max-width: 900px) { .ax-del-grid { grid-template-columns: 1fr; } }
 .cp-install { display: inline-flex; align-items: center; gap: 5px; font-size: 11px; font-weight: 700; color: #06060f; background: var(--gold); border: 0; border-radius: 999px; padding: 5px 10px; cursor: pointer; }
+
+/* ===== Auth ===== */
+.auth-checking { display: grid; place-items: center; min-height: 100vh; }
+.auth-spinner { display: flex; align-items: center; gap: 10px; font-weight: 800; letter-spacing: .1em; color: var(--violet2); animation: vcpulse 1.6s infinite; border-radius: 999px; padding: 10px 18px; }
+.auth-root { position: relative; z-index: 1; min-height: 100vh; display: grid; place-items: center; padding: 24px; }
+.auth-card { width: min(440px, 100%); background: var(--panel-solid); border: 1px solid var(--border-lit); border-radius: 20px; padding: 28px 28px 22px; box-shadow: 0 30px 80px rgba(0,0,0,0.5); }
+.auth-brand { display: flex; align-items: center; gap: 8px; font-weight: 900; font-size: 15px; letter-spacing: .12em; color: var(--gold); } .auth-brand span { color: var(--dim); font-weight: 500; letter-spacing: .04em; }
+.auth-card h1 { margin: 16px 0 6px; font-size: 24px; letter-spacing: -0.01em; }
+.auth-sub { margin: 0 0 18px; font-size: 13px; line-height: 1.55; color: var(--muted); }
+.auth-form { display: flex; flex-direction: column; gap: 12px; }
+.auth-form label { display: flex; flex-direction: column; gap: 5px; font-size: 11.5px; color: var(--muted); }
+.auth-form label > span { display: inline-flex; align-items: center; gap: 5px; }
+.auth-form .cw-input { width: 100%; box-sizing: border-box; min-width: 0; font-size: 14px; padding: 11px 13px; }
+.auth-pw { position: relative; } .auth-pw .cw-input { padding-right: 40px; }
+.auth-eye { position: absolute; right: 8px; top: 50%; transform: translateY(-50%); background: transparent; border: 0; color: var(--dim); cursor: pointer; display: grid; place-items: center; width: 28px; height: 28px; }
+.auth-hint { color: var(--dim); }
+.auth-remember { flex-direction: row !important; align-items: center; gap: 8px !important; font-size: 12px !important; color: var(--text) !important; } .auth-remember input { accent-color: var(--gold); }
+.auth-submit { margin-top: 4px; display: inline-flex; align-items: center; justify-content: center; gap: 8px; font-size: 14px; font-weight: 800; color: #06060f; background: linear-gradient(135deg, var(--gold), #f5843c); border: 0; border-radius: 12px; padding: 12px 16px; cursor: pointer; transition: transform .12s, box-shadow .18s; }
+.auth-submit:hover:not(:disabled) { transform: translateY(-1px); box-shadow: 0 8px 24px rgba(245,196,81,0.3); } .auth-submit:disabled { opacity: .6; cursor: default; }
+.auth-link { margin-top: 12px; background: none; border: 0; color: var(--cyan); font-size: 12.5px; cursor: pointer; }
+.auth-foot { margin-top: 16px; display: flex; align-items: center; gap: 6px; font-size: 11px; color: var(--dim); }
+.acct { position: relative; } .acct-btn { cursor: pointer; border: 1px solid var(--border); background: rgba(255,255,255,0.03); }
+.acct-pop { position: absolute; right: 0; top: calc(100% + 8px); width: 300px; z-index: 250; background: rgba(10,14,34,0.96); backdrop-filter: blur(14px); border: 1px solid var(--border-lit); border-radius: 14px; padding: 12px; display: flex; flex-direction: column; gap: 8px; box-shadow: 0 16px 40px rgba(0,0,0,0.5); }
+.acct-row { display: flex; align-items: center; gap: 8px; font-size: 13px; } .acct-row div { flex: 1; display: flex; flex-direction: column; } .acct-row small { color: var(--dim); font-size: 11px; } .acct-row svg { color: var(--gold); }
+.acct-meta { display: flex; align-items: center; gap: 5px; font-size: 10.5px; color: var(--dim); }
+.acct-item { display: flex; align-items: center; gap: 8px; text-align: left; font-size: 12.5px; color: var(--text); background: rgba(255,255,255,0.03); border: 1px solid var(--border); border-radius: 9px; padding: 9px 11px; cursor: pointer; }
+.acct-item:hover { border-color: var(--border-lit); } .acct-item.danger { color: #ff7a90; }
+.acct-form { display: flex; flex-direction: column; gap: 6px; } .acct-form .cw-input { width: 100%; box-sizing: border-box; min-width: 0; }

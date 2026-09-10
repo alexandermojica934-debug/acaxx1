@@ -159,7 +159,7 @@ export default function Companion({ standalone = true }) {
     setBusy(true); setStreaming("");
     setMessages((m) => [...m, { id: `u-${Date.now()}`, role: "user", content: content || "(shared screen)", had_image: !!frame, created_at: new Date().toISOString() }]);
     try {
-      const res = await fetch(`${API}/companion/chat`, { method: "POST", headers: { "Content-Type": "application/json" },
+      const res = await fetch(`${API}/companion/chat`, { method: "POST", credentials: "include", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ message: content, session_id: sessionId, image_b64: frame, share_label: frame ? shareLabel : null }) });
       if (!res.ok) throw new Error((await res.json().catch(() => ({})))?.detail || `HTTP ${res.status}`);
       const reader = res.body.getReader(); const dec = new TextDecoder(); let buf = ""; let full = ""; let label = null;

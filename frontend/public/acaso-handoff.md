@@ -1,6 +1,6 @@
 # ACASO Omniverse — Complete Handoff
 
-_Generated: 2026-09-10T04:06:26.923227+00:00_
+_Generated: 2026-09-10T04:20:16.380983+00:00_
 
 ## What this is
 A contest-ready **Directive-to-Payment Operating System** (FastAPI + React + MongoDB).
@@ -26,6 +26,7 @@ A contest-ready **Directive-to-Payment Operating System** (FastAPI + React + Mon
 - Local Node (backend/node.py + handoff/local_node/acaso_node.py, served at /local-node/*): owner runs the Python client on their PC (Windows/Linux), pairs with the Agent Bridge key; server holds an approval-gated task queue (read-only auto-approved; every write/shell/browser action must be approved in the Local Node tab); node enforces allowed roots, backs up overwritten files, soft-deletes to .acaso_trash; browser tasks drive a real headed Chrome (persistent profile) via Playwright, fill forms and STOP (awaiting_submit) until a separate browser_submit is approved; secrets written as [OWNER TYPES THIS]. LLM planner turns a goal into proposed tasks. Server research browser (headless Chromium, /api/browse/research) reads public pages: text/links/forms/screenshot + quoted answer.
 - Companion (/?mode=companion, header Companion button opens popup; components/Companion.js): voice hands-free, share window/tab/screen via getDisplayMedia, per-message frame -> POST /api/companion/chat (SSE, vision via emergentintegrations ImageContent, gpt-4o-mini -> gemini-2.5-flash). WATCH MODE: 30s glance loop with 16x16 frame-hash change filter -> POST /api/companion/watch -> speaks only for error/form/action (JSON verdict). Installable PWA: /companion.webmanifest swapped in companion mode + Install button; Local Node --companion opens Chrome --app window (separate profile) with best-effort always-on-top (Windows ctypes / Linux wmctrl). Frames never stored.
 - Apex Nexus (backend/apex.py, /api/apex/*, tab Apex Nexus): products rfp_kit ($149, from Radar opportunity or pasted RFP), prompt_library ($49, Markdown+JSON+gated API key), seo_pack ($199); POST /generate (one LLM call, [FILL] placeholders counted), deliverables export md/json, orders (pending_payment -> paid -> unlock via /api/apex/unlock/{token}; 402 until paid; refunded re-locks), gated /api/apex/library/{id}?key= requires paid order. Payments: STRIPE NOT CONNECTED (manual Mark paid) until owner supplies STRIPE_API_KEY - integrate via playbook then.
+- Owner authentication (backend/auth.py): single owner account - first POST /api/auth/register creates it, then 403; bcrypt (12 rounds); JWT in httpOnly SameSite=Lax cookie acaso_session (7d, 30d remember_me; Secure over https); password change bumps password_version -> all other sessions invalid; 8 failed logins -> 10 min lockout (423); auth_events audit. Global HTTP middleware guards every /api/* route except /api/auth/*, /api/apex/unlock/*, /api/apex/library/*, /api/oauth/drive/callback, and requests carrying a valid X-ACASO-Key (Local Node, Agent Bridge, runner scripts unchanged). JWT_SECRET lives in backend/.env. Frontend: AuthScreen gate, AccountMenu (change password / sign out), axios 401 interceptor -> sign-in.
 
 ## Tech & Integrations
 - Backend: FastAPI + Motor (MongoDB), Pydantic, UUID ids, timezone-aware UTC.
@@ -52,6 +53,8 @@ sudo supervisorctl restart backend frontend
 Hot-reload is enabled; restart only after dependency/.env changes.
 
 ## Key API Endpoints
+- `POST /api/auth/register (first only) | /api/auth/login | /api/auth/logout | /api/auth/change-password` — owner auth
+- `GET /api/auth/status | /api/auth/me | /api/auth/events` — auth state / audit
 - `POST /api/companion/chat (SSE) | /api/companion/watch | GET/DELETE /api/companion/history` — Companion vision chat + watch mode
 - `GET /api/apex/products | /api/apex/deliverables[/{id}[/export?fmt=md|json]]` — Apex catalog + deliverables
 - `POST/PATCH /api/apex/generate | /api/apex/orders[/{id}]` — generate product / order lifecycle
@@ -2872,7 +2875,15 @@ async def companion_watch(req: WatchRequest):
     return res
 
 
+# ---------------- Owner authentication (email + password, httpOnly cookie JWT) ----------------
+import auth as auth_module
+auth_module.init(db, get_or_create_key)
+api_router.include_router(auth_module.router)
+
 app.include_router(api_router)
+
+# Session guard for every /api/* route (public paths + X-ACASO-Key requests pass through; see auth.py)
+app.middleware("http")(auth_module.guard)
 
 app.add_middleware(
     CORSMiddleware,
@@ -3610,7 +3621,8 @@ code {
 
 ### `frontend/src/App.js`
 ```javascript
-import React, { useState } from "react";
+import React, { useState, useEffect, useCallback } from "react";
+import axios from "axios";
 import "./App.css";
 import { Toaster } from "sonner";
 import SovereignHome from "./components/SovereignHome";
@@ -3627,10 +3639,20 @@ import VoiceCommander from "./components/VoiceCommander";
 import LocalNode from "./components/LocalNode";
 import Companion, { openCompanionWindow } from "./components/Companion";
 import Apex from "./components/Apex";
+import AuthScreen from "./components/AuthScreen";
+import AccountMenu from "./components/AccountMenu";
 import { Sparkles, LayoutGrid, MessagesSquare, BookOpen, ShieldAlert, Plug, Boxes, Wand2, Crown, Waves, Radar as RadarIcon, MonitorSmartphone, Castle, Store } from "lucide-react";
 
 const BACKEND_URL = process.env.REACT_APP_BACKEND_URL;
 export const API = `${BACKEND_URL}/api`;
+axios.defaults.withCredentials = true;
+// Any 401 from the API means the session is gone -> drop to the sign-in screen.
+axios.interceptors.response.use((r) => r, (err) => {
+  if (err?.response?.status === 401 && !String(err.config?.url || "").includes("/auth/")) {
+    window.dispatchEvent(new CustomEvent("acaso:unauthorized"));
+  }
+  return Promise.reject(err);
+});
 
 const TABS = [
   { key: "home", label: "Sovereign Home", icon: LayoutGrid },
@@ -3655,7 +3677,27 @@ function App() {
     } catch { return "home"; }
   });
 
+  const [user, setUser] = useState(undefined); // undefined = checking, null = signed out
+  const checkSession = useCallback(async () => {
+    try { setUser((await axios.get(`${API}/auth/me`)).data); } catch { setUser(null); }
+  }, []);
+  useEffect(() => { checkSession(); }, [checkSession]);
+  useEffect(() => {
+    const onUnauth = () => setUser((u) => (u ? null : u));
+    window.addEventListener("acaso:unauthorized", onUnauth);
+    return () => window.removeEventListener("acaso:unauthorized", onUnauth);
+  }, []);
+  const logout = async () => { try { await axios.post(`${API}/auth/logout`); } catch { /* ignore */ } setUser(null); };
+
   const companionMode = typeof window !== "undefined" && new URLSearchParams(window.location.search).get("mode") === "companion";
+
+  if (user === undefined) {
+    return <div className="acaso-root auth-checking" data-testid="auth-checking"><Toaster position="top-center" theme="dark" richColors /><div className="auth-spinner"><Sparkles size={18} /> ACASO</div></div>;
+  }
+  if (user === null) {
+    return <div className="acaso-root"><Toaster position="top-center" theme="dark" richColors /><div className="aurora" aria-hidden /><AuthScreen onAuthed={setUser} /></div>;
+  }
+
   if (companionMode) {
     return (
       <div className="acaso-root companion-root">
@@ -3695,7 +3737,7 @@ function App() {
           })}
         </nav>
         <button className="companion-launch" onClick={openCompanionWindow} title="Open ACASO Companion in its own small window" data-testid="companion-launch"><Castle size={14} /> Companion</button>
-        <div className="owner-badge"><span className="dot" /> Owner · Sovereign</div>
+        <AccountMenu user={user} onLogout={logout} onUserChange={setUser} />
       </header>
 
       <main className="stage">
@@ -4850,6 +4892,34 @@ body {
 .ax-order-price { font-weight: 700; color: var(--gold); }
 @media (max-width: 900px) { .ax-del-grid { grid-template-columns: 1fr; } }
 .cp-install { display: inline-flex; align-items: center; gap: 5px; font-size: 11px; font-weight: 700; color: #06060f; background: var(--gold); border: 0; border-radius: 999px; padding: 5px 10px; cursor: pointer; }
+
+/* ===== Auth ===== */
+.auth-checking { display: grid; place-items: center; min-height: 100vh; }
+.auth-spinner { display: flex; align-items: center; gap: 10px; font-weight: 800; letter-spacing: .1em; color: var(--violet2); animation: vcpulse 1.6s infinite; border-radius: 999px; padding: 10px 18px; }
+.auth-root { position: relative; z-index: 1; min-height: 100vh; display: grid; place-items: center; padding: 24px; }
+.auth-card { width: min(440px, 100%); background: var(--panel-solid); border: 1px solid var(--border-lit); border-radius: 20px; padding: 28px 28px 22px; box-shadow: 0 30px 80px rgba(0,0,0,0.5); }
+.auth-brand { display: flex; align-items: center; gap: 8px; font-weight: 900; font-size: 15px; letter-spacing: .12em; color: var(--gold); } .auth-brand span { color: var(--dim); font-weight: 500; letter-spacing: .04em; }
+.auth-card h1 { margin: 16px 0 6px; font-size: 24px; letter-spacing: -0.01em; }
+.auth-sub { margin: 0 0 18px; font-size: 13px; line-height: 1.55; color: var(--muted); }
+.auth-form { display: flex; flex-direction: column; gap: 12px; }
+.auth-form label { display: flex; flex-direction: column; gap: 5px; font-size: 11.5px; color: var(--muted); }
+.auth-form label > span { display: inline-flex; align-items: center; gap: 5px; }
+.auth-form .cw-input { width: 100%; box-sizing: border-box; min-width: 0; font-size: 14px; padding: 11px 13px; }
+.auth-pw { position: relative; } .auth-pw .cw-input { padding-right: 40px; }
+.auth-eye { position: absolute; right: 8px; top: 50%; transform: translateY(-50%); background: transparent; border: 0; color: var(--dim); cursor: pointer; display: grid; place-items: center; width: 28px; height: 28px; }
+.auth-hint { color: var(--dim); }
+.auth-remember { flex-direction: row !important; align-items: center; gap: 8px !important; font-size: 12px !important; color: var(--text) !important; } .auth-remember input { accent-color: var(--gold); }
+.auth-submit { margin-top: 4px; display: inline-flex; align-items: center; justify-content: center; gap: 8px; font-size: 14px; font-weight: 800; color: #06060f; background: linear-gradient(135deg, var(--gold), #f5843c); border: 0; border-radius: 12px; padding: 12px 16px; cursor: pointer; transition: transform .12s, box-shadow .18s; }
+.auth-submit:hover:not(:disabled) { transform: translateY(-1px); box-shadow: 0 8px 24px rgba(245,196,81,0.3); } .auth-submit:disabled { opacity: .6; cursor: default; }
+.auth-link { margin-top: 12px; background: none; border: 0; color: var(--cyan); font-size: 12.5px; cursor: pointer; }
+.auth-foot { margin-top: 16px; display: flex; align-items: center; gap: 6px; font-size: 11px; color: var(--dim); }
+.acct { position: relative; } .acct-btn { cursor: pointer; border: 1px solid var(--border); background: rgba(255,255,255,0.03); }
+.acct-pop { position: absolute; right: 0; top: calc(100% + 8px); width: 300px; z-index: 250; background: rgba(10,14,34,0.96); backdrop-filter: blur(14px); border: 1px solid var(--border-lit); border-radius: 14px; padding: 12px; display: flex; flex-direction: column; gap: 8px; box-shadow: 0 16px 40px rgba(0,0,0,0.5); }
+.acct-row { display: flex; align-items: center; gap: 8px; font-size: 13px; } .acct-row div { flex: 1; display: flex; flex-direction: column; } .acct-row small { color: var(--dim); font-size: 11px; } .acct-row svg { color: var(--gold); }
+.acct-meta { display: flex; align-items: center; gap: 5px; font-size: 10.5px; color: var(--dim); }
+.acct-item { display: flex; align-items: center; gap: 8px; text-align: left; font-size: 12.5px; color: var(--text); background: rgba(255,255,255,0.03); border: 1px solid var(--border); border-radius: 9px; padding: 9px 11px; cursor: pointer; }
+.acct-item:hover { border-color: var(--border-lit); } .acct-item.danger { color: #ff7a90; }
+.acct-form { display: flex; flex-direction: column; gap: 6px; } .acct-form .cw-input { width: 100%; box-sizing: border-box; min-width: 0; }
 
 ```
 
@@ -10057,6 +10127,389 @@ async def library_api(did: str, key: str = Query(...)):
 ```
 
 
+### `backend/auth.py`
+```python
+"""
+ACASO owner authentication - email + password, single owner account.
+
+  * First POST /api/auth/register creates the owner; afterwards registration is closed (403).
+  * Login issues a JWT in an httpOnly, Secure, SameSite=Lax cookie (7 days; 30 days with remember_me).
+  * Passwords hashed with bcrypt. Password change requires the current password.
+  * Global guard (installed by server.py as HTTP middleware): every /api/* request needs a valid session cookie,
+    EXCEPT: /api/auth/*, buyer unlock + gated library links, Google Drive OAuth callback, and any request that
+    carries a valid X-ACASO-Key (Local Node, Agent Bridge, runner scripts) - those keep working unchanged.
+"""
+import logging
+import os
+import re
+import secrets
+import uuid
+from datetime import datetime, timezone, timedelta
+from typing import Optional
+
+import bcrypt
+import jwt
+from fastapi import APIRouter, HTTPException, Request, Response
+from pydantic import BaseModel
+
+logger = logging.getLogger("auth")
+router = APIRouter(prefix="/auth")
+
+db = None
+get_bridge_key = None
+COOKIE = "acaso_session"
+ALG = "HS256"
+
+
+def init(_db, _get_bridge_key):
+    global db, get_bridge_key
+    db, get_bridge_key = _db, _get_bridge_key
+
+
+def _secret() -> str:
+    s = os.environ.get("JWT_SECRET")
+    if not s:
+        # never silently run without a secret; generate a process-local one and warn loudly
+        s = secrets.token_urlsafe(48)
+        os.environ["JWT_SECRET"] = s
+        logger.error("JWT_SECRET missing from backend/.env - using an ephemeral secret (sessions reset on restart)")
+    return s
+
+
+def now():
+    return datetime.now(timezone.utc)
+
+
+# Paths that never require a session cookie (prefix match). Key-auth is handled separately by header check.
+PUBLIC_PREFIXES = (
+    "/api/auth/",
+    "/api/apex/unlock/",
+    "/api/apex/library/",
+    "/api/oauth/drive/callback",
+    "/api/health",
+    "/api/",  # exact root handled below
+)
+
+
+def is_public(path: str) -> bool:
+    if path == "/api/" or path == "/api":
+        return True
+    return any(path.startswith(p) for p in PUBLIC_PREFIXES[:-1])
+
+
+def make_token(user: dict, remember: bool) -> tuple[str, int]:
+    days = 30 if remember else 7
+    exp = now() + timedelta(days=days)
+    payload = {"sub": user["id"], "email": user["email"], "role": "owner", "iat": int(now().timestamp()), "exp": int(exp.timestamp()),
+               "pv": user.get("password_version", 1)}
+    return jwt.encode(payload, _secret(), algorithm=ALG), days * 86400
+
+
+def read_token(token: str) -> Optional[dict]:
+    try:
+        return jwt.decode(token, _secret(), algorithms=[ALG])
+    except Exception:
+        return None
+
+
+async def user_from_request(request: Request) -> Optional[dict]:
+    tok = request.cookies.get(COOKIE)
+    if not tok:
+        auth = request.headers.get("authorization") or ""
+        if auth.lower().startswith("bearer "):
+            tok = auth[7:].strip()
+    if not tok:
+        return None
+    claims = read_token(tok)
+    if not claims:
+        return None
+    user = await db.users.find_one({"id": claims.get("sub")}, {"_id": 0})
+    if not user or user.get("password_version", 1) != claims.get("pv", 1):
+        return None
+    return user
+
+
+async def guard(request: Request, call_next):
+    """HTTP middleware: enforce session on /api/* except public paths and valid X-ACASO-Key requests."""
+    path = request.url.path
+    if not path.startswith("/api") or request.method == "OPTIONS" or is_public(path):
+        return await call_next(request)
+    key = request.headers.get("x-acaso-key")
+    if key:
+        try:
+            if key == await get_bridge_key():
+                request.state.auth = {"kind": "key"}
+                return await call_next(request)
+        except Exception as e:
+            logger.error(f"key check failed: {e}")
+    user = await user_from_request(request)
+    if user:
+        request.state.auth = {"kind": "session", "user_id": user["id"], "email": user["email"]}
+        return await call_next(request)
+    has_owner = await db.users.count_documents({}) > 0
+    from fastapi.responses import JSONResponse
+    return JSONResponse({"detail": "Authentication required", "has_owner": has_owner}, status_code=401,
+                        headers={"WWW-Authenticate": "Cookie"})
+
+
+# ----------------------------------------------------------------------------------------------
+class Credentials(BaseModel):
+    email: str
+    password: str
+    remember_me: bool = False
+    name: Optional[str] = None
+
+
+class ChangePassword(BaseModel):
+    current_password: str
+    new_password: str
+
+
+def _valid_email(e: str) -> bool:
+    return bool(re.match(r"^[^@\s]+@[^@\s]+\.[^@\s]+$", e or ""))
+
+
+def _check_password_strength(p: str):
+    if len(p or "") < 10:
+        raise HTTPException(400, "Password must be at least 10 characters")
+    if p.lower() == p or p.upper() == p or not re.search(r"\d", p):
+        raise HTTPException(400, "Use upper and lower case letters and at least one digit")
+
+
+def _set_cookie(resp: Response, token: str, max_age: int, request: Request):
+    secure = request.url.scheme == "https" or request.headers.get("x-forwarded-proto", "") == "https"
+    resp.set_cookie(COOKIE, token, max_age=max_age, httponly=True, secure=secure, samesite="lax", path="/")
+
+
+def _public_user(u: dict) -> dict:
+    return {"id": u["id"], "email": u["email"], "name": u.get("name"), "role": u.get("role", "owner"),
+            "created_at": u.get("created_at"), "last_login_at": u.get("last_login_at")}
+
+
+@router.get("/status")
+async def status():
+    n = await db.users.count_documents({})
+    return {"has_owner": n > 0, "registration_open": n == 0}
+
+
+@router.post("/register")
+async def register(c: Credentials, request: Request, response: Response):
+    if await db.users.count_documents({}) > 0:
+        raise HTTPException(403, "Registration is closed - the owner account already exists. Log in instead.")
+    email = (c.email or "").strip().lower()
+    if not _valid_email(email):
+        raise HTTPException(400, "Valid email required")
+    _check_password_strength(c.password)
+    user = {"id": str(uuid.uuid4()), "email": email, "name": (c.name or "").strip()[:80] or None, "role": "owner",
+            "password_hash": bcrypt.hashpw(c.password.encode(), bcrypt.gensalt(rounds=12)).decode(), "password_version": 1,
+            "created_at": now().isoformat(), "last_login_at": now().isoformat(), "failed_logins": 0}
+    await db.users.insert_one(dict(user))
+    token, max_age = make_token(user, c.remember_me)
+    _set_cookie(response, token, max_age, request)
+    await db.auth_events.insert_one({"id": str(uuid.uuid4()), "event": "register", "email": email, "at": now().isoformat(), "ip": request.client.host if request.client else None})
+    return {"user": _public_user(user), "session_days": max_age // 86400}
+
+
+@router.post("/login")
+async def login(c: Credentials, request: Request, response: Response):
+    email = (c.email or "").strip().lower()
+    user = await db.users.find_one({"email": email}, {"_id": 0})
+    ip = request.client.host if request.client else None
+    # simple lockout: 8 failures -> 10 minute cool-down
+    if user and user.get("locked_until") and datetime.fromisoformat(user["locked_until"]) > now():
+        raise HTTPException(423, "Too many failed attempts - try again in a few minutes")
+    ok = bool(user) and bcrypt.checkpw((c.password or "").encode(), user["password_hash"].encode())
+    if not ok:
+        if user:
+            fails = int(user.get("failed_logins", 0)) + 1
+            upd = {"failed_logins": fails}
+            if fails >= 8:
+                upd["locked_until"] = (now() + timedelta(minutes=10)).isoformat()
+                upd["failed_logins"] = 0
+            await db.users.update_one({"id": user["id"]}, {"$set": upd})
+        await db.auth_events.insert_one({"id": str(uuid.uuid4()), "event": "login_failed", "email": email, "at": now().isoformat(), "ip": ip})
+        raise HTTPException(401, "Invalid email or password")
+    await db.users.update_one({"id": user["id"]}, {"$set": {"last_login_at": now().isoformat(), "failed_logins": 0}, "$unset": {"locked_until": ""}})
+    token, max_age = make_token(user, c.remember_me)
+    _set_cookie(response, token, max_age, request)
+    await db.auth_events.insert_one({"id": str(uuid.uuid4()), "event": "login", "email": email, "at": now().isoformat(), "ip": ip})
+    return {"user": _public_user(user), "session_days": max_age // 86400}
+
+
+@router.post("/logout")
+async def logout(response: Response):
+    response.delete_cookie(COOKIE, path="/")
+    return {"ok": True}
+
+
+@router.get("/me")
+async def me(request: Request):
+    user = await user_from_request(request)
+    if not user:
+        has_owner = await db.users.count_documents({}) > 0
+        raise HTTPException(401, {"detail": "Not logged in", "has_owner": has_owner})
+    return _public_user(user)
+
+
+@router.post("/change-password")
+async def change_password(body: ChangePassword, request: Request, response: Response):
+    user = await user_from_request(request)
+    if not user:
+        raise HTTPException(401, "Not logged in")
+    if not bcrypt.checkpw(body.current_password.encode(), user["password_hash"].encode()):
+        raise HTTPException(400, "Current password is incorrect")
+    _check_password_strength(body.new_password)
+    if body.new_password == body.current_password:
+        raise HTTPException(400, "New password must differ from the current one")
+    pv = int(user.get("password_version", 1)) + 1
+    await db.users.update_one({"id": user["id"]}, {"$set": {"password_hash": bcrypt.hashpw(body.new_password.encode(), bcrypt.gensalt(rounds=12)).decode(),
+                                                            "password_version": pv, "password_changed_at": now().isoformat()}})
+    user["password_version"] = pv
+    token, max_age = make_token(user, False)  # other sessions are invalidated by the version bump
+    _set_cookie(response, token, max_age, request)
+    await db.auth_events.insert_one({"id": str(uuid.uuid4()), "event": "password_changed", "email": user["email"], "at": now().isoformat()})
+    return {"ok": True, "note": "Password updated. Other devices were signed out."}
+
+
+@router.get("/events")
+async def events(request: Request):
+    if not await user_from_request(request):
+        raise HTTPException(401, "Not logged in")
+    return await db.auth_events.find({}, {"_id": 0}).sort("at", -1).to_list(30)
+
+```
+
+
+### `frontend/src/components/AuthScreen.js`
+```javascript
+import React, { useEffect, useState } from "react";
+import axios from "axios";
+import { toast } from "sonner";
+import { motion } from "framer-motion";
+import { Castle, Mail, Lock, LogIn, UserPlus, Loader2, Eye, EyeOff, ShieldCheck } from "lucide-react";
+import { API } from "../App";
+
+export default function AuthScreen({ onAuthed }) {
+  const [status, setStatus] = useState(null);
+  const [mode, setMode] = useState("login");
+  const [form, setForm] = useState({ email: "", password: "", name: "", remember_me: true });
+  const [show, setShow] = useState(false);
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    axios.get(`${API}/auth/status`).then((r) => { setStatus(r.data); setMode(r.data.registration_open ? "register" : "login"); }).catch(() => setStatus({ has_owner: true, registration_open: false }));
+  }, []);
+
+  const submit = async (e) => {
+    e.preventDefault();
+    setBusy(true);
+    try {
+      const r = await axios.post(`${API}/auth/${mode}`, form);
+      toast.success(mode === "register" ? "Owner account created - welcome, Sovereign" : `Welcome back${r.data.user.name ? `, ${r.data.user.name}` : ""}`);
+      onAuthed(r.data.user);
+    } catch (err) {
+      toast.error(err?.response?.data?.detail || "Could not sign in");
+    } finally { setBusy(false); }
+  };
+
+  return (
+    <div className="auth-root" data-testid="auth-screen">
+      <motion.div className="auth-card" initial={{ opacity: 0, y: 14 }} animate={{ opacity: 1, y: 0 }}>
+        <div className="auth-brand"><Castle size={22} /> ACASO <span>Omniverse</span></div>
+        <h1>{mode === "register" ? "Claim the throne" : "Owner sign-in"}</h1>
+        <p className="auth-sub">
+          {status === null ? "Checking..." : mode === "register"
+            ? "No owner exists yet. The first account created here becomes the single owner; registration then closes."
+            : "This workspace belongs to its owner. Sign in with your email and password."}
+        </p>
+        <form onSubmit={submit} className="auth-form">
+          {mode === "register" && (
+            <label>Name (optional)<input data-testid="auth-name" className="cw-input" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} autoComplete="name" /></label>
+          )}
+          <label><span><Mail size={12} /> Email</span><input data-testid="auth-email" className="cw-input" type="email" required value={form.email} onChange={(e) => setForm({ ...form, email: e.target.value })} autoComplete="email" /></label>
+          <label><span><Lock size={12} /> Password</span>
+            <div className="auth-pw">
+              <input data-testid="auth-password" className="cw-input" type={show ? "text" : "password"} required minLength={mode === "register" ? 10 : 1} value={form.password} onChange={(e) => setForm({ ...form, password: e.target.value })} autoComplete={mode === "register" ? "new-password" : "current-password"} />
+              <button type="button" className="auth-eye" onClick={() => setShow((s) => !s)} aria-label="toggle password">{show ? <EyeOff size={14} /> : <Eye size={14} />}</button>
+            </div>
+            {mode === "register" && <small className="auth-hint">10+ characters, upper & lower case, and a digit.</small>}
+          </label>
+          <label className="auth-remember"><input data-testid="auth-remember" type="checkbox" checked={form.remember_me} onChange={(e) => setForm({ ...form, remember_me: e.target.checked })} /> Remember me for 30 days (otherwise 7)</label>
+          <button data-testid="auth-submit" className="auth-submit" type="submit" disabled={busy || status === null}>
+            {busy ? <Loader2 className="spin" size={15} /> : mode === "register" ? <UserPlus size={15} /> : <LogIn size={15} />} {mode === "register" ? "Create owner account" : "Sign in"}
+          </button>
+        </form>
+        {status?.registration_open && mode === "register" && <button className="auth-link" onClick={() => setMode("login")}>Already have an account? Sign in</button>}
+        {status && !status.registration_open && <div className="auth-foot"><ShieldCheck size={12} /> Registration closed - single-owner workspace. Sessions use an httpOnly cookie; passwords are bcrypt-hashed.</div>}
+      </motion.div>
+    </div>
+  );
+}
+
+```
+
+
+### `frontend/src/components/AccountMenu.js`
+```javascript
+import React, { useState } from "react";
+import axios from "axios";
+import { toast } from "sonner";
+import { AnimatePresence, motion } from "framer-motion";
+import { User, LogOut, KeyRound, X, Loader2, ShieldCheck } from "lucide-react";
+import { API } from "../App";
+
+export const AccountMenu = ({ user, onLogout, onUserChange }) => {
+  const [open, setOpen] = useState(false);
+  const [pw, setPw] = useState({ current_password: "", new_password: "" });
+  const [changing, setChanging] = useState(false);
+  const [showPw, setShowPw] = useState(false);
+
+  const change = async (e) => {
+    e.preventDefault();
+    setChanging(true);
+    try {
+      const r = await axios.post(`${API}/auth/change-password`, pw);
+      toast.success(r.data.note || "Password updated");
+      setPw({ current_password: "", new_password: "" }); setShowPw(false);
+    } catch (err) { toast.error(err?.response?.data?.detail || "Could not change password"); }
+    finally { setChanging(false); }
+  };
+
+  return (
+    <div className="acct" data-testid="account-menu">
+      <button className="owner-badge acct-btn" onClick={() => setOpen((o) => !o)} data-testid="account-toggle" title={user.email}>
+        <span className="dot" /> {user.name || "Owner"} · Sovereign
+      </button>
+      <AnimatePresence>
+        {open && (
+          <motion.div className="acct-pop" initial={{ opacity: 0, y: -6 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -6 }} data-testid="account-popover">
+            <div className="acct-row"><User size={13} /> <div><b>{user.name || "Owner"}</b><small>{user.email}</small></div><button className="rd-ic" onClick={() => setOpen(false)}><X size={13} /></button></div>
+            <div className="acct-meta"><ShieldCheck size={11} /> single-owner workspace · httpOnly session cookie</div>
+            {!showPw ? (
+              <button className="acct-item" onClick={() => setShowPw(true)} data-testid="account-change-pw"><KeyRound size={13} /> Change password</button>
+            ) : (
+              <form className="acct-form" onSubmit={change}>
+                <input className="cw-input" type="password" placeholder="current password" required value={pw.current_password} onChange={(e) => setPw({ ...pw, current_password: e.target.value })} data-testid="pw-current" autoComplete="current-password" />
+                <input className="cw-input" type="password" placeholder="new password (10+, mixed case, digit)" required minLength={10} value={pw.new_password} onChange={(e) => setPw({ ...pw, new_password: e.target.value })} data-testid="pw-new" autoComplete="new-password" />
+                <div className="cw-row" style={{ marginTop: 6 }}>
+                  <button className="rd-btn primary sm" type="submit" disabled={changing} data-testid="pw-submit">{changing ? <Loader2 className="spin" size={13} /> : <KeyRound size={13} />} Update</button>
+                  <button className="rd-btn sm" type="button" onClick={() => setShowPw(false)}>Cancel</button>
+                </div>
+              </form>
+            )}
+            <button className="acct-item danger" onClick={onLogout} data-testid="account-logout"><LogOut size={13} /> Sign out</button>
+          </motion.div>
+        )}
+      </AnimatePresence>
+    </div>
+  );
+};
+
+export default AccountMenu;
+
+```
+
+
 ### `frontend/src/components/Apex.js`
 ```javascript
 import React, { useCallback, useEffect, useState } from "react";
@@ -10436,7 +10889,7 @@ export default function Companion({ standalone = true }) {
     setBusy(true); setStreaming("");
     setMessages((m) => [...m, { id: `u-${Date.now()}`, role: "user", content: content || "(shared screen)", had_image: !!frame, created_at: new Date().toISOString() }]);
     try {
-      const res = await fetch(`${API}/companion/chat`, { method: "POST", headers: { "Content-Type": "application/json" },
+      const res = await fetch(`${API}/companion/chat`, { method: "POST", credentials: "include", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ message: content, session_id: sessionId, image_b64: frame, share_label: frame ? shareLabel : null }) });
       if (!res.ok) throw new Error((await res.json().catch(() => ({})))?.detail || `HTTP ${res.status}`);
       const reader = res.body.getReader(); const dec = new TextDecoder(); let buf = ""; let full = ""; let label = null;
@@ -11236,18 +11689,20 @@ import httpx
 
 ACASO_URL = os.environ.get("ACASO_URL", "https://contest-ready-app.preview.emergentagent.com").rstrip("/")
 API = f"{ACASO_URL}/api"
+# The app requires owner login; scripts authenticate with the Agent Bridge key instead (Agent Bridge tab).
+HEADERS = {"X-ACASO-Key": os.environ.get("ACASO_KEY", "")}
 
 
 def check_online() -> bool:
     try:
-        return httpx.get(f"{API}/acaso/presets", timeout=10.0).status_code == 200
+        return httpx.get(f"{API}/acaso/presets", headers=HEADERS, timeout=10.0).status_code == 200
     except Exception:
         return False
 
 
 def deliberate(challenge: str, challenge_type: str, additional_context: str = "", preset_id: str | None = None) -> dict:
     with httpx.Client(timeout=320.0) as client:
-        r = client.post(f"{API}/acaso/deliberate", json={
+        r = client.post(f"{API}/acaso/deliberate", headers=HEADERS, json={
             "challenge": challenge,
             "challenge_type": challenge_type,
             "preset_id": preset_id,
@@ -11258,7 +11713,7 @@ def deliberate(challenge: str, challenge_type: str, additional_context: str = ""
 
 
 def fetch_preset(preset_id: str) -> dict:
-    r = httpx.get(f"{API}/acaso/presets", timeout=10.0)
+    r = httpx.get(f"{API}/acaso/presets", headers=HEADERS, timeout=10.0)
     r.raise_for_status()
     for p in r.json():
         if p["id"] == preset_id:
@@ -11296,7 +11751,7 @@ Council: {', '.join(council) if council else 'n/a'} | Shadow veto: {'YES' if res
 def require_online():
     print(f"Checking ACASO at {ACASO_URL} ...")
     if not check_online():
-        print("ACASO is not reachable. Set ACASO_URL to your running deployment.")
+        print("ACASO is not reachable or the key is missing. Set ACASO_URL and ACASO_KEY (Agent Bridge tab).")
         sys.exit(1)
     print("ACASO Omniverse online.\n")
 

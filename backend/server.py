@@ -2746,7 +2746,15 @@ async def companion_watch(req: WatchRequest):
     return res
 
 
+# ---------------- Owner authentication (email + password, httpOnly cookie JWT) ----------------
+import auth as auth_module
+auth_module.init(db, get_or_create_key)
+api_router.include_router(auth_module.router)
+
 app.include_router(api_router)
+
+# Session guard for every /api/* route (public paths + X-ACASO-Key requests pass through; see auth.py)
+app.middleware("http")(auth_module.guard)
 
 app.add_middleware(
     CORSMiddleware,

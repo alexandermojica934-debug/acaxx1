@@ -47,6 +47,9 @@ SOURCE_FILES = [
     "backend/radar.py",
     "backend/node.py",
     "backend/apex.py",
+    "backend/auth.py",
+    "frontend/src/components/AuthScreen.js",
+    "frontend/src/components/AccountMenu.js",
     "frontend/src/components/Apex.js",
     "frontend/src/components/Companion.js",
     "frontend/src/components/LocalNode.js",
@@ -80,6 +83,7 @@ FEATURES = [
     "Local Node (backend/node.py + handoff/local_node/acaso_node.py, served at /local-node/*): owner runs the Python client on their PC (Windows/Linux), pairs with the Agent Bridge key; server holds an approval-gated task queue (read-only auto-approved; every write/shell/browser action must be approved in the Local Node tab); node enforces allowed roots, backs up overwritten files, soft-deletes to .acaso_trash; browser tasks drive a real headed Chrome (persistent profile) via Playwright, fill forms and STOP (awaiting_submit) until a separate browser_submit is approved; secrets written as [OWNER TYPES THIS]. LLM planner turns a goal into proposed tasks. Server research browser (headless Chromium, /api/browse/research) reads public pages: text/links/forms/screenshot + quoted answer.",
     "Companion (/?mode=companion, header Companion button opens popup; components/Companion.js): voice hands-free, share window/tab/screen via getDisplayMedia, per-message frame -> POST /api/companion/chat (SSE, vision via emergentintegrations ImageContent, gpt-4o-mini -> gemini-2.5-flash). WATCH MODE: 30s glance loop with 16x16 frame-hash change filter -> POST /api/companion/watch -> speaks only for error/form/action (JSON verdict). Installable PWA: /companion.webmanifest swapped in companion mode + Install button; Local Node --companion opens Chrome --app window (separate profile) with best-effort always-on-top (Windows ctypes / Linux wmctrl). Frames never stored.",
     "Apex Nexus (backend/apex.py, /api/apex/*, tab Apex Nexus): products rfp_kit ($149, from Radar opportunity or pasted RFP), prompt_library ($49, Markdown+JSON+gated API key), seo_pack ($199); POST /generate (one LLM call, [FILL] placeholders counted), deliverables export md/json, orders (pending_payment -> paid -> unlock via /api/apex/unlock/{token}; 402 until paid; refunded re-locks), gated /api/apex/library/{id}?key= requires paid order. Payments: STRIPE NOT CONNECTED (manual Mark paid) until owner supplies STRIPE_API_KEY - integrate via playbook then.",
+    "Owner authentication (backend/auth.py): single owner account - first POST /api/auth/register creates it, then 403; bcrypt (12 rounds); JWT in httpOnly SameSite=Lax cookie acaso_session (7d, 30d remember_me; Secure over https); password change bumps password_version -> all other sessions invalid; 8 failed logins -> 10 min lockout (423); auth_events audit. Global HTTP middleware guards every /api/* route except /api/auth/*, /api/apex/unlock/*, /api/apex/library/*, /api/oauth/drive/callback, and requests carrying a valid X-ACASO-Key (Local Node, Agent Bridge, runner scripts unchanged). JWT_SECRET lives in backend/.env. Frontend: AuthScreen gate, AccountMenu (change password / sign out), axios 401 interceptor -> sign-in.",
 ]
 
 MODELS = {
@@ -89,6 +93,8 @@ MODELS = {
 }
 
 KEY_ENDPOINTS = [
+    ["POST", "/api/auth/register (first only) | /api/auth/login | /api/auth/logout | /api/auth/change-password", "owner auth"],
+    ["GET", "/api/auth/status | /api/auth/me | /api/auth/events", "auth state / audit"],
     ["POST", "/api/companion/chat (SSE) | /api/companion/watch | GET/DELETE /api/companion/history", "Companion vision chat + watch mode"],
     ["GET", "/api/apex/products | /api/apex/deliverables[/{id}[/export?fmt=md|json]]", "Apex catalog + deliverables"],
     ["POST/PATCH", "/api/apex/generate | /api/apex/orders[/{id}]", "generate product / order lifecycle"],

@@ -1,4 +1,5 @@
-import React, { useState } from "react";
+import React, { useState, useEffect, useCallback } from "react";
+import axios from "axios";
 import "./App.css";
 import { Toaster } from "sonner";
 import SovereignHome from "./components/SovereignHome";
@@ -15,10 +16,20 @@ import VoiceCommander from "./components/VoiceCommander";
 import LocalNode from "./components/LocalNode";
 import Companion, { openCompanionWindow } from "./components/Companion";
 import Apex from "./components/Apex";
+import AuthScreen from "./components/AuthScreen";
+import AccountMenu from "./components/AccountMenu";
 import { Sparkles, LayoutGrid, MessagesSquare, BookOpen, ShieldAlert, Plug, Boxes, Wand2, Crown, Waves, Radar as RadarIcon, MonitorSmartphone, Castle, Store } from "lucide-react";
 
 const BACKEND_URL = process.env.REACT_APP_BACKEND_URL;
 export const API = `${BACKEND_URL}/api`;
+axios.defaults.withCredentials = true;
+// Any 401 from the API means the session is gone -> drop to the sign-in screen.
+axios.interceptors.response.use((r) => r, (err) => {
+  if (err?.response?.status === 401 && !String(err.config?.url || "").includes("/auth/")) {
+    window.dispatchEvent(new CustomEvent("acaso:unauthorized"));
+  }
+  return Promise.reject(err);
+});
 
 const TABS = [
   { key: "home", label: "Sovereign Home", icon: LayoutGrid },
@@ -43,7 +54,27 @@ function App() {
     } catch { return "home"; }
   });
 
+  const [user, setUser] = useState(undefined); // undefined = checking, null = signed out
+  const checkSession = useCallback(async () => {
+    try { setUser((await axios.get(`${API}/auth/me`)).data); } catch { setUser(null); }
+  }, []);
+  useEffect(() => { checkSession(); }, [checkSession]);
+  useEffect(() => {
+    const onUnauth = () => setUser((u) => (u ? null : u));
+    window.addEventListener("acaso:unauthorized", onUnauth);
+    return () => window.removeEventListener("acaso:unauthorized", onUnauth);
+  }, []);
+  const logout = async () => { try { await axios.post(`${API}/auth/logout`); } catch { /* ignore */ } setUser(null); };
+
   const companionMode = typeof window !== "undefined" && new URLSearchParams(window.location.search).get("mode") === "companion";
+
+  if (user === undefined) {
+    return <div className="acaso-root auth-checking" data-testid="auth-checking"><Toaster position="top-center" theme="dark" richColors /><div className="auth-spinner"><Sparkles size={18} /> ACASO</div></div>;
+  }
+  if (user === null) {
+    return <div className="acaso-root"><Toaster position="top-center" theme="dark" richColors /><div className="aurora" aria-hidden /><AuthScreen onAuthed={setUser} /></div>;
+  }
+
   if (companionMode) {
     return (
       <div className="acaso-root companion-root">
@@ -83,7 +114,7 @@ function App() {
           })}
         </nav>
         <button className="companion-launch" onClick={openCompanionWindow} title="Open ACASO Companion in its own small window" data-testid="companion-launch"><Castle size={14} /> Companion</button>
-        <div className="owner-badge"><span className="dot" /> Owner · Sovereign</div>
+        <AccountMenu user={user} onLogout={logout} onUserChange={setUser} />
       </header>
 
       <main className="stage">

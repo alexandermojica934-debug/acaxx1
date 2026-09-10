@@ -12,6 +12,7 @@ Council of Weavers engine (`POST /api/acaso/deliberate`).
 ```bash
 pip install httpx
 export ACASO_URL=https://contest-ready-app.preview.emergentagent.com   # or your own host
+export ACASO_KEY=<your Agent Bridge key>   # the app requires login; scripts use the key
 python script_01_genesis_engine.py
 ```
 

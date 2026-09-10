@@ -11,18 +11,20 @@ import httpx
 
 ACASO_URL = os.environ.get("ACASO_URL", "https://contest-ready-app.preview.emergentagent.com").rstrip("/")
 API = f"{ACASO_URL}/api"
+# The app requires owner login; scripts authenticate with the Agent Bridge key instead (Agent Bridge tab).
+HEADERS = {"X-ACASO-Key": os.environ.get("ACASO_KEY", "")}
 
 
 def check_online() -> bool:
     try:
-        return httpx.get(f"{API}/acaso/presets", timeout=10.0).status_code == 200
+        return httpx.get(f"{API}/acaso/presets", headers=HEADERS, timeout=10.0).status_code == 200
     except Exception:
         return False
 
 
 def deliberate(challenge: str, challenge_type: str, additional_context: str = "", preset_id: str | None = None) -> dict:
     with httpx.Client(timeout=320.0) as client:
-        r = client.post(f"{API}/acaso/deliberate", json={
+        r = client.post(f"{API}/acaso/deliberate", headers=HEADERS, json={
             "challenge": challenge,
             "challenge_type": challenge_type,
             "preset_id": preset_id,
@@ -33,7 +35,7 @@ def deliberate(challenge: str, challenge_type: str, additional_context: str = ""
 
 
 def fetch_preset(preset_id: str) -> dict:
-    r = httpx.get(f"{API}/acaso/presets", timeout=10.0)
+    r = httpx.get(f"{API}/acaso/presets", headers=HEADERS, timeout=10.0)
     r.raise_for_status()
     for p in r.json():
         if p["id"] == preset_id:
@@ -71,6 +73,6 @@ Council: {', '.join(council) if council else 'n/a'} | Shadow veto: {'YES' if res
 def require_online():
     print(f"Checking ACASO at {ACASO_URL} ...")
     if not check_online():
-        print("ACASO is not reachable. Set ACASO_URL to your running deployment.")
+        print("ACASO is not reachable or the key is missing. Set ACASO_URL and ACASO_KEY (Agent Bridge tab).")
         sys.exit(1)
     print("ACASO Omniverse online.\n")

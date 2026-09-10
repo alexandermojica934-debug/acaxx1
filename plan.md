@@ -328,3 +328,11 @@ read correctly (number/total/status); streaming 33 events; standalone UI + launc
   Chrome --app window, separate profile, always-on-top via ctypes (Windows) / wmctrl (Linux); launchers updated.
 - Fixed: TDZ bug (watch effect referenced `say` before definition) - moved effect below TTS section.
 - Voice command tab map now includes node + apex.
+
+## Phase: Owner email + password login (Status: COMPLETED - iteration_6: 32/32 backend, 100% frontend; lockout verified manually -> 423)
+User choices: single owner; httpOnly-cookie JWT (7d / 30d remember me), bcrypt, in-app password change; key-auth routes unchanged.
+- backend/auth.py (router /api/auth/*, guard middleware installed in server.py); JWT_SECRET appended to backend/.env.
+- Public paths: /api/auth/*, /api/apex/unlock/*, /api/apex/library/*, /api/oauth/drive/callback; X-ACASO-Key passthrough.
+- Frontend: AuthScreen.js (register-if-open / login), AccountMenu.js (change pw, sign out), App.js gate + 401 interceptor;
+  Companion fetch uses credentials: include; runner scripts send X-ACASO-Key (ACASO_KEY env).
+- Test owner deleted after testing -> first visit shows "Claim the throne" for the real owner.
