@@ -2127,6 +2127,99 @@ async def export_deliberation(did: str):
 
 
 
+# ---------------- Voice Chat (browser Web Speech API on the client; LLM here) ----------------
+# STT/TTS happen in the user's browser (no audio touches this server). This endpoint receives the
+# transcript text, answers in "fast" mode (single model, session memory) or "council" mode (full
+# Council of Weavers deliberation + a short spoken summary), and stores the transcript.
+
+class VoiceRequest(BaseModel):
+    message: str
+    session_id: Optional[str] = None
+    mode: Optional[str] = "fast"  # "fast" | "council"
+
+VOICE_SYSTEM = (
+    "You are ACASO, the sovereign AI of ACASO Omniverse, speaking aloud to your owner in a live voice conversation. "
+    "Persona: calm, precise, warm, decisive. Your reply will be read by a text-to-speech engine, so: plain spoken "
+    "sentences, no markdown, no bullet symbols, no code, no URLs. Keep answers to 1-4 sentences unless the owner "
+    "explicitly asks for detail. Be honest about what you can and cannot do: you have no live market data, and "
+    "actions in NEXUS are simulated. If asked to do something in the app, explain which tab or feature does it.\n"
+    "App map: Sovereign Home compiles revenue directives into staged missions; Bug Bounty runs authorized security "
+    "engagements with a three-soul AI council and owner approval gates; Council convenes the Council of Weavers "
+    "(Architect, Shadow, Muse, Finance plus Meta-Weaver) for strategic deliberations like the Genesis Engine and "
+    "Sovereign Hunter; Voice is this conversation; Ask All AIs queries GPT, Gemini and Claude together; File Analyzer "
+    "ingests uploads, folders or Google Drive files for AI analysis and cited chat; Self-Directive lets the owner "
+    "approve preview-only code changes to ACASO itself with rollback; Chronicle is the outcome ledger; Agent Bridge "
+    "is the API-key protected agent interface."
+)
+
+@api_router.post("/voice/chat")
+async def voice_chat(req: VoiceRequest):
+    text = (req.message or "").strip()
+    if not text:
+        raise HTTPException(400, "Message required")
+    if len(text) > 4000:
+        raise HTTPException(400, "Message too long")
+    session = req.session_id or str(uuid.uuid4())
+    mode = "council" if (req.mode or "").lower() == "council" else "fast"
+    now = datetime.now(timezone.utc).isoformat()
+
+    history = await db.voice_messages.find({"session_id": session}, {"_id": 0}).sort("created_at", -1).to_list(12)
+    history.reverse()
+    hist_text = "\n".join([f"{'Owner' if h['role']=='user' else 'ACASO'}: {h['content']}" for h in history])
+
+    await db.voice_messages.insert_one({
+        "id": str(uuid.uuid4()), "session_id": session, "role": "user", "content": text, "mode": mode, "created_at": now
+    })
+
+    deliberation_id = None
+    full_text = None
+    if mode == "fast":
+        prompt = (f"Conversation so far:\n{hist_text}\n\n" if hist_text else "") + f"Owner just said: {text}\n\nReply aloud."
+        try:
+            spoken, used, label = await llm_call_failover(VOICE_SYSTEM, prompt, ["openai", "gemini", "anthropic"], session=f"voice-{session}")
+        except Exception as e:
+            raise HTTPException(502, f"Voice model unavailable: {e}")
+    else:
+        ctx = f"Live voice conversation. Recent context:\n{hist_text}" if hist_text else "Live voice conversation."
+        result = await acaso_deliberate(DeliberateRequest(challenge=text if len(text) >= 20 else text + " (please deliberate on this)",
+                                                          challenge_type="voice_council", preset_id="voice",
+                                                          context={"additional_context": ctx}))
+        deliberation_id = result["id"]
+        full_text = result["sovereign_directive"]
+        label = "Council of Weavers -> " + result["meta_weaver"]["model_label"]
+        try:
+            spoken, _, _ = await llm_call_failover(
+                VOICE_SYSTEM,
+                f"The Council of Weavers just deliberated on the owner's question: {text}\n\nSovereign Directive:\n{full_text}\n\n"
+                f"Weak signals:\n{result.get('weak_signals','')}\n\nShadow veto: {'yes' if result.get('shadow_veto') else 'no'}\n\n"
+                "Speak a faithful spoken summary in at most 6 sentences: the verdict, the single biggest risk, and the invalidation condition. "
+                "Mention the veto if there was one. Tell the owner the full directive is in the transcript and the Council tab.",
+                ["openai", "gemini", "anthropic"], session=f"voice-{session}-sum")
+        except Exception:
+            spoken = "The council has resolved. The full directive is in the transcript and in the Council tab."
+
+    spoken = spoken.strip()
+    reply_doc = {
+        "id": str(uuid.uuid4()), "session_id": session, "role": "assistant", "content": spoken, "mode": mode,
+        "model_label": label, "deliberation_id": deliberation_id, "full_text": full_text,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    }
+    await db.voice_messages.insert_one(dict(reply_doc))
+    reply_doc.pop("_id", None)
+    return {"session_id": session, "reply": reply_doc}
+
+@api_router.get("/voice/history")
+async def voice_history(session_id: str = Query(...), limit: int = Query(60, ge=1, le=300)):
+    msgs = await db.voice_messages.find({"session_id": session_id}, {"_id": 0}).sort("created_at", -1).to_list(limit)
+    msgs.reverse()
+    return msgs
+
+@api_router.delete("/voice/history")
+async def voice_clear(session_id: str = Query(...)):
+    r = await db.voice_messages.delete_many({"session_id": session_id})
+    return {"ok": True, "deleted": r.deleted_count}
+
+
 app.include_router(api_router)
 
 app.add_middleware(

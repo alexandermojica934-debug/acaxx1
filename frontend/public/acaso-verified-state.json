@@ -1,5 +1,5 @@
 {
-  "generated": "2026-09-10T00:38:58.673281+00:00",
+  "generated": "2026-09-10T00:46:22.817249+00:00",
   "app": "ACASO Omniverse",
   "stack": {
     "backend": "FastAPI+Motor",
@@ -23,7 +23,8 @@
     "File Analyzer follow-up chat: grounded answers that cite exact `path:line` (clickable -> opens a file viewer that highlights the line) and quote snippets",
     "Analysis Export: one-click download of the analysis + chat thread + file list as a Markdown report",
     "Google Drive ingestion (user OAuth): connect, browse, SEARCH by name, import selected files OR an entire folder (recursive) in one click, auto-analyzes after import. Requires user-supplied Web-app OAuth client.",
-    "Council of Weavers deliberation engine (POST /api/acaso/deliberate): Architect(Gemini)/Shadow(Claude, veto)/Muse(GPT)/Finance(GPT) in parallel -> Meta-Weaver synthesis -> Sovereign Directive + inferred weak signals; journaled, exportable to .md; presets Genesis Engine / Sovereign Hunter / Foresight Thesis; runner scripts in handoff/scripts. LLM reasoning only - no live market/lead data."
+    "Council of Weavers deliberation engine (POST /api/acaso/deliberate): Architect(Gemini)/Shadow(Claude, veto)/Muse(GPT)/Finance(GPT) in parallel -> Meta-Weaver synthesis -> Sovereign Directive + inferred weak signals; journaled, exportable to .md; presets Genesis Engine / Sovereign Hunter / Foresight Thesis; runner scripts in handoff/scripts. LLM reasoning only - no live market/lead data.",
+    "Voice Channel: browser Web Speech API (STT+TTS, no keys, no audio to server) -> POST /api/voice/chat; hands-free loop / push-to-talk / text-first modes; per-message Fast (GPT-4o-mini w/ session memory) or Council (full deliberation + spoken summary); transcript persisted per session."
   ],
   "verified": [
     "OpenAI gpt-4o-mini, Gemini gemini-3.6-flash, Anthropic claude-haiku-4-5 all respond",
@@ -35,6 +36,16 @@
     "Agent Bridge: missing/invalid X-ACASO-Key -> 401"
   ],
   "endpoints": [
+    {
+      "method": "POST",
+      "path": "/api/voice/chat",
+      "desc": "voice turn: {message, session_id, mode: fast|council} -> spoken reply (+full directive in council mode)"
+    },
+    {
+      "method": "GET/DELETE",
+      "path": "/api/voice/history?session_id=",
+      "desc": "voice transcript per session"
+    },
     {
       "method": "GET",
       "path": "/api/acaso/presets",

@@ -1,6 +1,6 @@
 # ACASO Omniverse — Complete Handoff
 
-_Generated: 2026-09-10T00:38:58.673281+00:00_
+_Generated: 2026-09-10T00:46:22.817249+00:00_
 
 ## What this is
 A contest-ready **Directive-to-Payment Operating System** (FastAPI + React + MongoDB).
@@ -18,6 +18,7 @@ A contest-ready **Directive-to-Payment Operating System** (FastAPI + React + Mon
 - Analysis Export: one-click download of the analysis + chat thread + file list as a Markdown report
 - Google Drive ingestion (user OAuth): connect, browse, SEARCH by name, import selected files OR an entire folder (recursive) in one click, auto-analyzes after import. Requires user-supplied Web-app OAuth client.
 - Council of Weavers deliberation engine (POST /api/acaso/deliberate): Architect(Gemini)/Shadow(Claude, veto)/Muse(GPT)/Finance(GPT) in parallel -> Meta-Weaver synthesis -> Sovereign Directive + inferred weak signals; journaled, exportable to .md; presets Genesis Engine / Sovereign Hunter / Foresight Thesis; runner scripts in handoff/scripts. LLM reasoning only - no live market/lead data.
+- Voice Channel: browser Web Speech API (STT+TTS, no keys, no audio to server) -> POST /api/voice/chat; hands-free loop / push-to-talk / text-first modes; per-message Fast (GPT-4o-mini w/ session memory) or Council (full deliberation + spoken summary); transcript persisted per session.
 
 ## Tech & Integrations
 - Backend: FastAPI + Motor (MongoDB), Pydantic, UUID ids, timezone-aware UTC.
@@ -44,6 +45,8 @@ sudo supervisorctl restart backend frontend
 Hot-reload is enabled; restart only after dependency/.env changes.
 
 ## Key API Endpoints
+- `POST /api/voice/chat` — voice turn: {message, session_id, mode: fast|council} -> spoken reply (+full directive in council mode)
+- `GET/DELETE /api/voice/history?session_id=` — voice transcript per session
 - `GET /api/acaso/presets` — council presets (genesis/hunter/foresight)
 - `POST /api/acaso/deliberate` — run Council of Weavers -> sovereign_directive, weak_signals, weavers, council_consulted
 - `GET /api/acaso/deliberations[/{id}][/export]` — list / open / export .md a deliberation
@@ -2226,6 +2229,99 @@ async def export_deliberation(did: str):
 
 
 
+# ---------------- Voice Chat (browser Web Speech API on the client; LLM here) ----------------
+# STT/TTS happen in the user's browser (no audio touches this server). This endpoint receives the
+# transcript text, answers in "fast" mode (single model, session memory) or "council" mode (full
+# Council of Weavers deliberation + a short spoken summary), and stores the transcript.
+
+class VoiceRequest(BaseModel):
+    message: str
+    session_id: Optional[str] = None
+    mode: Optional[str] = "fast"  # "fast" | "council"
+
+VOICE_SYSTEM = (
+    "You are ACASO, the sovereign AI of ACASO Omniverse, speaking aloud to your owner in a live voice conversation. "
+    "Persona: calm, precise, warm, decisive. Your reply will be read by a text-to-speech engine, so: plain spoken "
+    "sentences, no markdown, no bullet symbols, no code, no URLs. Keep answers to 1-4 sentences unless the owner "
+    "explicitly asks for detail. Be honest about what you can and cannot do: you have no live market data, and "
+    "actions in NEXUS are simulated. If asked to do something in the app, explain which tab or feature does it.\n"
+    "App map: Sovereign Home compiles revenue directives into staged missions; Bug Bounty runs authorized security "
+    "engagements with a three-soul AI council and owner approval gates; Council convenes the Council of Weavers "
+    "(Architect, Shadow, Muse, Finance plus Meta-Weaver) for strategic deliberations like the Genesis Engine and "
+    "Sovereign Hunter; Voice is this conversation; Ask All AIs queries GPT, Gemini and Claude together; File Analyzer "
+    "ingests uploads, folders or Google Drive files for AI analysis and cited chat; Self-Directive lets the owner "
+    "approve preview-only code changes to ACASO itself with rollback; Chronicle is the outcome ledger; Agent Bridge "
+    "is the API-key protected agent interface."
+)
+
+@api_router.post("/voice/chat")
+async def voice_chat(req: VoiceRequest):
+    text = (req.message or "").strip()
+    if not text:
+        raise HTTPException(400, "Message required")
+    if len(text) > 4000:
+        raise HTTPException(400, "Message too long")
+    session = req.session_id or str(uuid.uuid4())
+    mode = "council" if (req.mode or "").lower() == "council" else "fast"
+    now = datetime.now(timezone.utc).isoformat()
+
+    history = await db.voice_messages.find({"session_id": session}, {"_id": 0}).sort("created_at", -1).to_list(12)
+    history.reverse()
+    hist_text = "\n".join([f"{'Owner' if h['role']=='user' else 'ACASO'}: {h['content']}" for h in history])
+
+    await db.voice_messages.insert_one({
+        "id": str(uuid.uuid4()), "session_id": session, "role": "user", "content": text, "mode": mode, "created_at": now
+    })
+
+    deliberation_id = None
+    full_text = None
+    if mode == "fast":
+        prompt = (f"Conversation so far:\n{hist_text}\n\n" if hist_text else "") + f"Owner just said: {text}\n\nReply aloud."
+        try:
+            spoken, used, label = await llm_call_failover(VOICE_SYSTEM, prompt, ["openai", "gemini", "anthropic"], session=f"voice-{session}")
+        except Exception as e:
+            raise HTTPException(502, f"Voice model unavailable: {e}")
+    else:
+        ctx = f"Live voice conversation. Recent context:\n{hist_text}" if hist_text else "Live voice conversation."
+        result = await acaso_deliberate(DeliberateRequest(challenge=text if len(text) >= 20 else text + " (please deliberate on this)",
+                                                          challenge_type="voice_council", preset_id="voice",
+                                                          context={"additional_context": ctx}))
+        deliberation_id = result["id"]
+        full_text = result["sovereign_directive"]
+        label = "Council of Weavers -> " + result["meta_weaver"]["model_label"]
+        try:
+            spoken, _, _ = await llm_call_failover(
+                VOICE_SYSTEM,
+                f"The Council of Weavers just deliberated on the owner's question: {text}\n\nSovereign Directive:\n{full_text}\n\n"
+                f"Weak signals:\n{result.get('weak_signals','')}\n\nShadow veto: {'yes' if result.get('shadow_veto') else 'no'}\n\n"
+                "Speak a faithful spoken summary in at most 6 sentences: the verdict, the single biggest risk, and the invalidation condition. "
+                "Mention the veto if there was one. Tell the owner the full directive is in the transcript and the Council tab.",
+                ["openai", "gemini", "anthropic"], session=f"voice-{session}-sum")
+        except Exception:
+            spoken = "The council has resolved. The full directive is in the transcript and in the Council tab."
+
+    spoken = spoken.strip()
+    reply_doc = {
+        "id": str(uuid.uuid4()), "session_id": session, "role": "assistant", "content": spoken, "mode": mode,
+        "model_label": label, "deliberation_id": deliberation_id, "full_text": full_text,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    }
+    await db.voice_messages.insert_one(dict(reply_doc))
+    reply_doc.pop("_id", None)
+    return {"session_id": session, "reply": reply_doc}
+
+@api_router.get("/voice/history")
+async def voice_history(session_id: str = Query(...), limit: int = Query(60, ge=1, le=300)):
+    msgs = await db.voice_messages.find({"session_id": session_id}, {"_id": 0}).sort("created_at", -1).to_list(limit)
+    msgs.reverse()
+    return msgs
+
+@api_router.delete("/voice/history")
+async def voice_clear(session_id: str = Query(...)):
+    r = await db.voice_messages.delete_many({"session_id": session_id})
+    return {"ok": True, "deleted": r.deleted_count}
+
+
 app.include_router(api_router)
 
 app.add_middleware(
@@ -2871,7 +2967,8 @@ import AgentBridge from "./components/AgentBridge";
 import FileAnalyzer from "./components/FileAnalyzer";
 import SelfDirective from "./components/SelfDirective";
 import Council from "./components/Council";
-import { Sparkles, LayoutGrid, MessagesSquare, BookOpen, ShieldAlert, Plug, Boxes, Wand2, Crown } from "lucide-react";
+import VoiceChat from "./components/VoiceChat";
+import { Sparkles, LayoutGrid, MessagesSquare, BookOpen, ShieldAlert, Plug, Boxes, Wand2, Crown, Waves } from "lucide-react";
 
 const BACKEND_URL = process.env.REACT_APP_BACKEND_URL;
 export const API = `${BACKEND_URL}/api`;
@@ -2880,6 +2977,7 @@ const TABS = [
   { key: "home", label: "Sovereign Home", icon: LayoutGrid },
   { key: "bounty", label: "Bug Bounty", icon: ShieldAlert },
   { key: "council", label: "Council", icon: Crown },
+  { key: "voice", label: "Voice", icon: Waves },
   { key: "askai", label: "Ask All AIs", icon: MessagesSquare },
   { key: "analyzer", label: "File Analyzer", icon: Boxes },
   { key: "self", label: "Self-Directive", icon: Wand2 },
@@ -2931,6 +3029,7 @@ function App() {
         {tab === "home" && <SovereignHome />}
         {tab === "bounty" && <BugBounty />}
         {tab === "council" && <Council />}
+        {tab === "voice" && <VoiceChat />}
         {tab === "askai" && <AskAllAIs />}
         {tab === "analyzer" && <FileAnalyzer />}
         {tab === "self" && <SelfDirective />}
@@ -3750,6 +3849,40 @@ body {
 .cw-htitle { flex: 1; min-width: 0; font-size: 12.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .cw-hmeta { font-size: 11px; color: var(--dim); white-space: nowrap; }
 @media (max-width: 900px) { .cw-grid { grid-template-columns: 1fr; } }
+
+/* ===== Voice Channel ===== */
+.vc-wrap { display: flex; flex-direction: column; gap: 16px; }
+.vc-wrap .chr-hero-left p b { color: var(--text); }
+.vc-controls { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
+.vc-seg { display: inline-flex; background: rgba(4,6,16,0.55); border: 1px solid var(--border); border-radius: 11px; padding: 3px; gap: 3px; }
+.vc-seg-btn { display: inline-flex; align-items: center; gap: 6px; font-size: 12.5px; font-weight: 600; color: var(--muted); background: transparent; border: 0; border-radius: 8px; padding: 8px 12px; cursor: pointer; transition: color .16s, background .16s; }
+.vc-seg-btn:hover { color: var(--text); }
+.vc-seg-btn:focus-visible { outline: 2px solid var(--cyan); outline-offset: 1px; }
+.vc-seg-btn.active { color: #06060f; background: linear-gradient(135deg, var(--violet), var(--cyan)); }
+.vc-seg-btn.active.council { background: linear-gradient(135deg, var(--gold), #f5843c); }
+.vc-voice { min-width: 180px; max-width: 260px; }
+.vc-hint { margin-top: 10px; font-size: 12px; color: var(--dim); line-height: 1.5; }
+.vc-transcript { display: flex; flex-direction: column; gap: 10px; min-height: 220px; max-height: 52vh; overflow-y: auto; background: var(--panel); border: 1px solid var(--border); border-radius: 16px; padding: 16px; }
+.vc-msg { max-width: 78%; border-radius: 14px; padding: 10px 14px; font-size: 13.5px; line-height: 1.55; border: 1px solid var(--border); position: relative; }
+.vc-msg.user { align-self: flex-end; background: rgba(139,124,255,0.14); border-color: rgba(139,124,255,0.35); }
+.vc-msg.user.interim { opacity: .65; border-style: dashed; }
+.vc-msg.assistant { align-self: flex-start; background: rgba(4,6,16,0.5); }
+.vc-msg-meta { font-size: 10.5px; color: var(--dim); text-transform: uppercase; letter-spacing: .06em; margin-bottom: 4px; }
+.vc-full { margin-top: 8px; font-size: 12.5px; }
+.vc-full summary { cursor: pointer; color: var(--gold); font-weight: 600; }
+.vc-replay { margin-top: 6px; display: inline-flex; align-items: center; gap: 5px; font-size: 11px; color: var(--muted); background: transparent; border: 1px solid var(--border); border-radius: 7px; padding: 3px 8px; cursor: pointer; transition: color .16s, border-color .16s; }
+.vc-replay:hover { color: var(--cyan); border-color: var(--border-lit); }
+.vc-thinking { display: flex; align-items: center; gap: 8px; font-size: 12.5px; color: var(--violet2); padding: 6px 4px; }
+.vc-dock { display: flex; align-items: center; justify-content: center; gap: 14px; flex-wrap: wrap; padding: 6px 0 12px; }
+.vc-big { display: flex; align-items: center; gap: 12px; font-size: 14px; font-weight: 700; color: var(--text); background: rgba(255,255,255,0.03); border: 1px solid var(--border-lit); border-radius: 999px; padding: 14px 26px; cursor: pointer; min-height: 56px; transition: transform .12s, border-color .18s, background .18s, box-shadow .18s; user-select: none; -webkit-user-select: none; touch-action: none; }
+.vc-big:hover:not(:disabled) { transform: translateY(-1px); }
+.vc-big:disabled { opacity: .5; cursor: default; }
+.vc-big:focus-visible { outline: 2px solid var(--cyan); outline-offset: 3px; }
+.vc-big.on { color: #06060f; background: linear-gradient(135deg, var(--violet), var(--cyan)); border-color: transparent; box-shadow: 0 0 0 6px rgba(139,124,255,0.18), 0 0 34px rgba(79,209,255,0.35); animation: vcpulse 1.6s ease-in-out infinite; }
+@keyframes vcpulse { 0%,100% { box-shadow: 0 0 0 6px rgba(139,124,255,0.18), 0 0 30px rgba(79,209,255,0.3); } 50% { box-shadow: 0 0 0 12px rgba(139,124,255,0.08), 0 0 44px rgba(79,209,255,0.45); } }
+.vc-textrow { display: flex; gap: 10px; align-items: center; width: 100%; max-width: 900px; }
+.attach-btn.live { color: var(--cyan); border-color: var(--border-lit); animation: vcpulse 1.6s ease-in-out infinite; }
+@media (max-width: 900px) { .vc-msg { max-width: 94%; } .vc-voice { max-width: 100%; } }
 
 ```
 
@@ -6118,6 +6251,280 @@ export default function Council() {
       </div>
 
       {openWeaver && !result && <button className="cw-close" onClick={() => setOpenWeaver(null)}><X size={14} /></button>}
+    </div>
+  );
+}
+
+```
+
+
+### `frontend/src/components/VoiceChat.js`
+```javascript
+import React, { useCallback, useEffect, useRef, useState } from "react";
+import axios from "axios";
+import { toast } from "sonner";
+import { motion, AnimatePresence } from "framer-motion";
+import {
+  Mic, MicOff, Square, Volume2, VolumeX, Send, Radio, Hand, Keyboard, Zap, Crown,
+  Loader2, Trash2, AlertTriangle, Ear, Waves
+} from "lucide-react";
+import { API } from "../App";
+import { Markdown } from "./FileAnalyzer";
+
+const SR = typeof window !== "undefined" ? (window.SpeechRecognition || window.webkitSpeechRecognition) : null;
+const TTS = typeof window !== "undefined" ? window.speechSynthesis : null;
+
+const INTERACTION = [
+  { key: "handsfree", label: "Hands-free", icon: Radio, hint: "Listens, replies aloud, listens again until you stop." },
+  { key: "ptt", label: "Push-to-talk", icon: Hand, hint: "Hold the button to speak, release to send. Reply spoken once." },
+  { key: "text", label: "Text-first", icon: Keyboard, hint: "Type or dictate; click the speaker to hear a reply." },
+];
+
+const getSession = () => {
+  try {
+    let s = localStorage.getItem("acaso_voice_session");
+    if (!s) { s = crypto.randomUUID(); localStorage.setItem("acaso_voice_session", s); }
+    return s;
+  } catch { return "voice-default"; }
+};
+
+export default function VoiceChat() {
+  const [sessionId, setSessionId] = useState(getSession);
+  const [interaction, setInteraction] = useState("handsfree");
+  const [answerMode, setAnswerMode] = useState("fast");
+  const [messages, setMessages] = useState([]);
+  const [listening, setListening] = useState(false);
+  const [interim, setInterim] = useState("");
+  const [thinking, setThinking] = useState(false);
+  const [speaking, setSpeaking] = useState(false);
+  const [speakReplies, setSpeakReplies] = useState(true);
+  const [voices, setVoices] = useState([]);
+  const [voiceName, setVoiceName] = useState(() => localStorage.getItem("acaso_voice_name") || "");
+  const [text, setText] = useState("");
+  const [active, setActive] = useState(false); // hands-free loop on/off
+
+  const recRef = useRef(null);
+  const activeRef = useRef(false);
+  const interactionRef = useRef(interaction);
+  const modeRef = useRef(answerMode);
+  const endRef = useRef(null);
+  const finalRef = useRef("");
+  useEffect(() => { interactionRef.current = interaction; }, [interaction]);
+  useEffect(() => { modeRef.current = answerMode; }, [answerMode]);
+  useEffect(() => { activeRef.current = active; }, [active]);
+
+  const supported = !!SR && !!TTS;
+
+  // ---- voices ----
+  useEffect(() => {
+    if (!TTS) return;
+    const load = () => {
+      const v = TTS.getVoices().filter((x) => x.lang && x.lang.toLowerCase().startsWith("en"));
+      setVoices(v.length ? v : TTS.getVoices());
+    };
+    load();
+    TTS.addEventListener?.("voiceschanged", load);
+    return () => TTS.removeEventListener?.("voiceschanged", load);
+  }, []);
+
+  // ---- history ----
+  useEffect(() => {
+    (async () => {
+      try { const r = await axios.get(`${API}/voice/history`, { params: { session_id: sessionId } }); setMessages(r.data); }
+      catch { /* silent */ }
+    })();
+  }, [sessionId]);
+
+  useEffect(() => { endRef.current?.scrollIntoView({ behavior: "smooth" }); }, [messages, interim, thinking]);
+
+  // ---- TTS ----
+  const stopSpeaking = useCallback(() => { try { TTS?.cancel(); } catch { /* ignore */ } setSpeaking(false); }, []);
+
+  const speak = useCallback((content, onDone) => {
+    if (!TTS || !content) { onDone?.(); return; }
+    TTS.cancel();
+    const u = new SpeechSynthesisUtterance(content);
+    const v = voices.find((x) => x.name === voiceName);
+    if (v) u.voice = v;
+    u.rate = 1.02; u.pitch = 1;
+    u.onstart = () => setSpeaking(true);
+    u.onend = () => { setSpeaking(false); onDone?.(); };
+    u.onerror = () => { setSpeaking(false); onDone?.(); };
+    TTS.speak(u);
+  }, [voices, voiceName]);
+
+  // ---- STT ----
+  const stopListening = useCallback(() => {
+    try { recRef.current?.stop(); } catch { /* ignore */ }
+    setListening(false); setInterim("");
+  }, []);
+
+  const send = useCallback(async (msg, { speakIt } = { speakIt: true }) => {
+    const content = (msg || "").trim();
+    if (!content) return;
+    const mode = modeRef.current;
+    setMessages((m) => [...m, { id: `tmp-${Date.now()}`, role: "user", content, mode, created_at: new Date().toISOString() }]);
+    setThinking(true);
+    if (mode === "council") toast("Council convened - this takes 1-3 minutes", { icon: <Crown size={14} /> });
+    try {
+      const r = await axios.post(`${API}/voice/chat`, { message: content, session_id: sessionId, mode }, { timeout: 320000 });
+      const reply = r.data.reply;
+      setMessages((m) => [...m, reply]);
+      setThinking(false);
+      const after = () => {
+        if (interactionRef.current === "handsfree" && activeRef.current) startListening(); // eslint-disable-line no-use-before-define
+      };
+      if (speakIt && speakReplies) speak(reply.content, after); else after();
+    } catch (e) {
+      setThinking(false);
+      toast.error(e?.response?.data?.detail || "ACASO could not answer");
+      if (interactionRef.current === "handsfree" && activeRef.current) setTimeout(() => startListening(), 800); // eslint-disable-line no-use-before-define
+    }
+  }, [sessionId, speak, speakReplies]);
+
+  const startListening = useCallback(() => {
+    if (!SR) return;
+    stopSpeaking();
+    try { recRef.current?.abort(); } catch { /* ignore */ }
+    const rec = new SR();
+    rec.lang = "en-US";
+    rec.interimResults = true;
+    rec.continuous = interactionRef.current === "ptt";
+    finalRef.current = "";
+    rec.onstart = () => { setListening(true); setInterim(""); };
+    rec.onresult = (ev) => {
+      let fin = "", inter = "";
+      for (let i = 0; i < ev.results.length; i++) {
+        const t = ev.results[i][0].transcript;
+        if (ev.results[i].isFinal) fin += t + " "; else inter += t;
+      }
+      finalRef.current = fin.trim();
+      setInterim((fin + inter).trim());
+    };
+    rec.onerror = (ev) => {
+      setListening(false); setInterim("");
+      if (ev.error === "not-allowed") { toast.error("Microphone permission denied"); setActive(false); }
+      else if (ev.error !== "aborted" && ev.error !== "no-speech") toast.error(`Mic error: ${ev.error}`);
+      if (ev.error === "no-speech" && interactionRef.current === "handsfree" && activeRef.current) setTimeout(() => startListening(), 400);
+    };
+    rec.onend = () => {
+      setListening(false);
+      const heard = finalRef.current;
+      setInterim("");
+      if (interactionRef.current === "text") { if (heard) setText((t) => (t ? t + " " : "") + heard); return; }
+      if (heard) send(heard);
+      else if (interactionRef.current === "handsfree" && activeRef.current && !thinking) setTimeout(() => startListening(), 300);
+    };
+    recRef.current = rec;
+    try { rec.start(); } catch { /* already started */ }
+  }, [send, stopSpeaking, thinking]);
+
+  const toggleHandsFree = () => {
+    if (active) { setActive(false); activeRef.current = false; stopListening(); stopSpeaking(); }
+    else { setActive(true); activeRef.current = true; startListening(); }
+  };
+
+  const clearHistory = async () => {
+    try { await axios.delete(`${API}/voice/history`, { params: { session_id: sessionId } }); } catch { /* ignore */ }
+    const s = crypto.randomUUID(); localStorage.setItem("acaso_voice_session", s); setSessionId(s); setMessages([]);
+  };
+
+  useEffect(() => () => { try { recRef.current?.abort(); TTS?.cancel(); } catch { /* ignore */ } }, []);
+
+  const changeInteraction = (k) => { setActive(false); activeRef.current = false; stopListening(); setInteraction(k); };
+
+  return (
+    <div className="vc-wrap" data-testid="voice-page">
+      <div className="chr-hero">
+        <div className="chr-hero-left">
+          <div className="chr-title"><Waves size={18} /> Voice Channel</div>
+          <p>Talk to ACASO out loud. Speech recognition and speech synthesis run <b>in your browser</b> (Web Speech API - no keys, no audio sent to the server; only the transcript is). Choose how you want to talk, and per message whether the <b>fast</b> voice or the full <b>Council of Weavers</b> answers.</p>
+        </div>
+        <div className="chr-hero-stats">
+          <div className="chr-stat"><span className="v">{messages.filter((m) => m.role === "user").length}</span><span className="l">Turns</span></div>
+          <div className={`chr-stat ${listening ? "gold" : ""}`}><span className="v">{listening ? "LIVE" : speaking ? "TALK" : "IDLE"}</span><span className="l">Mic state</span></div>
+        </div>
+      </div>
+
+      {!supported && (
+        <div className="cw-honesty" data-testid="voice-unsupported"><AlertTriangle size={14} />
+          This browser lacks the Web Speech API. Use Chrome, Edge or Safari for voice; typing still works below.
+        </div>
+      )}
+
+      <div className="fa-console">
+        <div className="vc-controls">
+          <div className="vc-seg" role="tablist" aria-label="Interaction mode">
+            {INTERACTION.map((m) => { const I = m.icon; return (
+              <button key={m.key} data-testid={`voice-mode-${m.key}`} className={interaction === m.key ? "vc-seg-btn active" : "vc-seg-btn"} onClick={() => changeInteraction(m.key)} title={m.hint}>
+                <I size={14} /> {m.label}
+              </button>); })}
+          </div>
+          <div className="vc-seg" aria-label="Who answers">
+            <button data-testid="answer-fast" className={answerMode === "fast" ? "vc-seg-btn active" : "vc-seg-btn"} onClick={() => setAnswerMode("fast")}><Zap size={14} /> Fast</button>
+            <button data-testid="answer-council" className={answerMode === "council" ? "vc-seg-btn active council" : "vc-seg-btn"} onClick={() => setAnswerMode("council")}><Crown size={14} /> Council</button>
+          </div>
+          <select data-testid="voice-select" className="cw-input vc-voice" value={voiceName} onChange={(e) => { setVoiceName(e.target.value); localStorage.setItem("acaso_voice_name", e.target.value); }}>
+            <option value="">Default voice</option>
+            {voices.map((v) => <option key={v.name} value={v.name}>{v.name}</option>)}
+          </select>
+          <button data-testid="voice-mute" className="attach-btn" title={speakReplies ? "Mute spoken replies" : "Unmute spoken replies"} onClick={() => { setSpeakReplies((s) => !s); stopSpeaking(); }}>
+            {speakReplies ? <Volume2 size={14} /> : <VolumeX size={14} />}
+          </button>
+          <button data-testid="voice-clear" className="attach-btn danger" title="Clear conversation" onClick={clearHistory}><Trash2 size={14} /></button>
+        </div>
+        <div className="vc-hint">{INTERACTION.find((m) => m.key === interaction)?.hint} {answerMode === "council" ? "Council answers take 1-3 minutes and are summarized aloud; the full directive appears in the transcript." : ""}</div>
+      </div>
+
+      <div className="vc-transcript" data-testid="voice-transcript">
+        {messages.length === 0 && !interim && !thinking && (
+          <div className="attach-empty" data-testid="voice-empty"><Ear size={13} /> Nothing said yet. Start the mic or type below.</div>
+        )}
+        <AnimatePresence initial={false}>
+          {messages.map((m) => (
+            <motion.div key={m.id} className={`vc-msg ${m.role}`} initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} data-testid={`voice-msg-${m.role}`}>
+              <div className="vc-msg-meta">{m.role === "user" ? "You" : "ACASO"}{m.mode === "council" ? " · Council" : ""}{m.model_label ? ` · ${m.model_label}` : ""}</div>
+              <div className="vc-msg-body">{m.content}</div>
+              {m.full_text && (
+                <details className="vc-full"><summary>Full Sovereign Directive</summary><Markdown text={m.full_text} /></details>
+              )}
+              {m.role === "assistant" && (
+                <button className="vc-replay" onClick={() => speak(m.content)} title="Speak this reply" data-testid="voice-replay"><Volume2 size={12} /> speak</button>
+              )}
+            </motion.div>
+          ))}
+        </AnimatePresence>
+        {interim && <div className="vc-msg user interim" data-testid="voice-interim"><div className="vc-msg-meta">You (hearing...)</div><div className="vc-msg-body">{interim}</div></div>}
+        {thinking && <div className="vc-thinking" data-testid="voice-thinking"><Loader2 className="spin" size={14} /> {answerMode === "council" ? "Council of Weavers in session..." : "ACASO is thinking..."}</div>}
+        <div ref={endRef} />
+      </div>
+
+      <div className="vc-dock">
+        {interaction === "handsfree" && (
+          <button data-testid="voice-handsfree-toggle" className={`vc-big ${active ? "on" : ""}`} onClick={toggleHandsFree} disabled={!supported}>
+            {active ? <Square size={22} /> : <Mic size={22} />}
+            <span>{active ? (listening ? "Listening - tap to stop" : speaking ? "Speaking - tap to stop" : thinking ? "Thinking - tap to stop" : "Resuming...") : "Start conversation"}</span>
+          </button>
+        )}
+        {interaction === "ptt" && (
+          <button data-testid="voice-ptt" className={`vc-big ${listening ? "on" : ""}`} disabled={!supported}
+            onMouseDown={startListening} onMouseUp={stopListening} onMouseLeave={() => listening && stopListening()}
+            onTouchStart={(e) => { e.preventDefault(); startListening(); }} onTouchEnd={(e) => { e.preventDefault(); stopListening(); }}>
+            {listening ? <Mic size={22} /> : <MicOff size={22} />}
+            <span>{listening ? "Release to send" : "Hold to talk"}</span>
+          </button>
+        )}
+        {interaction === "text" && (
+          <form className="vc-textrow" onSubmit={(e) => { e.preventDefault(); const t = text; setText(""); send(t, { speakIt: speakReplies }); }}>
+            <button type="button" data-testid="voice-dictate" className={`attach-btn ${listening ? "live" : ""}`} title="Dictate" onClick={() => (listening ? stopListening() : startListening())} disabled={!supported}>
+              {listening ? <Square size={14} /> : <Mic size={14} />}
+            </button>
+            <input data-testid="voice-text-input" className="cw-input grow" value={text} onChange={(e) => setText(e.target.value)} placeholder="Type or dictate a message..." />
+            <button type="submit" data-testid="voice-text-send" className="fa-btn primary" disabled={!text.trim() || thinking}><Send size={14} /> Send</button>
+          </form>
+        )}
+        {speaking && <button className="fa-btn" data-testid="voice-stop-speaking" onClick={stopSpeaking}><VolumeX size={14} /> Stop voice</button>}
+      </div>
     </div>
   );
 }

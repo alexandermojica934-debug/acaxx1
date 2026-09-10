@@ -236,3 +236,13 @@ which did not exist -> built it for real.
 - Honesty: LLM reasoning only; no market/on-chain/lead data connected. Not implemented from the specs:
   Foresight Layer 1-3 data ingestion/nowcast/regime ML, ElevenLabs/Whisper/ChromaDB local kiosk (v5 manual).
 - Google Drive OAuth: still connected:false - user must click Connect Google Drive in File Analyzer.
+
+## Phase: Voice Channel (Status: COMPLETED)
+User choices: Web Speech API (browser STT/TTS, no keys); per-message Fast/Council toggle; all three
+interaction modes (hands-free loop, push-to-talk, text-first with dictation).
+- Backend: POST /api/voice/chat (fast: GPT-4o-mini w/ failover + last 12 turns memory; council: reuses
+  acaso_deliberate then a <=6-sentence spoken summary, full directive returned), GET/DELETE /api/voice/history.
+  Transcripts in db.voice_messages. Audio never reaches the server.
+- Frontend: components/VoiceChat.js, "Voice" tab, .vc-* CSS. Voice picker, mute, replay, clear session.
+- Verified (agent): text-first turn -> reply rendered; PTT/hands-free UI render; mic itself cannot be
+  exercised headlessly - user must grant mic permission in Chrome/Edge/Safari (HTTPS preview is fine).

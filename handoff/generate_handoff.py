@@ -41,6 +41,7 @@ SOURCE_FILES = [
     "frontend/src/components/FileAnalyzer.js",
     "frontend/src/components/SelfDirective.js",
     "frontend/src/components/Council.js",
+    "frontend/src/components/VoiceChat.js",
     "handoff/scripts/acaso_client.py",
     "handoff/scripts/script_01_genesis_engine.py",
     "handoff/scripts/script_03_sovereign_hunter.py",
@@ -62,6 +63,7 @@ FEATURES = [
     "Analysis Export: one-click download of the analysis + chat thread + file list as a Markdown report",
     "Google Drive ingestion (user OAuth): connect, browse, SEARCH by name, import selected files OR an entire folder (recursive) in one click, auto-analyzes after import. Requires user-supplied Web-app OAuth client.",
     "Council of Weavers deliberation engine (POST /api/acaso/deliberate): Architect(Gemini)/Shadow(Claude, veto)/Muse(GPT)/Finance(GPT) in parallel -> Meta-Weaver synthesis -> Sovereign Directive + inferred weak signals; journaled, exportable to .md; presets Genesis Engine / Sovereign Hunter / Foresight Thesis; runner scripts in handoff/scripts. LLM reasoning only - no live market/lead data.",
+    "Voice Channel: browser Web Speech API (STT+TTS, no keys, no audio to server) -> POST /api/voice/chat; hands-free loop / push-to-talk / text-first modes; per-message Fast (GPT-4o-mini w/ session memory) or Council (full deliberation + spoken summary); transcript persisted per session.",
 ]
 
 MODELS = {
@@ -71,6 +73,8 @@ MODELS = {
 }
 
 KEY_ENDPOINTS = [
+    ["POST", "/api/voice/chat", "voice turn: {message, session_id, mode: fast|council} -> spoken reply (+full directive in council mode)"],
+    ["GET/DELETE", "/api/voice/history?session_id=", "voice transcript per session"],
     ["GET", "/api/acaso/presets", "council presets (genesis/hunter/foresight)"],
     ["POST", "/api/acaso/deliberate", "run Council of Weavers -> sovereign_directive, weak_signals, weavers, council_consulted"],
     ["GET", "/api/acaso/deliberations[/{id}][/export]", "list / open / export .md a deliberation"],

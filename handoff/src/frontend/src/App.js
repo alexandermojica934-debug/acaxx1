@@ -9,7 +9,8 @@ import AgentBridge from "./components/AgentBridge";
 import FileAnalyzer from "./components/FileAnalyzer";
 import SelfDirective from "./components/SelfDirective";
 import Council from "./components/Council";
-import { Sparkles, LayoutGrid, MessagesSquare, BookOpen, ShieldAlert, Plug, Boxes, Wand2, Crown } from "lucide-react";
+import VoiceChat from "./components/VoiceChat";
+import { Sparkles, LayoutGrid, MessagesSquare, BookOpen, ShieldAlert, Plug, Boxes, Wand2, Crown, Waves } from "lucide-react";
 
 const BACKEND_URL = process.env.REACT_APP_BACKEND_URL;
 export const API = `${BACKEND_URL}/api`;
@@ -18,6 +19,7 @@ const TABS = [
   { key: "home", label: "Sovereign Home", icon: LayoutGrid },
   { key: "bounty", label: "Bug Bounty", icon: ShieldAlert },
   { key: "council", label: "Council", icon: Crown },
+  { key: "voice", label: "Voice", icon: Waves },
   { key: "askai", label: "Ask All AIs", icon: MessagesSquare },
   { key: "analyzer", label: "File Analyzer", icon: Boxes },
   { key: "self", label: "Self-Directive", icon: Wand2 },
@@ -69,6 +71,7 @@ function App() {
         {tab === "home" && <SovereignHome />}
         {tab === "bounty" && <BugBounty />}
         {tab === "council" && <Council />}
+        {tab === "voice" && <VoiceChat />}
         {tab === "askai" && <AskAllAIs />}
         {tab === "analyzer" && <FileAnalyzer />}
         {tab === "self" && <SelfDirective />}
