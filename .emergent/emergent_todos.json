@@ -1,18 +1,26 @@
 [
   {
-    "content": "Whole-Folder Import (backend /drive/import-folder + modal button)",
+    "content": "Directive-to-Mission backend + Council UI",
     "status": "completed"
   },
   {
-    "content": "Analysis Export (backend markdown export + Export button)",
+    "content": "Radar backend + frontend",
     "status": "completed"
   },
   {
-    "content": "Chat Citations Jump (clickable path:line -> file viewer w/ highlight) — verified end-to-end",
+    "content": "Voice Commander: dictation everywhere + voice commands",
     "status": "completed"
   },
   {
-    "content": "Handoff regenerated + all components compile + services healthy",
+    "content": "Testing agent iteration_3 (102/102), handoff regen, plan update",
     "status": "completed"
+  },
+  {
+    "content": "Apex Nexus / Oracle Cortex ten vectors: assess, get user scope decision, then build",
+    "status": "in_progress"
+  },
+  {
+    "content": "Periodic self-update scanner in Self-Directive (propose-only, approval-gated)",
+    "status": "pending"
   }
 ]

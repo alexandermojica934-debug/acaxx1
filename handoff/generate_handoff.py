@@ -42,6 +42,12 @@ SOURCE_FILES = [
     "frontend/src/components/SelfDirective.js",
     "frontend/src/components/Council.js",
     "frontend/src/components/VoiceChat.js",
+    "frontend/src/components/VoiceCommander.js",
+    "frontend/src/components/Radar.js",
+    "backend/radar.py",
+    "backend/node.py",
+    "frontend/src/components/LocalNode.js",
+    "handoff/local_node/acaso_node.py",
     "handoff/scripts/acaso_client.py",
     "handoff/scripts/script_01_genesis_engine.py",
     "handoff/scripts/script_03_sovereign_hunter.py",
@@ -64,6 +70,11 @@ FEATURES = [
     "Google Drive ingestion (user OAuth): connect, browse, SEARCH by name, import selected files OR an entire folder (recursive) in one click, auto-analyzes after import. Requires user-supplied Web-app OAuth client.",
     "Council of Weavers deliberation engine (POST /api/acaso/deliberate): Architect(Gemini)/Shadow(Claude, veto)/Muse(GPT)/Finance(GPT) in parallel -> Meta-Weaver synthesis -> Sovereign Directive + inferred weak signals; journaled, exportable to .md; presets Genesis Engine / Sovereign Hunter / Foresight Thesis; runner scripts in handoff/scripts. LLM reasoning only - no live market/lead data.",
     "Voice Channel: browser Web Speech API (STT+TTS, no keys, no audio to server) -> POST /api/voice/chat; hands-free loop / push-to-talk / text-first modes; per-message Fast (GPT-4o-mini w/ session memory) or Council (full deliberation + spoken summary); transcript persisted per session.",
+    "Directive-to-Mission: POST /api/acaso/deliberations/{id}/to-mission compiles a Council directive into a Sovereign Home mission (idempotent, source_deliberation_id).",
+    "Global VoiceCommander: floating mic on every tab - Dictate mode types into the focused text box (native-setter injection so React state updates); Command mode -> POST /api/voice/command (rule-based + LLM intent router: open_tab, council_deliberate, compile_directive, radar_discover, radar_search, ask) executes and speaks back.",
+    "Opportunity Radar (backend/radar.py, /api/radar/*): REAL sources Grants.gov public API (no key), GitHub bounty issues, SAM.gov (needs SAM_GOV_API_KEY); adapters fetch->normalize->validate->dedupe->barrier signals->transparent 0-100 score (8 weighted components, labelled inferred)->persist->stale marking; every record has source_url/retrieved_at/http_status/parser_version/evidence[] with source_location; Fit Analyst + Skeptic (gates Strong fit) + Compliance Sentinel on demand; NL search proposes filters never auto-applied; Drafting Desk (email/grant narrative/outreach packet/fill-a-form) uses only profile + source text with [FILL] placeholders; Add-to-pipeline -> mission; export .md. Nothing auto-submitted.",
+    "Periodic self-scan (Self-Directive): in-process asyncio scheduler, off by default; deterministic checks (py_compile, ruff F/E9, esbuild per component, TODO/console.log census) -> at most ONE Self-Directive proposal per run tagged origin=scheduled_scan; NEVER auto-applies; UI toggle/interval/focus/Scan now/history.",
+    "Local Node (backend/node.py + handoff/local_node/acaso_node.py, served at /local-node/*): owner runs the Python client on their PC (Windows/Linux), pairs with the Agent Bridge key; server holds an approval-gated task queue (read-only auto-approved; every write/shell/browser action must be approved in the Local Node tab); node enforces allowed roots, backs up overwritten files, soft-deletes to .acaso_trash; browser tasks drive a real headed Chrome (persistent profile) via Playwright, fill forms and STOP (awaiting_submit) until a separate browser_submit is approved; secrets written as [OWNER TYPES THIS]. LLM planner turns a goal into proposed tasks. Server research browser (headless Chromium, /api/browse/research) reads public pages: text/links/forms/screenshot + quoted answer.",
 ]
 
 MODELS = {
@@ -73,6 +84,19 @@ MODELS = {
 }
 
 KEY_ENDPOINTS = [
+    ["GET/PUT", "/api/self/scan/config | POST /api/self/scan/run | GET /api/self/scans", "periodic self-scan (propose-only)"],
+    ["POST", "/api/node/register | /api/node/{id}/heartbeat | /api/node/{id}/claim | /api/node/tasks/{tid}/result", "node-side (X-ACASO-Key)"],
+    ["GET", "/api/node/nodes | /api/node/tasks | /api/node/setup", "owner-side node + queue"],
+    ["POST", "/api/node/tasks | /api/node/tasks/{tid}/decision | /api/node/plan", "create / approve-reject / LLM plan"],
+    ["POST", "/api/browse/research", "server headless browser: public page -> text, links, forms, screenshot, quoted answer"],
+    ["POST", "/api/voice/command", "spoken command -> intent -> execute -> {navigate_tab, spoken, result}"],
+    ["POST", "/api/acaso/deliberations/{id}/to-mission", "Council directive -> Sovereign Home mission"],
+    ["GET/PUT", "/api/radar/profile", "Radar owner profile"],
+    ["POST", "/api/radar/discover", "run source adapters {sources?, keyword?, limit}"],
+    ["GET", "/api/radar/opportunities[?type&source&min_score&closing_days&low_barrier&remote&max_value&q&saved&sort]", "scored feed"],
+    ["GET/PATCH", "/api/radar/opportunities/{id}", "detail / status-stage-notes"],
+    ["POST", "/api/radar/opportunities/{id}/analyze|draft|to-mission", "AI personas / drafting desk / pipeline"],
+    ["POST", "/api/radar/search/nl", "natural language -> proposed filters"],
     ["POST", "/api/voice/chat", "voice turn: {message, session_id, mode: fast|council} -> spoken reply (+full directive in council mode)"],
     ["GET/DELETE", "/api/voice/history?session_id=", "voice transcript per session"],
     ["GET", "/api/acaso/presets", "council presets (genesis/hunter/foresight)"],

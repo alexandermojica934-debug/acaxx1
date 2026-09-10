@@ -246,3 +246,64 @@ interaction modes (hands-free loop, push-to-talk, text-first with dictation).
 - Frontend: components/VoiceChat.js, "Voice" tab, .vc-* CSS. Voice picker, mute, replay, clear session.
 - Verified (agent): text-first turn -> reply rendered; PTT/hands-free UI render; mic itself cannot be
   exercised headlessly - user must grant mic permission in Chrome/Edge/Safari (HTTPS preview is fine).
+
+## Phase: Directive-to-Mission (Status: COMPLETED)
+- POST /api/acaso/deliberations/{id}/to-mission -> compile_mission_from_text (shared helper refactored out of
+  compile_directive) -> mission with source_deliberation_id; idempotent; Council UI button + "On board" link.
+
+## Phase: Opportunity Radar - lean MVP (Status: COMPLETED - testing iteration_3: 102/102 passed)
+User choices: build inside ACASO; sources Grants.gov (no key) + SAM.gov (SAM_GOV_API_KEY, user-supplied) +
+GitHub bounty issues (optional GITHUB_TOKEN); lean scope + Drafting Desk (email / grant narrative / outreach
+packet / fill-a-form) per later request.
+- backend/radar.py (own module, router /api/radar/*): profile, sources, discover (adapters fetch->normalize->
+  validate->dedupe->barrier->score->persist->stale), opportunities feed/filters, detail, patch (status/stage/notes
+  + audit), to-mission, NL search -> proposed filters (never auto-applied), analyze (Fit Analyst + Skeptic +
+  Compliance Sentinel; Strong fit gated on Skeptic), draft (placeholders [FILL] instead of fabrication), export .md.
+- Integrity: every record has source_url, retrieved_at, http_status, parser_version, evidence[] with
+  source_location; unknown -> None -> "Not verified" in UI; scores labelled inferred; nothing auto-submitted.
+- frontend/src/components/Radar.js + "Radar" tab; .rd-* CSS (amber/lime/cyan desk accents, no purple gradients).
+- Verified (agent): discover 24 records/0 integrity violations; deadlines parse; Skeptic blocked a mismatched
+  grant; email draft produced 9 [FILL] placeholders; UI feed + detail screenshots OK.
+- Known: SAM.gov shows "needs key" until user adds SAM_GOV_API_KEY to backend/.env and backend restarts.
+- Not built (spec items deferred): scheduled background pipeline, notifications, pipeline-monitoring page,
+  state/municipal portals, corporate sponsorship sources, automated test suite, Market Weaver persona.
+
+## Phase: Voice Commander - dictation everywhere + voice commands (Status: COMPLETED)
+User choice: both dictation and commands. Global floating widget (components/VoiceCommander.js, mounted in App.js).
+- Dictate: tracks last-focused input/textarea app-wide; injects recognized speech via the native value setter +
+  input event so React controlled state updates (verified in screenshot automation). Ctrl/Cmd+Shift+Space toggles.
+- Command: POST /api/voice/command - rule-based fast path (open/go to <tab>, convene the council on X,
+  discover grants/opportunities [for X], compile a mission to X) then LLM router fallback (COMMAND_SCHEMA);
+  executes server-side (council deliberate, compile mission, radar discover, nl search, ask) and returns
+  navigate_tab + spoken text; commands journaled in db.voice_commands.
+- Tested: iteration_3 (rules parser, execute:false, 400 on empty) + widget on all 10 tabs.
+
+## Incoming specs (handoff/specs/) awaiting scoping
+- manus_periodic_updates_reference.md: Manus Heartbeat/AGENT cron doc - platform-specific, N/A here. Intent to
+  implement: scheduled preview-only self-scan in Self-Directive that PROPOSES patches (never auto-applies),
+  via in-process asyncio scheduler (supervisor keeps backend alive; not Cloud Run).
+- ten_capabilities.json (10 capability modules) + "Oracle Cortex" 10 zero-capital vectors (pasted in chat).
+  Radar already covers vector 6 (RFP auto-responder: drafting desk on real RFP/grant records). Awaiting
+  user's Apex Nexus spec + decision on which vectors to build; several vectors involve scraping/ToS/legal
+  risk (registries, SMB blogs, competitor pricing) and unattended auto-billing - must be flagged.
+
+## Phase: Periodic self-scan (Status: COMPLETED)
+Propose-only scheduler in server.py (_self_scan_loop, run_self_scan, /api/self/scan/*). Verified: clean scan -> no
+proposal; planted console.log -> 1 proposal (origin scheduled_scan), live file untouched. UI in SelfDirective.js.
+
+## Phase: Local Node + browser agent (Status: IMPLEMENTED, testing pending)
+User choices: Local Node with approval on every write; browser BOTH (server headless for research, owner's PC Chrome
+via node for accounts); Windows + Linux; fill forms and stop before every Submit.
+- backend/node.py: /api/node/* (owner + key-auth node routes), /api/browse/research (Playwright headless; browsers
+  at /pw-browsers, env fallback set in code). Playwright added to requirements.txt.
+- handoff/local_node/: acaso_node.py (files/shell/browser, root enforcement, backups, trash, awaiting_submit),
+  README, run_node.bat, run_node.sh; copies served from frontend/public/local-node/.
+- frontend LocalNode.js + "Local Node" tab; voice command map includes "node".
+- Verified in-container with the real client: pair -> online, read-only auto-run, write blocked until approval,
+  out-of-root 400, approved write + shell executed, planner produced 2 proposed tasks, research browser read
+  sba.gov with quoted answer + screenshot. PC browser path (headed Chrome) cannot be exercised here - user must run it.
+- Test data cleaned from Mongo.
+
+## Queue
+- NEXT: Apex Nexus tab (#6 RFP Kit, #2 Prompt Libraries, #10 SEO Packs) with order/unlock flow; Stripe Checkout
+  when user supplies keys (integration playbook first).

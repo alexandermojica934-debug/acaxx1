@@ -5,6 +5,7 @@ from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
 import os
 import io
+import re
 import json
 import logging
 import asyncio
@@ -18,7 +19,7 @@ from pathlib import Path
 from pydantic import BaseModel, Field, ConfigDict
 from typing import List, Optional
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 
 from emergentintegrations.llm.chat import LlmChat, UserMessage
 
@@ -122,6 +123,8 @@ class Mission(BaseModel):
     cvss: float = 0.0
     report: str = ""
     soul_council: Optional[dict] = None
+    source_deliberation_id: Optional[str] = None
+    source_opportunity_id: Optional[str] = None
     created_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
 
 class CompileRequest(BaseModel):
@@ -249,15 +252,15 @@ Return JSON with EXACTLY these keys:
 async def root():
     return {"message": "ACASO Omniverse online", "modes": MODES}
 
-@api_router.post("/compile-directive", response_model=Mission)
-async def compile_directive(req: CompileRequest):
-    if not req.directive.strip():
+async def compile_mission_from_text(directive_text: str, mode: str = "Move", **extra) -> Mission:
+    """Compile any directive text into a persisted Sovereign Home mission (shared by Council + Radar)."""
+    if not directive_text.strip():
         raise HTTPException(400, "Directive is required")
-    mode = req.mode if req.mode in MODES else "Move"
+    mode = mode if mode in MODES else "Move"
     lesson_docs = await db.chronicle.find({}, {"_id": 0, "lesson": 1}).sort("completed_at", -1).to_list(5)
     lessons = [d["lesson"] for d in lesson_docs if d.get("lesson")]
     try:
-        raw = await llm_call(COMPILE_SYSTEM, compile_prompt(req.directive, mode, lessons))
+        raw = await llm_call(COMPILE_SYSTEM, compile_prompt(directive_text, mode, lessons))
         data = extract_json(raw)
     except Exception as e:
         logger.error(f"compile failed: {e}")
@@ -265,7 +268,7 @@ async def compile_directive(req: CompileRequest):
 
     steps = [Step(title=s.get("title", "Step"), detail=s.get("detail", "")) for s in data.get("steps", [])]
     mission = Mission(
-        directive=req.directive,
+        directive=directive_text,
         title=data.get("title", "Untitled Mission"),
         mode=data.get("mode", mode),
         summary=data.get("summary", ""),
@@ -276,9 +279,14 @@ async def compile_directive(req: CompileRequest):
         authority=data.get("authority", Mission.model_fields["authority"].default),
         amount=float(data.get("amount", 0) or 0),
         stage="Discovery",
+        **extra,
     )
     await db.missions.insert_one(mission.model_dump())
     return mission
+
+@api_router.post("/compile-directive", response_model=Mission)
+async def compile_directive(req: CompileRequest):
+    return await compile_mission_from_text(req.directive, req.mode or "Move")
 
 BOUNTY_SYSTEM = (
     "You are ACASO's security-research compiler, governed by the Synarchy Aetheris constitutional plane. "
@@ -1541,6 +1549,180 @@ async def self_history():
     return docs
 
 
+# ---------------- Periodic self-scan (PROPOSE-ONLY; never auto-applies) ----------------
+# In-process asyncio scheduler (backend runs persistently under supervisor). Each run performs
+# deterministic health checks (compile / lint / bundle / TODO census) and, if findings warrant,
+# asks the Self-Directive engine for ONE small proposal that lands in the normal approval queue.
+SELF_SCAN_DEFAULTS = {"id": "owner", "enabled": False, "interval_hours": 24, "max_proposals_per_run": 1,
+                      "focus": "Fix real defects first (lint errors, broken compile, obvious bugs). Otherwise propose one small, safe quality improvement (dead code, typo, missing data-testid, accessibility). Never touch env files, dependencies, auth or payment logic.",
+                      "last_run_at": None, "next_run_at": None, "updated_at": None}
+_self_scan_task = None
+_self_scan_running = False
+
+
+async def _get_scan_config():
+    doc = await db.self_scan_config.find_one({"id": "owner"}, {"_id": 0})
+    return {**SELF_SCAN_DEFAULTS, **(doc or {})}
+
+
+def _run_cmd(cmd, cwd=None, timeout=90):
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, cwd=cwd)
+        return r.returncode, (r.stdout or "")[-4000:], (r.stderr or "")[-4000:]
+    except subprocess.TimeoutExpired:
+        return 124, "", "timeout"
+    except FileNotFoundError as e:
+        return 127, "", str(e)
+
+
+def _self_scan_checks() -> dict:
+    """Deterministic, read-only checks. Returns findings with severities."""
+    findings = []
+    backend_dir = APP_ROOT / "backend"
+    for py in ("server.py", "radar.py"):
+        rc, out, err = _run_cmd([sys.executable, "-m", "py_compile", str(backend_dir / py)])
+        if rc != 0:
+            findings.append({"severity": "critical", "check": "py_compile", "path": f"backend/{py}", "detail": err[-600:]})
+    rc, out, err = _run_cmd(["ruff", "check", "server.py", "radar.py", "--select", "F,E9", "--output-format", "concise", "-q"], cwd=str(backend_dir))
+    if rc not in (0, 127) and out.strip():
+        for ln in out.strip().splitlines()[:12]:
+            findings.append({"severity": "high", "check": "ruff", "path": "backend/" + ln.split(":")[0], "detail": ln[:300]})
+    comp_dir = APP_ROOT / "frontend" / "src" / "components"
+    for js in sorted(comp_dir.glob("*.js")):
+        rc, out, err = _run_cmd(["npx", "esbuild", str(js), "--loader:.js=jsx", "--bundle", "--outfile=/dev/null", "--log-level=error"],
+                                cwd=str(APP_ROOT / "frontend"), timeout=120)
+        if rc != 0:
+            findings.append({"severity": "critical", "check": "esbuild", "path": f"frontend/src/components/{js.name}", "detail": err[-600:]})
+    # TODO / FIXME census + oversized components (informational)
+    for js in sorted(comp_dir.glob("*.js")):
+        txt = js.read_text(encoding="utf-8", errors="replace")
+        n = txt.count("TODO") + txt.count("FIXME")
+        if n:
+            findings.append({"severity": "low", "check": "todo_census", "path": f"frontend/src/components/{js.name}", "detail": f"{n} TODO/FIXME marker(s)"})
+        lines = txt.count("\n")
+        if lines > 700:
+            findings.append({"severity": "info", "check": "size", "path": f"frontend/src/components/{js.name}", "detail": f"{lines} lines - consider splitting"})
+    # frontend build-time console.log leftovers (informational)
+    for js in sorted(comp_dir.glob("*.js")):
+        txt = js.read_text(encoding="utf-8", errors="replace")
+        if "console.log(" in txt:
+            findings.append({"severity": "low", "check": "console_log", "path": f"frontend/src/components/{js.name}", "detail": "console.log present"})
+    order = {"critical": 0, "high": 1, "low": 2, "info": 3}
+    findings.sort(key=lambda f: order.get(f["severity"], 9))
+    return {"findings": findings, "counts": {k: sum(1 for f in findings if f["severity"] == k) for k in order}}
+
+
+async def run_self_scan(trigger: str = "manual") -> dict:
+    global _self_scan_running
+    if _self_scan_running:
+        raise HTTPException(409, "A self-scan is already running")
+    _self_scan_running = True
+    sid = str(uuid.uuid4())
+    started = datetime.now(timezone.utc)
+    cfg = await _get_scan_config()
+    scan = {"id": sid, "trigger": trigger, "started_at": started.isoformat(), "status": "running", "findings": [],
+            "counts": {}, "proposal_ids": [], "note": "", "error": None}
+    await db.self_scans.insert_one(dict(scan))
+    try:
+        checks = await asyncio.to_thread(_self_scan_checks)
+        scan.update(checks)
+        # Pick the highest-severity actionable finding that maps to an allowlisted file
+        target = next((f for f in checks["findings"] if f["severity"] in ("critical", "high", "low") and f["check"] != "size"), None)
+        made = 0
+        if target and cfg.get("max_proposals_per_run", 1) > 0:
+            try:
+                _resolve_self_path(target["path"])
+                instruction = (f"SCHEDULED SELF-SCAN ({started.date()}). Finding [{target['severity']}/{target['check']}] in {target['path']}: "
+                               f"{target['detail']}\n\nOperator focus: {cfg['focus']}\n"
+                               "Make the smallest correct change that resolves this finding. Do not refactor unrelated code.")
+                prop = await self_propose({"instruction": instruction, "paths": [target["path"]]})
+                await db.self_directives.update_one({"id": prop["id"]}, {"$set": {"origin": "scheduled_scan", "scan_id": sid}})
+                scan["proposal_ids"].append(prop["id"])
+                made += 1
+            except HTTPException as he:
+                scan["note"] = f"No proposal: {he.detail}"
+            except Exception as e:
+                scan["note"] = f"No proposal: {str(e)[:200]}"
+        elif not target:
+            scan["note"] = "Clean scan - no actionable findings, no proposal generated."
+        scan["status"] = "done"
+        scan["proposals_created"] = made
+    except Exception as e:
+        scan["status"] = "failed"
+        scan["error"] = str(e)[:500]
+        logger.error(f"self-scan failed: {e}")
+    finally:
+        _self_scan_running = False
+        scan["finished_at"] = datetime.now(timezone.utc).isoformat()
+        scan["duration_s"] = round((datetime.now(timezone.utc) - started).total_seconds(), 1)
+        await db.self_scans.update_one({"id": sid}, {"$set": {k: v for k, v in scan.items() if k != "_id"}})
+        nxt = (datetime.now(timezone.utc) + timedelta(hours=float(cfg.get("interval_hours") or 24))).isoformat() if cfg.get("enabled") else None
+        await db.self_scan_config.update_one({"id": "owner"}, {"$set": {"last_run_at": scan["finished_at"], "next_run_at": nxt}}, upsert=True)
+    scan.pop("_id", None)
+    return scan
+
+
+async def _self_scan_loop():
+    await asyncio.sleep(20)
+    while True:
+        try:
+            cfg = await _get_scan_config()
+            if cfg.get("enabled"):
+                now = datetime.now(timezone.utc)
+                nxt = cfg.get("next_run_at")
+                due = (nxt is None) or (datetime.fromisoformat(nxt) <= now)
+                if due and not _self_scan_running:
+                    await run_self_scan(trigger="scheduled")
+        except Exception as e:
+            logger.error(f"self-scan loop error: {e}")
+        await asyncio.sleep(60)
+
+
+@api_router.get("/self/scan/config")
+async def self_scan_config_get():
+    cfg = await _get_scan_config()
+    cfg["running"] = _self_scan_running
+    return cfg
+
+
+@api_router.put("/self/scan/config")
+async def self_scan_config_put(body: dict):
+    cfg = await _get_scan_config()
+    upd = {}
+    if "enabled" in body:
+        upd["enabled"] = bool(body["enabled"])
+    if "interval_hours" in body:
+        try:
+            ih = float(body["interval_hours"])
+        except Exception:
+            raise HTTPException(400, "interval_hours must be a number")
+        if not (1 <= ih <= 720):
+            raise HTTPException(400, "interval_hours must be between 1 and 720")
+        upd["interval_hours"] = ih
+    if "max_proposals_per_run" in body:
+        upd["max_proposals_per_run"] = max(0, min(1, int(body["max_proposals_per_run"])))
+    if "focus" in body:
+        upd["focus"] = str(body["focus"])[:1500]
+    upd["updated_at"] = datetime.now(timezone.utc).isoformat()
+    enabled = upd.get("enabled", cfg.get("enabled"))
+    hours = upd.get("interval_hours", cfg.get("interval_hours") or 24)
+    upd["next_run_at"] = (datetime.now(timezone.utc) + timedelta(hours=float(hours))).isoformat() if enabled else None
+    await db.self_scan_config.update_one({"id": "owner"}, {"$set": upd}, upsert=True)
+    out = await _get_scan_config()
+    out["running"] = _self_scan_running
+    return out
+
+
+@api_router.post("/self/scan/run")
+async def self_scan_run_now():
+    return await run_self_scan(trigger="manual")
+
+
+@api_router.get("/self/scans")
+async def self_scans(limit: int = Query(20, ge=1, le=100)):
+    return await db.self_scans.find({}, {"_id": 0}).sort("started_at", -1).to_list(limit)
+
+
 # ==================== GOOGLE DRIVE (user-authorized OAuth ingestion) ====================
 # Single-owner model (no multi-user auth in this app): all Drive creds stored under DRIVE_OWNER.
 # Requires a Google Cloud *Web application* OAuth client with the registered redirect URI.
@@ -2124,6 +2306,49 @@ async def export_deliberation(did: str):
     return Response(content=md, media_type="text/markdown",
                     headers={"Content-Disposition": f'attachment; filename="{safe}.md"'})
 
+class ToMissionRequest(BaseModel):
+    mode: Optional[str] = "Move"
+
+def _extract_plan_section(directive: str) -> str:
+    """Prefer the 90-day / launch-plan section of a directive; fall back to the whole thing."""
+    if not directive:
+        return ""
+    lines = directive.split("\n")
+    start = None
+    for i, ln in enumerate(lines):
+        if ln.lstrip().startswith("#") and any(k in ln.upper() for k in ("90-DAY", "90 DAY", "LAUNCH PLAN", "SEQUENCE", "EXECUTION", "NEXT ACTION")):
+            start = i
+            break
+    if start is None:
+        return directive[:6000]
+    out = [lines[start]]
+    for ln in lines[start + 1:]:
+        if ln.lstrip().startswith("## ") and "VERDICT" not in ln.upper():
+            break
+        out.append(ln)
+    return "\n".join(out)[:6000]
+
+@api_router.post("/acaso/deliberations/{did}/to-mission", response_model=Mission)
+async def deliberation_to_mission(did: str, req: ToMissionRequest = None):
+    d = await db.deliberations.find_one({"id": did}, {"_id": 0})
+    if not d:
+        raise HTTPException(404, "Deliberation not found")
+    if d.get("mission_id"):
+        existing = await db.missions.find_one({"id": d["mission_id"]}, {"_id": 0})
+        if existing:
+            return Mission(**existing)
+    plan = _extract_plan_section(d.get("sovereign_directive") or "")
+    verdict = ""
+    up = (d.get("sovereign_directive") or "").upper()
+    if "SOVEREIGN VERDICT" in up:
+        verdict = (d.get("sovereign_directive") or "")[up.find("SOVEREIGN VERDICT"):][:600]
+    text = (f"Execute the Council of Weavers' Sovereign Directive titled: {d.get('title','')}\n\n"
+            f"PLAN TO EXECUTE:\n{plan}\n\n{verdict}").strip()
+    mode = (req.mode if req and req.mode in MODES else "Move")
+    mission = await compile_mission_from_text(text, mode, source_deliberation_id=did)
+    await db.deliberations.update_one({"id": did}, {"$set": {"mission_id": mission.id, "mission_title": mission.title}})
+    return mission
+
 
 
 
@@ -2220,6 +2445,155 @@ async def voice_clear(session_id: str = Query(...)):
     return {"ok": True, "deleted": r.deleted_count}
 
 
+# ---------------- Voice Commands: parse spoken intent -> execute -> spoken confirmation ----------------
+VOICE_TABS = {
+    "home": ["home", "sovereign home", "board", "missions", "mission board"],
+    "bounty": ["bounty", "bug bounty", "security"],
+    "council": ["council", "weavers", "council of weavers"],
+    "voice": ["voice", "voice channel"],
+    "radar": ["radar", "opportunity radar", "opportunities", "grants"],
+    "askai": ["ask all ais", "ask all", "ask ai", "ask the ais"],
+    "analyzer": ["analyzer", "file analyzer", "files"],
+    "self": ["self directive", "self-directive", "self"],
+    "chronicle": ["chronicle", "ledger", "outcomes"],
+    "bridge": ["bridge", "agent bridge", "api"],
+    "node": ["local node", "node", "my computer", "desktop", "my pc"],
+}
+COMMAND_SCHEMA = (
+    "Return ONLY minified JSON {\"intent\": ..., \"args\": {...}} with intent one of: "
+    "open_tab {tab: home|bounty|council|voice|radar|askai|analyzer|self|chronicle|bridge|node}; "
+    "council_deliberate {challenge: string, preset_id: genesis|hunter|foresight|custom}; "
+    "compile_directive {directive: string, mode: Make|Find|Move|Collect}; "
+    "radar_discover {keyword: string|null}; radar_search {query: string}; "
+    "ask {message: string}; unknown {}. Never invent details the user did not say."
+)
+
+
+class VoiceCommand(BaseModel):
+    transcript: str
+    session_id: Optional[str] = None
+    execute: bool = True
+
+
+def _rule_intent(t: str):
+    s = t.lower().strip().rstrip(".!?")
+    s = re.sub(r"^(hey |ok |okay )?acaso[, ]*", "", s)
+    m = re.match(r"^(open|go to|show|switch to|take me to)\s+(the\s+)?(.+)$", s)
+    if m:
+        target = m.group(3).replace(" tab", "").strip()
+        for key, names in VOICE_TABS.items():
+            if target in names or target == key:
+                return {"intent": "open_tab", "args": {"tab": key}}
+    m = re.match(r"^(convene|summon|call)\s+(the\s+)?council\s+(on|about|for)\s+(.+)$", s)
+    if m:
+        return {"intent": "council_deliberate", "args": {"challenge": m.group(4), "preset_id": "custom"}}
+    m = re.match(r"^(discover|find|scan for|search for)\s+(new\s+)?(grants|opportunities|contracts|bounties)(\s+(for|about|on)\s+(.+))?$", s)
+    if m:
+        return {"intent": "radar_discover", "args": {"keyword": (m.group(6) or "").strip() or None}}
+    m = re.match(r"^(compile|create|make)\s+(a\s+)?(mission|directive)\s*(to|for|:)?\s*(.+)$", s)
+    if m:
+        return {"intent": "compile_directive", "args": {"directive": m.group(5), "mode": "Move"}}
+    return None
+
+
+@api_router.post("/voice/command")
+async def voice_command(cmd: VoiceCommand):
+    text = (cmd.transcript or "").strip()
+    if not text:
+        raise HTTPException(400, "transcript required")
+    parsed = _rule_intent(text)
+    parser = "rules"
+    if not parsed:
+        try:
+            raw, _, _ = await llm_call_failover(
+                "You are ACASO's voice command router. " + COMMAND_SCHEMA, f"Spoken command: {text}",
+                ["openai", "gemini", "anthropic"])
+            parsed = extract_json(raw)
+            parser = "llm"
+        except Exception as e:
+            parsed = {"intent": "unknown", "args": {}}
+            parser = f"llm_failed: {e}"
+    intent = (parsed or {}).get("intent") or "unknown"
+    args = (parsed or {}).get("args") or {}
+    out = {"transcript": text, "intent": intent, "args": args, "parser": parser, "navigate_tab": None, "spoken": "", "result": None}
+
+    if not cmd.execute:
+        out["spoken"] = f"I heard a {intent.replace('_', ' ')} command."
+        return out
+
+    try:
+        if intent == "open_tab":
+            tab = args.get("tab") if args.get("tab") in VOICE_TABS else "home"
+            out["navigate_tab"] = tab
+            out["spoken"] = f"Opening {tab.replace('askai', 'Ask All AIs').replace('self', 'Self-Directive')}."
+        elif intent == "council_deliberate":
+            ch = (args.get("challenge") or "").strip()
+            if len(ch) < 20:
+                ch = ch + " - deliberate on this fully with risk, invalidation and next steps"
+            res = await acaso_deliberate(DeliberateRequest(challenge=ch, challenge_type="voice_command",
+                                                           preset_id=args.get("preset_id") or "custom",
+                                                           context={"additional_context": "Issued by voice command."}))
+            out["result"] = {"deliberation_id": res["id"], "title": res["title"], "shadow_veto": res["shadow_veto"]}
+            out["navigate_tab"] = "council"
+            summ, _, _ = await llm_call_failover(VOICE_SYSTEM,
+                f"Summarize this Sovereign Directive aloud in at most 4 sentences, mention any Shadow veto:\n{res['sovereign_directive'][:5000]}",
+                ["openai", "gemini", "anthropic"])
+            out["spoken"] = summ.strip() + " The full directive is in the Council tab."
+        elif intent == "compile_directive":
+            d = (args.get("directive") or "").strip()
+            if not d:
+                raise HTTPException(400, "no directive heard")
+            m = await compile_mission_from_text(d, args.get("mode") or "Move")
+            out["result"] = {"mission_id": m.id, "title": m.title, "steps": len(m.steps), "amount": m.amount}
+            out["navigate_tab"] = "home"
+            out["spoken"] = f"Mission {m.title} compiled with {len(m.steps)} steps and a target of {int(m.amount)} dollars. It is on the Sovereign Home board."
+        elif intent == "radar_discover":
+            import radar as _radar
+            res = await _radar.discover(_radar.DiscoverRequest(keyword=args.get("keyword"), limit=20))
+            ok = [r for r in res["runs"] if not r["error"]]
+            new = sum(r["new"] for r in ok); upd = sum(r["updated"] for r in ok)
+            skipped = [r["source"] for r in res["runs"] if r["error"]]
+            out["result"] = res
+            out["navigate_tab"] = "radar"
+            out["spoken"] = (f"Radar pulled {new} new and re-verified {upd} opportunities from {len(ok)} source{'s' if len(ok)!=1 else ''}."
+                             + (f" {', '.join(skipped)} skipped - not configured." if skipped else "") + " Verify each on its original source.")
+        elif intent == "radar_search":
+            import radar as _radar
+            prop = await _radar.nl_search(_radar.NLSearch(query=args.get("query") or text))
+            out["result"] = prop
+            out["navigate_tab"] = "radar"
+            out["spoken"] = "I proposed Radar filters for that search. Review and apply them in the Radar tab - I never apply filters silently."
+        elif intent == "ask":
+            msg = args.get("message") or text
+            ans, _, label = await llm_call_failover(VOICE_SYSTEM, f"Owner asked: {msg}\n\nReply aloud.", ["openai", "gemini", "anthropic"])
+            out["result"] = {"model_label": label}
+            out["spoken"] = ans.strip()
+        else:
+            out["spoken"] = "I did not catch a command. Try: open radar, convene the council on a topic, discover grants, or compile a mission to do something."
+    except HTTPException as he:
+        out["spoken"] = f"That failed: {he.detail}"
+        out["error"] = str(he.detail)
+    except Exception as e:
+        logger.error(f"voice command failed: {e}")
+        out["spoken"] = "That command failed on the server."
+        out["error"] = str(e)[:300]
+
+    await db.voice_commands.insert_one({"id": str(uuid.uuid4()), "session_id": cmd.session_id, "transcript": text, "intent": intent,
+                                        "args": args, "parser": parser, "error": out.get("error"), "created_at": datetime.now(timezone.utc).isoformat()})
+    return out
+
+
+# ---------------- Opportunity Radar (separate module) ----------------
+import radar as radar_module
+radar_module.init(db, llm_call_failover, compile_mission_from_text, extract_json)
+api_router.include_router(radar_module.router)
+
+# ---------------- Local Node orchestration + server research browser ----------------
+import node as node_module
+node_module.init(db, require_key, llm_call_failover, extract_json)
+api_router.include_router(node_module.router)
+api_router.include_router(node_module.browse_router)
+
 app.include_router(api_router)
 
 app.add_middleware(
@@ -2237,6 +2611,13 @@ async def _startup_storage():
         logger.info("Object storage initialized")
     except Exception as e:
         logger.error(f"Storage init failed at startup (will retry on first use): {e}")
+
+@app.on_event("startup")
+async def _startup_self_scan():
+    global _self_scan_task
+    if _self_scan_task is None:
+        _self_scan_task = asyncio.create_task(_self_scan_loop())
+        logger.info("Self-scan scheduler started (propose-only)")
 
 @app.on_event("shutdown")
 async def shutdown_db_client():

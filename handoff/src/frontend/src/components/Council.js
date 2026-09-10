@@ -4,7 +4,7 @@ import { toast } from "sonner";
 import { motion, AnimatePresence } from "framer-motion";
 import {
   Crown, Loader2, Play, Download, History, Sparkles, ShieldAlert, Lightbulb,
-  Compass, Coins, Radar, Trash2, ChevronRight, X, Info
+  Compass, Coins, Radar, Trash2, ChevronRight, X, Info, Rocket, ExternalLink
 } from "lucide-react";
 import { API } from "../App";
 import { Markdown } from "./FileAnalyzer";
@@ -27,6 +27,7 @@ export default function Council() {
   const [result, setResult] = useState(null);
   const [history, setHistory] = useState([]);
   const [openWeaver, setOpenWeaver] = useState(null);
+  const [missioning, setMissioning] = useState(false);
 
   const applyPreset = useCallback((p) => {
     setPresetId(p.id);
@@ -81,6 +82,21 @@ export default function Council() {
   };
 
   const exportMd = (id) => { window.open(`${API}/acaso/deliberations/${id}/export`, "_blank"); };
+
+  const toMission = async () => {
+    if (!result) return;
+    setMissioning(true);
+    try {
+      const r = await axios.post(`${API}/acaso/deliberations/${result.id}/to-mission`, { mode: "Move" }, { timeout: 120000 });
+      setResult((prev) => ({ ...prev, mission_id: r.data.id, mission_title: r.data.title }));
+      loadHistory();
+      toast.success(`Mission "${r.data.title}" is on the Sovereign Home board`, {
+        action: { label: "Open board", onClick: () => { window.location.href = "/?tab=home"; } },
+      });
+    } catch (e) {
+      toast.error(e?.response?.data?.detail || "Could not compile mission");
+    } finally { setMissioning(false); }
+  };
 
   return (
     <div className="cw-wrap" data-testid="council-page">
@@ -157,7 +173,18 @@ export default function Council() {
                   {fmtDate(result.timestamp)} · {result.duration_s}s · {result.challenge_type} · Council: {(result.council_consulted || []).join(", ")}
                 </div>
               </div>
-              <button className="fa-btn" data-testid="council-export" onClick={() => exportMd(result.id)}><Download size={14} /> Export .md</button>
+              <div className="cw-actions">
+                {result.mission_id ? (
+                  <a className="fa-btn cw-mission-link" data-testid="council-open-mission" href="/?tab=home" title={result.mission_title}>
+                    <ExternalLink size={14} /> On board: {result.mission_title || "mission"}
+                  </a>
+                ) : (
+                  <button className="fa-btn primary" data-testid="council-to-mission" onClick={toMission} disabled={missioning}>
+                    {missioning ? <Loader2 className="spin" size={14} /> : <Rocket size={14} />} {missioning ? "Compiling mission..." : "Turn into Mission"}
+                  </button>
+                )}
+                <button className="fa-btn" data-testid="council-export" onClick={() => exportMd(result.id)}><Download size={14} /> Export .md</button>
+              </div>
             </div>
 
             <div className="cw-grid">
@@ -198,7 +225,7 @@ export default function Council() {
                 <button className="cw-hmain" onClick={() => openPast(h.id)} data-testid={`history-${h.id}`}>
                   <span className={`bb-tag`}>{h.preset_id || "custom"}</span>
                   <span className="cw-htitle">{h.title}</span>
-                  <span className="cw-hmeta">{fmtDate(h.timestamp)} · {h.duration_s}s{h.shadow_veto ? " · VETO" : ""}</span>
+                  <span className="cw-hmeta">{fmtDate(h.timestamp)} · {h.duration_s}s{h.shadow_veto ? " · VETO" : ""}{h.mission_id ? " · MISSION" : ""}</span>
                 </button>
                 <button className="attach-btn" title="Export" onClick={() => exportMd(h.id)}><Download size={13} /></button>
                 <button className="attach-btn danger" title="Delete" onClick={() => removePast(h.id)}><Trash2 size={13} /></button>

@@ -1,0 +1,62 @@
+[
+  {
+    "name": "Secure Medical Scribing and Charting",
+    "module": "Bio-Signature Charting",
+    "human_equivalent": "Medical scribe",
+    "labor_replaced": "45000-60000/year"
+  },
+  {
+    "name": "Off-Market Real Estate Deal Modeling",
+    "module": "Ghost-Protocol",
+    "human_equivalent": "Junior financial analyst / market researcher",
+    "labor_replaced": "70000-85000/year"
+  },
+  {
+    "name": "Privileged Legal Document Review",
+    "module": "Privilege-Sentinel",
+    "human_equivalent": "Paralegal / junior associate",
+    "labor_replaced": "65000-90000/year or 150+/hour"
+  },
+  {
+    "name": "Legacy Grant and Proposal Writing",
+    "module": "Ancestral Advocate",
+    "human_equivalent": "Grant writer",
+    "labor_replaced": "50000-80000/year or 5000/project"
+  },
+  {
+    "name": "Autonomous CRM and Lead Ledger",
+    "module": "Sovereign Ledger",
+    "human_equivalent": "CRM manager / data entry support",
+    "labor_replaced": "55000/year plus SaaS savings"
+  },
+  {
+    "name": "Generative Architectural Protection",
+    "module": "Genesis Armor",
+    "human_equivalent": "Junior draftsman + IT security consultant",
+    "labor_replaced": "70000/year"
+  },
+  {
+    "name": "Real-Time Contract Auditing",
+    "module": "Contract Sentinel",
+    "human_equivalent": "Contract auditor / retained counsel",
+    "labor_replaced": "300-500/hour"
+  },
+  {
+    "name": "Synthetic Financial Intuition",
+    "module": "High-Frequency Masking",
+    "human_equivalent": "Quantitative analyst",
+    "labor_replaced": "120000-150000+/year"
+  },
+  {
+    "name": "Instant Threat Purge",
+    "module": "Scorch Protocol",
+    "human_equivalent": "Crisis IT / breach response",
+    "labor_replaced": "150000-3000000 per serious incident avoided"
+  },
+  {
+    "name": "Intelligence Succession",
+    "module": "Prince Protocol",
+    "human_equivalent": "Transition consultant / corporate trainer",
+    "labor_replaced": "30000-50000 per transition"
+  }
+]

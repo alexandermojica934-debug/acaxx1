@@ -4,7 +4,7 @@ import { toast } from "sonner";
 import { motion, AnimatePresence } from "framer-motion";
 import {
   Wand2, Loader2, ShieldAlert, Lock, FileCode, Check, X, RotateCcw,
-  Search, History, AlertTriangle, GitCommitHorizontal, CheckCircle2, ScrollText
+  Search, History, AlertTriangle, GitCommitHorizontal, CheckCircle2, ScrollText, Radar, Play, Eye
 } from "lucide-react";
 import { API } from "../App";
 
@@ -34,6 +34,33 @@ export default function SelfDirective() {
   const [applying, setApplying] = useState(false);
   const [rolling, setRolling] = useState(false);
   const [history, setHistory] = useState([]);
+  const [scanCfg, setScanCfg] = useState(null);
+  const [scans, setScans] = useState([]);
+  const [scanning, setScanning] = useState(false);
+  const [savingCfg, setSavingCfg] = useState(false);
+
+  const loadScans = useCallback(async () => {
+    try {
+      const [c, l] = await Promise.all([axios.get(`${API}/self/scan/config`), axios.get(`${API}/self/scans`, { params: { limit: 8 } })]);
+      setScanCfg(c.data); setScans(l.data);
+    } catch (e) { console.error(e); }
+  }, []);
+  const saveScanCfg = async (patch) => {
+    setSavingCfg(true);
+    try { const r = await axios.put(`${API}/self/scan/config`, patch); setScanCfg(r.data); toast.success(r.data.enabled ? `Scheduled scans on - every ${r.data.interval_hours}h` : "Scheduled scans off"); }
+    catch (e) { toast.error(e?.response?.data?.detail || "Could not save"); }
+    finally { setSavingCfg(false); }
+  };
+  const runScan = async () => {
+    setScanning(true);
+    try {
+      const r = await axios.post(`${API}/self/scan/run`, {}, { timeout: 300000 });
+      const c = r.data.counts || {};
+      toast.success(`Scan done: ${c.critical || 0} critical · ${c.high || 0} high · ${c.low || 0} low · ${(r.data.proposal_ids || []).length} proposal(s) queued`);
+      loadScans(); loadHistory();
+    } catch (e) { toast.error(e?.response?.data?.detail || "Scan failed"); }
+    finally { setScanning(false); }
+  };
 
   const loadManifest = useCallback(async () => {
     try { const r = await axios.get(`${API}/self/manifest`); setManifest(r.data); }
@@ -44,7 +71,7 @@ export default function SelfDirective() {
     catch (e) { console.error(e); }
   }, []);
 
-  useEffect(() => { loadManifest(); loadHistory(); }, [loadManifest, loadHistory]);
+  useEffect(() => { loadManifest(); loadHistory(); loadScans(); }, [loadManifest, loadHistory, loadScans]);
 
   const toggle = (path) => {
     setSelected((s) => s.includes(path) ? s.filter((x) => x !== path) : (s.length >= 5 ? (toast.warning("Max 5 files per directive"), s) : [...s, path]));
@@ -103,6 +130,44 @@ export default function SelfDirective() {
           <div>
             <b>Preview-only & approval-gated.</b> This edits source in the live preview workspace and is <b>disabled after production deployment</b>. Every change is shown as a diff first, applied only on your approval, and can be rolled back.
           </div>
+        </div>
+
+        <div className="sd-scan" data-testid="self-scan">
+          <div className="sd-sub-head"><Radar size={14} /> Periodic self-scan <span className="sd-scan-note">propose-only · compile / lint / bundle / hygiene checks · never auto-applies</span></div>
+          {scanCfg && (
+            <div className="sd-scan-row">
+              <label className="sd-toggle" data-testid="self-scan-toggle">
+                <input type="checkbox" checked={!!scanCfg.enabled} disabled={savingCfg} onChange={(e) => saveScanCfg({ enabled: e.target.checked })} />
+                <span>{scanCfg.enabled ? "Scheduled" : "Off"}</span>
+              </label>
+              <label className="sd-interval">every
+                <input type="number" min={1} max={720} data-testid="self-scan-interval" defaultValue={scanCfg.interval_hours} onBlur={(e) => Number(e.target.value) !== scanCfg.interval_hours && saveScanCfg({ interval_hours: Number(e.target.value) })} /> h
+              </label>
+              <span className="sd-scan-meta">
+                {scanCfg.last_run_at ? `last ${new Date(scanCfg.last_run_at).toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })}` : "never run"}
+                {scanCfg.enabled && scanCfg.next_run_at ? ` · next ${new Date(scanCfg.next_run_at).toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })}` : ""}
+              </span>
+              <button className="sd-scan-run" data-testid="self-scan-run" onClick={runScan} disabled={scanning || scanCfg.running}>
+                {scanning || scanCfg.running ? <Loader2 className="spin" size={13} /> : <Play size={13} />} {scanning ? "Scanning..." : "Scan now"}
+              </button>
+            </div>
+          )}
+          {scanCfg && (
+            <textarea className="sd-focus" data-testid="self-scan-focus" defaultValue={scanCfg.focus} rows={2}
+              onBlur={(e) => e.target.value !== scanCfg.focus && saveScanCfg({ focus: e.target.value })} placeholder="What the scan should prioritise when it proposes a change..." />
+          )}
+          {scans.length > 0 && (
+            <div className="sd-scans" data-testid="self-scan-list">
+              {scans.map((sc) => (
+                <div key={sc.id} className="sd-scan-item">
+                  <span className={`sd-status s-${sc.status === "done" ? "applied" : sc.status}`}>{sc.trigger}</span>
+                  <span className="sd-scan-when">{new Date(sc.started_at).toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })} · {sc.duration_s}s</span>
+                  <span className="sd-scan-counts">{(sc.counts?.critical || 0)} crit · {(sc.counts?.high || 0)} high · {(sc.counts?.low || 0)} low · {(sc.counts?.info || 0)} info</span>
+                  <span className="sd-scan-res">{(sc.proposal_ids || []).length ? `${sc.proposal_ids.length} proposal queued for your approval` : (sc.note || sc.error || "")}</span>
+                </div>
+              ))}
+            </div>
+          )}
         </div>
       </section>
 
@@ -187,8 +252,12 @@ export default function SelfDirective() {
               {history.map((h) => (
                 <div key={h.id} className="sd-hrow">
                   <span className={`sd-status s-${h.status}`}>{h.status}</span>
+                  {h.origin === "scheduled_scan" && <span className="sd-auto" title="Generated by the periodic self-scan">scan</span>}
                   <span className="sd-hinstr" title={h.instruction}>{h.instruction}</span>
                   <span className="sd-hpaths">{(h.paths || []).join(", ")}</span>
+                  {h.status === "proposed" && (
+                    <button className="sd-hroll" data-testid="self-review" onClick={() => { setProposal(h); window.scrollTo({ top: 0, behavior: "smooth" }); }} title="Review & approve"><Eye size={12} /></button>
+                  )}
                   {h.status === "applied" && (
                     <button className="sd-hroll" onClick={() => rollback(h.id)} disabled={rolling} title="Rollback"><RotateCcw size={12} /></button>
                   )}

@@ -1,6 +1,6 @@
 # ACASO Omniverse — Complete Handoff
 
-_Generated: 2026-09-10T00:46:22.817249+00:00_
+_Generated: 2026-09-10T01:47:03.648779+00:00_
 
 ## What this is
 A contest-ready **Directive-to-Payment Operating System** (FastAPI + React + MongoDB).
@@ -19,6 +19,11 @@ A contest-ready **Directive-to-Payment Operating System** (FastAPI + React + Mon
 - Google Drive ingestion (user OAuth): connect, browse, SEARCH by name, import selected files OR an entire folder (recursive) in one click, auto-analyzes after import. Requires user-supplied Web-app OAuth client.
 - Council of Weavers deliberation engine (POST /api/acaso/deliberate): Architect(Gemini)/Shadow(Claude, veto)/Muse(GPT)/Finance(GPT) in parallel -> Meta-Weaver synthesis -> Sovereign Directive + inferred weak signals; journaled, exportable to .md; presets Genesis Engine / Sovereign Hunter / Foresight Thesis; runner scripts in handoff/scripts. LLM reasoning only - no live market/lead data.
 - Voice Channel: browser Web Speech API (STT+TTS, no keys, no audio to server) -> POST /api/voice/chat; hands-free loop / push-to-talk / text-first modes; per-message Fast (GPT-4o-mini w/ session memory) or Council (full deliberation + spoken summary); transcript persisted per session.
+- Directive-to-Mission: POST /api/acaso/deliberations/{id}/to-mission compiles a Council directive into a Sovereign Home mission (idempotent, source_deliberation_id).
+- Global VoiceCommander: floating mic on every tab - Dictate mode types into the focused text box (native-setter injection so React state updates); Command mode -> POST /api/voice/command (rule-based + LLM intent router: open_tab, council_deliberate, compile_directive, radar_discover, radar_search, ask) executes and speaks back.
+- Opportunity Radar (backend/radar.py, /api/radar/*): REAL sources Grants.gov public API (no key), GitHub bounty issues, SAM.gov (needs SAM_GOV_API_KEY); adapters fetch->normalize->validate->dedupe->barrier signals->transparent 0-100 score (8 weighted components, labelled inferred)->persist->stale marking; every record has source_url/retrieved_at/http_status/parser_version/evidence[] with source_location; Fit Analyst + Skeptic (gates Strong fit) + Compliance Sentinel on demand; NL search proposes filters never auto-applied; Drafting Desk (email/grant narrative/outreach packet/fill-a-form) uses only profile + source text with [FILL] placeholders; Add-to-pipeline -> mission; export .md. Nothing auto-submitted.
+- Periodic self-scan (Self-Directive): in-process asyncio scheduler, off by default; deterministic checks (py_compile, ruff F/E9, esbuild per component, TODO/console.log census) -> at most ONE Self-Directive proposal per run tagged origin=scheduled_scan; NEVER auto-applies; UI toggle/interval/focus/Scan now/history.
+- Local Node (backend/node.py + handoff/local_node/acaso_node.py, served at /local-node/*): owner runs the Python client on their PC (Windows/Linux), pairs with the Agent Bridge key; server holds an approval-gated task queue (read-only auto-approved; every write/shell/browser action must be approved in the Local Node tab); node enforces allowed roots, backs up overwritten files, soft-deletes to .acaso_trash; browser tasks drive a real headed Chrome (persistent profile) via Playwright, fill forms and STOP (awaiting_submit) until a separate browser_submit is approved; secrets written as [OWNER TYPES THIS]. LLM planner turns a goal into proposed tasks. Server research browser (headless Chromium, /api/browse/research) reads public pages: text/links/forms/screenshot + quoted answer.
 
 ## Tech & Integrations
 - Backend: FastAPI + Motor (MongoDB), Pydantic, UUID ids, timezone-aware UTC.
@@ -45,6 +50,19 @@ sudo supervisorctl restart backend frontend
 Hot-reload is enabled; restart only after dependency/.env changes.
 
 ## Key API Endpoints
+- `GET/PUT /api/self/scan/config | POST /api/self/scan/run | GET /api/self/scans` — periodic self-scan (propose-only)
+- `POST /api/node/register | /api/node/{id}/heartbeat | /api/node/{id}/claim | /api/node/tasks/{tid}/result` — node-side (X-ACASO-Key)
+- `GET /api/node/nodes | /api/node/tasks | /api/node/setup` — owner-side node + queue
+- `POST /api/node/tasks | /api/node/tasks/{tid}/decision | /api/node/plan` — create / approve-reject / LLM plan
+- `POST /api/browse/research` — server headless browser: public page -> text, links, forms, screenshot, quoted answer
+- `POST /api/voice/command` — spoken command -> intent -> execute -> {navigate_tab, spoken, result}
+- `POST /api/acaso/deliberations/{id}/to-mission` — Council directive -> Sovereign Home mission
+- `GET/PUT /api/radar/profile` — Radar owner profile
+- `POST /api/radar/discover` — run source adapters {sources?, keyword?, limit}
+- `GET /api/radar/opportunities[?type&source&min_score&closing_days&low_barrier&remote&max_value&q&saved&sort]` — scored feed
+- `GET/PATCH /api/radar/opportunities/{id}` — detail / status-stage-notes
+- `POST /api/radar/opportunities/{id}/analyze|draft|to-mission` — AI personas / drafting desk / pipeline
+- `POST /api/radar/search/nl` — natural language -> proposed filters
 - `POST /api/voice/chat` — voice turn: {message, session_id, mode: fast|council} -> spoken reply (+full directive in council mode)
 - `GET/DELETE /api/voice/history?session_id=` — voice transcript per session
 - `GET /api/acaso/presets` — council presets (genesis/hunter/foresight)
@@ -107,6 +125,7 @@ from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
 import os
 import io
+import re
 import json
 import logging
 import asyncio
@@ -120,7 +139,7 @@ from pathlib import Path
 from pydantic import BaseModel, Field, ConfigDict
 from typing import List, Optional
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 
 from emergentintegrations.llm.chat import LlmChat, UserMessage
 
@@ -224,6 +243,8 @@ class Mission(BaseModel):
     cvss: float = 0.0
     report: str = ""
     soul_council: Optional[dict] = None
+    source_deliberation_id: Optional[str] = None
+    source_opportunity_id: Optional[str] = None
     created_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
 
 class CompileRequest(BaseModel):
@@ -351,15 +372,15 @@ Return JSON with EXACTLY these keys:
 async def root():
     return {"message": "ACASO Omniverse online", "modes": MODES}
 
-@api_router.post("/compile-directive", response_model=Mission)
-async def compile_directive(req: CompileRequest):
-    if not req.directive.strip():
+async def compile_mission_from_text(directive_text: str, mode: str = "Move", **extra) -> Mission:
+    """Compile any directive text into a persisted Sovereign Home mission (shared by Council + Radar)."""
+    if not directive_text.strip():
         raise HTTPException(400, "Directive is required")
-    mode = req.mode if req.mode in MODES else "Move"
+    mode = mode if mode in MODES else "Move"
     lesson_docs = await db.chronicle.find({}, {"_id": 0, "lesson": 1}).sort("completed_at", -1).to_list(5)
     lessons = [d["lesson"] for d in lesson_docs if d.get("lesson")]
     try:
-        raw = await llm_call(COMPILE_SYSTEM, compile_prompt(req.directive, mode, lessons))
+        raw = await llm_call(COMPILE_SYSTEM, compile_prompt(directive_text, mode, lessons))
         data = extract_json(raw)
     except Exception as e:
         logger.error(f"compile failed: {e}")
@@ -367,7 +388,7 @@ async def compile_directive(req: CompileRequest):
 
     steps = [Step(title=s.get("title", "Step"), detail=s.get("detail", "")) for s in data.get("steps", [])]
     mission = Mission(
-        directive=req.directive,
+        directive=directive_text,
         title=data.get("title", "Untitled Mission"),
         mode=data.get("mode", mode),
         summary=data.get("summary", ""),
@@ -378,9 +399,14 @@ async def compile_directive(req: CompileRequest):
         authority=data.get("authority", Mission.model_fields["authority"].default),
         amount=float(data.get("amount", 0) or 0),
         stage="Discovery",
+        **extra,
     )
     await db.missions.insert_one(mission.model_dump())
     return mission
+
+@api_router.post("/compile-directive", response_model=Mission)
+async def compile_directive(req: CompileRequest):
+    return await compile_mission_from_text(req.directive, req.mode or "Move")
 
 BOUNTY_SYSTEM = (
     "You are ACASO's security-research compiler, governed by the Synarchy Aetheris constitutional plane. "
@@ -1643,6 +1669,180 @@ async def self_history():
     return docs
 
 
+# ---------------- Periodic self-scan (PROPOSE-ONLY; never auto-applies) ----------------
+# In-process asyncio scheduler (backend runs persistently under supervisor). Each run performs
+# deterministic health checks (compile / lint / bundle / TODO census) and, if findings warrant,
+# asks the Self-Directive engine for ONE small proposal that lands in the normal approval queue.
+SELF_SCAN_DEFAULTS = {"id": "owner", "enabled": False, "interval_hours": 24, "max_proposals_per_run": 1,
+                      "focus": "Fix real defects first (lint errors, broken compile, obvious bugs). Otherwise propose one small, safe quality improvement (dead code, typo, missing data-testid, accessibility). Never touch env files, dependencies, auth or payment logic.",
+                      "last_run_at": None, "next_run_at": None, "updated_at": None}
+_self_scan_task = None
+_self_scan_running = False
+
+
+async def _get_scan_config():
+    doc = await db.self_scan_config.find_one({"id": "owner"}, {"_id": 0})
+    return {**SELF_SCAN_DEFAULTS, **(doc or {})}
+
+
+def _run_cmd(cmd, cwd=None, timeout=90):
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, cwd=cwd)
+        return r.returncode, (r.stdout or "")[-4000:], (r.stderr or "")[-4000:]
+    except subprocess.TimeoutExpired:
+        return 124, "", "timeout"
+    except FileNotFoundError as e:
+        return 127, "", str(e)
+
+
+def _self_scan_checks() -> dict:
+    """Deterministic, read-only checks. Returns findings with severities."""
+    findings = []
+    backend_dir = APP_ROOT / "backend"
+    for py in ("server.py", "radar.py"):
+        rc, out, err = _run_cmd([sys.executable, "-m", "py_compile", str(backend_dir / py)])
+        if rc != 0:
+            findings.append({"severity": "critical", "check": "py_compile", "path": f"backend/{py}", "detail": err[-600:]})
+    rc, out, err = _run_cmd(["ruff", "check", "server.py", "radar.py", "--select", "F,E9", "--output-format", "concise", "-q"], cwd=str(backend_dir))
+    if rc not in (0, 127) and out.strip():
+        for ln in out.strip().splitlines()[:12]:
+            findings.append({"severity": "high", "check": "ruff", "path": "backend/" + ln.split(":")[0], "detail": ln[:300]})
+    comp_dir = APP_ROOT / "frontend" / "src" / "components"
+    for js in sorted(comp_dir.glob("*.js")):
+        rc, out, err = _run_cmd(["npx", "esbuild", str(js), "--loader:.js=jsx", "--bundle", "--outfile=/dev/null", "--log-level=error"],
+                                cwd=str(APP_ROOT / "frontend"), timeout=120)
+        if rc != 0:
+            findings.append({"severity": "critical", "check": "esbuild", "path": f"frontend/src/components/{js.name}", "detail": err[-600:]})
+    # TODO / FIXME census + oversized components (informational)
+    for js in sorted(comp_dir.glob("*.js")):
+        txt = js.read_text(encoding="utf-8", errors="replace")
+        n = txt.count("TODO") + txt.count("FIXME")
+        if n:
+            findings.append({"severity": "low", "check": "todo_census", "path": f"frontend/src/components/{js.name}", "detail": f"{n} TODO/FIXME marker(s)"})
+        lines = txt.count("\n")
+        if lines > 700:
+            findings.append({"severity": "info", "check": "size", "path": f"frontend/src/components/{js.name}", "detail": f"{lines} lines - consider splitting"})
+    # frontend build-time console.log leftovers (informational)
+    for js in sorted(comp_dir.glob("*.js")):
+        txt = js.read_text(encoding="utf-8", errors="replace")
+        if "console.log(" in txt:
+            findings.append({"severity": "low", "check": "console_log", "path": f"frontend/src/components/{js.name}", "detail": "console.log present"})
+    order = {"critical": 0, "high": 1, "low": 2, "info": 3}
+    findings.sort(key=lambda f: order.get(f["severity"], 9))
+    return {"findings": findings, "counts": {k: sum(1 for f in findings if f["severity"] == k) for k in order}}
+
+
+async def run_self_scan(trigger: str = "manual") -> dict:
+    global _self_scan_running
+    if _self_scan_running:
+        raise HTTPException(409, "A self-scan is already running")
+    _self_scan_running = True
+    sid = str(uuid.uuid4())
+    started = datetime.now(timezone.utc)
+    cfg = await _get_scan_config()
+    scan = {"id": sid, "trigger": trigger, "started_at": started.isoformat(), "status": "running", "findings": [],
+            "counts": {}, "proposal_ids": [], "note": "", "error": None}
+    await db.self_scans.insert_one(dict(scan))
+    try:
+        checks = await asyncio.to_thread(_self_scan_checks)
+        scan.update(checks)
+        # Pick the highest-severity actionable finding that maps to an allowlisted file
+        target = next((f for f in checks["findings"] if f["severity"] in ("critical", "high", "low") and f["check"] != "size"), None)
+        made = 0
+        if target and cfg.get("max_proposals_per_run", 1) > 0:
+            try:
+                _resolve_self_path(target["path"])
+                instruction = (f"SCHEDULED SELF-SCAN ({started.date()}). Finding [{target['severity']}/{target['check']}] in {target['path']}: "
+                               f"{target['detail']}\n\nOperator focus: {cfg['focus']}\n"
+                               "Make the smallest correct change that resolves this finding. Do not refactor unrelated code.")
+                prop = await self_propose({"instruction": instruction, "paths": [target["path"]]})
+                await db.self_directives.update_one({"id": prop["id"]}, {"$set": {"origin": "scheduled_scan", "scan_id": sid}})
+                scan["proposal_ids"].append(prop["id"])
+                made += 1
+            except HTTPException as he:
+                scan["note"] = f"No proposal: {he.detail}"
+            except Exception as e:
+                scan["note"] = f"No proposal: {str(e)[:200]}"
+        elif not target:
+            scan["note"] = "Clean scan - no actionable findings, no proposal generated."
+        scan["status"] = "done"
+        scan["proposals_created"] = made
+    except Exception as e:
+        scan["status"] = "failed"
+        scan["error"] = str(e)[:500]
+        logger.error(f"self-scan failed: {e}")
+    finally:
+        _self_scan_running = False
+        scan["finished_at"] = datetime.now(timezone.utc).isoformat()
+        scan["duration_s"] = round((datetime.now(timezone.utc) - started).total_seconds(), 1)
+        await db.self_scans.update_one({"id": sid}, {"$set": {k: v for k, v in scan.items() if k != "_id"}})
+        nxt = (datetime.now(timezone.utc) + timedelta(hours=float(cfg.get("interval_hours") or 24))).isoformat() if cfg.get("enabled") else None
+        await db.self_scan_config.update_one({"id": "owner"}, {"$set": {"last_run_at": scan["finished_at"], "next_run_at": nxt}}, upsert=True)
+    scan.pop("_id", None)
+    return scan
+
+
+async def _self_scan_loop():
+    await asyncio.sleep(20)
+    while True:
+        try:
+            cfg = await _get_scan_config()
+            if cfg.get("enabled"):
+                now = datetime.now(timezone.utc)
+                nxt = cfg.get("next_run_at")
+                due = (nxt is None) or (datetime.fromisoformat(nxt) <= now)
+                if due and not _self_scan_running:
+                    await run_self_scan(trigger="scheduled")
+        except Exception as e:
+            logger.error(f"self-scan loop error: {e}")
+        await asyncio.sleep(60)
+
+
+@api_router.get("/self/scan/config")
+async def self_scan_config_get():
+    cfg = await _get_scan_config()
+    cfg["running"] = _self_scan_running
+    return cfg
+
+
+@api_router.put("/self/scan/config")
+async def self_scan_config_put(body: dict):
+    cfg = await _get_scan_config()
+    upd = {}
+    if "enabled" in body:
+        upd["enabled"] = bool(body["enabled"])
+    if "interval_hours" in body:
+        try:
+            ih = float(body["interval_hours"])
+        except Exception:
+            raise HTTPException(400, "interval_hours must be a number")
+        if not (1 <= ih <= 720):
+            raise HTTPException(400, "interval_hours must be between 1 and 720")
+        upd["interval_hours"] = ih
+    if "max_proposals_per_run" in body:
+        upd["max_proposals_per_run"] = max(0, min(1, int(body["max_proposals_per_run"])))
+    if "focus" in body:
+        upd["focus"] = str(body["focus"])[:1500]
+    upd["updated_at"] = datetime.now(timezone.utc).isoformat()
+    enabled = upd.get("enabled", cfg.get("enabled"))
+    hours = upd.get("interval_hours", cfg.get("interval_hours") or 24)
+    upd["next_run_at"] = (datetime.now(timezone.utc) + timedelta(hours=float(hours))).isoformat() if enabled else None
+    await db.self_scan_config.update_one({"id": "owner"}, {"$set": upd}, upsert=True)
+    out = await _get_scan_config()
+    out["running"] = _self_scan_running
+    return out
+
+
+@api_router.post("/self/scan/run")
+async def self_scan_run_now():
+    return await run_self_scan(trigger="manual")
+
+
+@api_router.get("/self/scans")
+async def self_scans(limit: int = Query(20, ge=1, le=100)):
+    return await db.self_scans.find({}, {"_id": 0}).sort("started_at", -1).to_list(limit)
+
+
 # ==================== GOOGLE DRIVE (user-authorized OAuth ingestion) ====================
 # Single-owner model (no multi-user auth in this app): all Drive creds stored under DRIVE_OWNER.
 # Requires a Google Cloud *Web application* OAuth client with the registered redirect URI.
@@ -2226,6 +2426,49 @@ async def export_deliberation(did: str):
     return Response(content=md, media_type="text/markdown",
                     headers={"Content-Disposition": f'attachment; filename="{safe}.md"'})
 
+class ToMissionRequest(BaseModel):
+    mode: Optional[str] = "Move"
+
+def _extract_plan_section(directive: str) -> str:
+    """Prefer the 90-day / launch-plan section of a directive; fall back to the whole thing."""
+    if not directive:
+        return ""
+    lines = directive.split("\n")
+    start = None
+    for i, ln in enumerate(lines):
+        if ln.lstrip().startswith("#") and any(k in ln.upper() for k in ("90-DAY", "90 DAY", "LAUNCH PLAN", "SEQUENCE", "EXECUTION", "NEXT ACTION")):
+            start = i
+            break
+    if start is None:
+        return directive[:6000]
+    out = [lines[start]]
+    for ln in lines[start + 1:]:
+        if ln.lstrip().startswith("## ") and "VERDICT" not in ln.upper():
+            break
+        out.append(ln)
+    return "\n".join(out)[:6000]
+
+@api_router.post("/acaso/deliberations/{did}/to-mission", response_model=Mission)
+async def deliberation_to_mission(did: str, req: ToMissionRequest = None):
+    d = await db.deliberations.find_one({"id": did}, {"_id": 0})
+    if not d:
+        raise HTTPException(404, "Deliberation not found")
+    if d.get("mission_id"):
+        existing = await db.missions.find_one({"id": d["mission_id"]}, {"_id": 0})
+        if existing:
+            return Mission(**existing)
+    plan = _extract_plan_section(d.get("sovereign_directive") or "")
+    verdict = ""
+    up = (d.get("sovereign_directive") or "").upper()
+    if "SOVEREIGN VERDICT" in up:
+        verdict = (d.get("sovereign_directive") or "")[up.find("SOVEREIGN VERDICT"):][:600]
+    text = (f"Execute the Council of Weavers' Sovereign Directive titled: {d.get('title','')}\n\n"
+            f"PLAN TO EXECUTE:\n{plan}\n\n{verdict}").strip()
+    mode = (req.mode if req and req.mode in MODES else "Move")
+    mission = await compile_mission_from_text(text, mode, source_deliberation_id=did)
+    await db.deliberations.update_one({"id": did}, {"$set": {"mission_id": mission.id, "mission_title": mission.title}})
+    return mission
+
 
 
 
@@ -2322,6 +2565,155 @@ async def voice_clear(session_id: str = Query(...)):
     return {"ok": True, "deleted": r.deleted_count}
 
 
+# ---------------- Voice Commands: parse spoken intent -> execute -> spoken confirmation ----------------
+VOICE_TABS = {
+    "home": ["home", "sovereign home", "board", "missions", "mission board"],
+    "bounty": ["bounty", "bug bounty", "security"],
+    "council": ["council", "weavers", "council of weavers"],
+    "voice": ["voice", "voice channel"],
+    "radar": ["radar", "opportunity radar", "opportunities", "grants"],
+    "askai": ["ask all ais", "ask all", "ask ai", "ask the ais"],
+    "analyzer": ["analyzer", "file analyzer", "files"],
+    "self": ["self directive", "self-directive", "self"],
+    "chronicle": ["chronicle", "ledger", "outcomes"],
+    "bridge": ["bridge", "agent bridge", "api"],
+    "node": ["local node", "node", "my computer", "desktop", "my pc"],
+}
+COMMAND_SCHEMA = (
+    "Return ONLY minified JSON {\"intent\": ..., \"args\": {...}} with intent one of: "
+    "open_tab {tab: home|bounty|council|voice|radar|askai|analyzer|self|chronicle|bridge|node}; "
+    "council_deliberate {challenge: string, preset_id: genesis|hunter|foresight|custom}; "
+    "compile_directive {directive: string, mode: Make|Find|Move|Collect}; "
+    "radar_discover {keyword: string|null}; radar_search {query: string}; "
+    "ask {message: string}; unknown {}. Never invent details the user did not say."
+)
+
+
+class VoiceCommand(BaseModel):
+    transcript: str
+    session_id: Optional[str] = None
+    execute: bool = True
+
+
+def _rule_intent(t: str):
+    s = t.lower().strip().rstrip(".!?")
+    s = re.sub(r"^(hey |ok |okay )?acaso[, ]*", "", s)
+    m = re.match(r"^(open|go to|show|switch to|take me to)\s+(the\s+)?(.+)$", s)
+    if m:
+        target = m.group(3).replace(" tab", "").strip()
+        for key, names in VOICE_TABS.items():
+            if target in names or target == key:
+                return {"intent": "open_tab", "args": {"tab": key}}
+    m = re.match(r"^(convene|summon|call)\s+(the\s+)?council\s+(on|about|for)\s+(.+)$", s)
+    if m:
+        return {"intent": "council_deliberate", "args": {"challenge": m.group(4), "preset_id": "custom"}}
+    m = re.match(r"^(discover|find|scan for|search for)\s+(new\s+)?(grants|opportunities|contracts|bounties)(\s+(for|about|on)\s+(.+))?$", s)
+    if m:
+        return {"intent": "radar_discover", "args": {"keyword": (m.group(6) or "").strip() or None}}
+    m = re.match(r"^(compile|create|make)\s+(a\s+)?(mission|directive)\s*(to|for|:)?\s*(.+)$", s)
+    if m:
+        return {"intent": "compile_directive", "args": {"directive": m.group(5), "mode": "Move"}}
+    return None
+
+
+@api_router.post("/voice/command")
+async def voice_command(cmd: VoiceCommand):
+    text = (cmd.transcript or "").strip()
+    if not text:
+        raise HTTPException(400, "transcript required")
+    parsed = _rule_intent(text)
+    parser = "rules"
+    if not parsed:
+        try:
+            raw, _, _ = await llm_call_failover(
+                "You are ACASO's voice command router. " + COMMAND_SCHEMA, f"Spoken command: {text}",
+                ["openai", "gemini", "anthropic"])
+            parsed = extract_json(raw)
+            parser = "llm"
+        except Exception as e:
+            parsed = {"intent": "unknown", "args": {}}
+            parser = f"llm_failed: {e}"
+    intent = (parsed or {}).get("intent") or "unknown"
+    args = (parsed or {}).get("args") or {}
+    out = {"transcript": text, "intent": intent, "args": args, "parser": parser, "navigate_tab": None, "spoken": "", "result": None}
+
+    if not cmd.execute:
+        out["spoken"] = f"I heard a {intent.replace('_', ' ')} command."
+        return out
+
+    try:
+        if intent == "open_tab":
+            tab = args.get("tab") if args.get("tab") in VOICE_TABS else "home"
+            out["navigate_tab"] = tab
+            out["spoken"] = f"Opening {tab.replace('askai', 'Ask All AIs').replace('self', 'Self-Directive')}."
+        elif intent == "council_deliberate":
+            ch = (args.get("challenge") or "").strip()
+            if len(ch) < 20:
+                ch = ch + " - deliberate on this fully with risk, invalidation and next steps"
+            res = await acaso_deliberate(DeliberateRequest(challenge=ch, challenge_type="voice_command",
+                                                           preset_id=args.get("preset_id") or "custom",
+                                                           context={"additional_context": "Issued by voice command."}))
+            out["result"] = {"deliberation_id": res["id"], "title": res["title"], "shadow_veto": res["shadow_veto"]}
+            out["navigate_tab"] = "council"
+            summ, _, _ = await llm_call_failover(VOICE_SYSTEM,
+                f"Summarize this Sovereign Directive aloud in at most 4 sentences, mention any Shadow veto:\n{res['sovereign_directive'][:5000]}",
+                ["openai", "gemini", "anthropic"])
+            out["spoken"] = summ.strip() + " The full directive is in the Council tab."
+        elif intent == "compile_directive":
+            d = (args.get("directive") or "").strip()
+            if not d:
+                raise HTTPException(400, "no directive heard")
+            m = await compile_mission_from_text(d, args.get("mode") or "Move")
+            out["result"] = {"mission_id": m.id, "title": m.title, "steps": len(m.steps), "amount": m.amount}
+            out["navigate_tab"] = "home"
+            out["spoken"] = f"Mission {m.title} compiled with {len(m.steps)} steps and a target of {int(m.amount)} dollars. It is on the Sovereign Home board."
+        elif intent == "radar_discover":
+            import radar as _radar
+            res = await _radar.discover(_radar.DiscoverRequest(keyword=args.get("keyword"), limit=20))
+            ok = [r for r in res["runs"] if not r["error"]]
+            new = sum(r["new"] for r in ok); upd = sum(r["updated"] for r in ok)
+            skipped = [r["source"] for r in res["runs"] if r["error"]]
+            out["result"] = res
+            out["navigate_tab"] = "radar"
+            out["spoken"] = (f"Radar pulled {new} new and re-verified {upd} opportunities from {len(ok)} source{'s' if len(ok)!=1 else ''}."
+                             + (f" {', '.join(skipped)} skipped - not configured." if skipped else "") + " Verify each on its original source.")
+        elif intent == "radar_search":
+            import radar as _radar
+            prop = await _radar.nl_search(_radar.NLSearch(query=args.get("query") or text))
+            out["result"] = prop
+            out["navigate_tab"] = "radar"
+            out["spoken"] = "I proposed Radar filters for that search. Review and apply them in the Radar tab - I never apply filters silently."
+        elif intent == "ask":
+            msg = args.get("message") or text
+            ans, _, label = await llm_call_failover(VOICE_SYSTEM, f"Owner asked: {msg}\n\nReply aloud.", ["openai", "gemini", "anthropic"])
+            out["result"] = {"model_label": label}
+            out["spoken"] = ans.strip()
+        else:
+            out["spoken"] = "I did not catch a command. Try: open radar, convene the council on a topic, discover grants, or compile a mission to do something."
+    except HTTPException as he:
+        out["spoken"] = f"That failed: {he.detail}"
+        out["error"] = str(he.detail)
+    except Exception as e:
+        logger.error(f"voice command failed: {e}")
+        out["spoken"] = "That command failed on the server."
+        out["error"] = str(e)[:300]
+
+    await db.voice_commands.insert_one({"id": str(uuid.uuid4()), "session_id": cmd.session_id, "transcript": text, "intent": intent,
+                                        "args": args, "parser": parser, "error": out.get("error"), "created_at": datetime.now(timezone.utc).isoformat()})
+    return out
+
+
+# ---------------- Opportunity Radar (separate module) ----------------
+import radar as radar_module
+radar_module.init(db, llm_call_failover, compile_mission_from_text, extract_json)
+api_router.include_router(radar_module.router)
+
+# ---------------- Local Node orchestration + server research browser ----------------
+import node as node_module
+node_module.init(db, require_key, llm_call_failover, extract_json)
+api_router.include_router(node_module.router)
+api_router.include_router(node_module.browse_router)
+
 app.include_router(api_router)
 
 app.add_middleware(
@@ -2340,6 +2732,13 @@ async def _startup_storage():
     except Exception as e:
         logger.error(f"Storage init failed at startup (will retry on first use): {e}")
 
+@app.on_event("startup")
+async def _startup_self_scan():
+    global _self_scan_task
+    if _self_scan_task is None:
+        _self_scan_task = asyncio.create_task(_self_scan_loop())
+        logger.info("Self-scan scheduler started (propose-only)")
+
 @app.on_event("shutdown")
 async def shutdown_db_client():
     client.close()
@@ -2349,39 +2748,136 @@ async def shutdown_db_client():
 
 ### `backend/requirements.txt`
 ```text
-fastapi==0.110.1
-uvicorn==0.25.0
-boto3>=1.34.129
-requests-oauthlib>=2.0.0
-cryptography>=42.0.8
-python-dotenv>=1.0.1
-pymongo==4.6.3
-pydantic>=2.6.4
-email-validator>=2.2.0
-pyjwt>=2.10.1
+aiohappyeyeballs==2.7.1
+aiohttp==3.14.3
+aiosignal==1.4.0
+annotated-doc==0.0.5
+annotated-types==0.8.0
+anyio==4.14.2
+ast_serialize==0.8.0
+attrs==26.1.0
 bcrypt==4.1.3
-passlib>=1.7.4
-tzdata>=2024.2
-motor==3.3.1
-pytest>=8.0.0
-pytest-xdist>=3.6.0
-black>=24.1.1
-isort>=5.13.2
-flake8>=7.0.0
-mypy>=1.8.0
-python-jose>=3.3.0
-requests>=2.31.0
-pandas>=2.2.0
-numpy>=1.26.0
-python-multipart>=0.0.9
-jq>=1.6.0
-typer>=0.9.0
+black==26.5.1
+boto3==1.43.79
+botocore==1.43.79
+certifi==2026.7.22
+cffi==2.1.1
+charset-normalizer==3.5.1
+click==8.4.2
+cryptography==50.0.0
+distro==1.9.0
+dnspython==2.8.0
+ecdsa==0.19.2
+email-validator==2.3.0
 emergentintegrations==0.2.0
+execnet==2.1.2
+fastapi==0.110.1
+fastuuid==0.14.0
+filelock==3.32.4
+flake8==7.3.0
+frozenlist==1.8.0
+fsspec==2026.7.0
+google-ai-generativelanguage==0.6.15
+google-api-core==2.33.0
 google-api-python-client==2.199.0
 google-auth==2.57.0
 google-auth-httplib2==0.4.2
 google-auth-oauthlib==1.4.1
+google-genai==2.19.0
+google-generativeai==0.8.6
+googleapis-common-protos==1.75.0
+greenlet==3.5.5
+grpcio==1.83.0
+grpcio-status==1.71.2
+h11==0.16.0
+hf-xet==1.6.0
+httpcore==1.0.9
+httplib2==0.32.0
+httpx==0.28.1
+huggingface_hub==1.28.0
+idna==3.19
+importlib_metadata==9.0.0
+iniconfig==2.3.0
+isort==8.0.1
+Jinja2==3.1.6
+jiter==0.16.0
+jmespath==1.1.0
+jq==1.12.0
+jsonschema==4.26.0
+jsonschema-specifications==2025.9.1
+librt==0.15.0
+litellm @ https://customer-assets.emergentagent.com/internal-asset/library/litellm-1.80.0-py3-none-any.whl#sha256=adf398c513273de9341f61822296c6b2145f7f2dc4a69daf3ac04829f5bde3f8
+markdown-it-py==4.2.0
+MarkupSafe==3.0.3
+mccabe==0.7.0
+mdurl==0.1.2
+motor==3.3.1
+multidict==6.7.1
+mypy==2.3.1
+mypy_extensions==1.1.0
+numpy==2.4.6
+oauthlib==3.3.1
+openai==1.99.9
+packaging==26.3
+pandas==3.0.5
+passlib==1.7.4
+pathspec==1.1.1
+pillow==12.3.0
+platformdirs==4.11.4
+playwright==1.62.0
+pluggy==1.6.0
+propcache==0.5.2
+proto-plus==1.28.2
+protobuf==5.29.6
+pyasn1==0.6.4
+pyasn1_modules==0.4.2
+pycodestyle==2.14.0
+pycparser==3.0
+pydantic==2.13.4
+pydantic_core==2.46.4
+pyee==13.0.1
+pyflakes==3.4.0
+Pygments==2.21.0
+PyJWT==2.13.0
+pymongo==4.6.3
+pyparsing==3.3.2
+pytest==9.1.1
+pytest-xdist==3.8.0
+python-dateutil==2.9.0.post0
+python-dotenv==1.2.3
+python-jose==3.5.0
+python-multipart==0.0.32
+pytokens==0.4.1
+PyYAML==6.0.3
+referencing==0.37.0
+regex==2026.7.19
+requests==2.34.2
+requests-oauthlib==2.0.0
+rich==15.0.0
+rpds-py==2026.6.3
+rsa==4.9.1
+s3transfer==0.19.2
+s5cmd==0.2.0
+shellingham==1.5.4
+six==1.17.0
+sniffio==1.3.1
+starlette==0.37.2
+stripe==14.4.1
+tenacity==9.1.4
+tiktoken==0.14.0
+tokenizers==0.23.1
+tqdm==4.70.0
+typer==0.27.1
+typing-inspection==0.4.4
+typing_extensions==4.16.0
+tzdata==2026.3
 uritemplate==4.2.0
+urllib3==2.7.0
+uvicorn==0.25.0
+watchfiles==1.2.0
+websockets==16.1.1
+yarl==1.24.5
+zipp==4.1.0
 
 ```
 
@@ -2968,7 +3464,10 @@ import FileAnalyzer from "./components/FileAnalyzer";
 import SelfDirective from "./components/SelfDirective";
 import Council from "./components/Council";
 import VoiceChat from "./components/VoiceChat";
-import { Sparkles, LayoutGrid, MessagesSquare, BookOpen, ShieldAlert, Plug, Boxes, Wand2, Crown, Waves } from "lucide-react";
+import Radar from "./components/Radar";
+import VoiceCommander from "./components/VoiceCommander";
+import LocalNode from "./components/LocalNode";
+import { Sparkles, LayoutGrid, MessagesSquare, BookOpen, ShieldAlert, Plug, Boxes, Wand2, Crown, Waves, Radar as RadarIcon, MonitorSmartphone } from "lucide-react";
 
 const BACKEND_URL = process.env.REACT_APP_BACKEND_URL;
 export const API = `${BACKEND_URL}/api`;
@@ -2978,10 +3477,12 @@ const TABS = [
   { key: "bounty", label: "Bug Bounty", icon: ShieldAlert },
   { key: "council", label: "Council", icon: Crown },
   { key: "voice", label: "Voice", icon: Waves },
+  { key: "radar", label: "Radar", icon: RadarIcon },
   { key: "askai", label: "Ask All AIs", icon: MessagesSquare },
   { key: "analyzer", label: "File Analyzer", icon: Boxes },
   { key: "self", label: "Self-Directive", icon: Wand2 },
   { key: "chronicle", label: "Chronicle", icon: BookOpen },
+  { key: "node", label: "Local Node", icon: MonitorSmartphone },
   { key: "bridge", label: "Agent Bridge", icon: Plug },
 ];
 
@@ -3030,12 +3531,16 @@ function App() {
         {tab === "bounty" && <BugBounty />}
         {tab === "council" && <Council />}
         {tab === "voice" && <VoiceChat />}
+        {tab === "radar" && <Radar />}
         {tab === "askai" && <AskAllAIs />}
         {tab === "analyzer" && <FileAnalyzer />}
         {tab === "self" && <SelfDirective />}
         {tab === "chronicle" && <Chronicle />}
+        {tab === "node" && <LocalNode />}
         {tab === "bridge" && <AgentBridge />}
       </main>
+
+      <VoiceCommander setTab={setTab} />
 
       <footer className="footof">
         <span>Closed Action Loop — Directive › Discovery › Deliverable › Outreach › Payment › Receipt › Learning</span>
@@ -3883,6 +4388,224 @@ body {
 .vc-textrow { display: flex; gap: 10px; align-items: center; width: 100%; max-width: 900px; }
 .attach-btn.live { color: var(--cyan); border-color: var(--border-lit); animation: vcpulse 1.6s ease-in-out infinite; }
 @media (max-width: 900px) { .vc-msg { max-width: 94%; } .vc-voice { max-width: 100%; } }
+.cw-actions { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+.cw-mission-link { text-decoration: none; color: var(--green); border-color: rgba(72,213,151,0.4); max-width: 320px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+/* ===== Opportunity Radar - mission-control intelligence desk ===== */
+:root { --lime: #c8f04a; --amber: #f5b342; --ink: #05070f; --paper: #f4efe6; }
+.rd-wrap { display: flex; flex-direction: column; gap: 14px; }
+.rd-hero { display: flex; justify-content: space-between; gap: 20px; align-items: center; flex-wrap: wrap; background: linear-gradient(160deg, rgba(245,179,66,0.10), rgba(79,209,255,0.04)); border: 1px solid rgba(245,179,66,0.32); border-radius: 18px; padding: 22px 24px; }
+.rd-title { display: flex; align-items: center; gap: 10px; font-size: 20px; font-weight: 800; color: var(--amber); letter-spacing: -0.01em; }
+.rd-hero p { margin: 10px 0 0; font-size: 13.5px; line-height: 1.6; color: var(--muted); max-width: 640px; }
+.rd-hero p b { color: var(--text); }
+.rd-hero-stats { display: flex; gap: 12px; }
+.rd-stat { display: flex; flex-direction: column; align-items: center; padding: 12px 18px; background: rgba(4,6,16,0.5); border: 1px solid var(--border); border-radius: 12px; min-width: 96px; }
+.rd-stat .v { font-size: 22px; font-weight: 800; color: var(--amber); }
+.rd-stat .l { font-size: 11px; color: var(--muted); margin-top: 2px; }
+.rd-warn { display: flex; align-items: flex-start; gap: 8px; font-size: 12px; line-height: 1.5; color: var(--text); background: rgba(245,179,66,0.07); border: 1px solid rgba(245,179,66,0.3); border-radius: 11px; padding: 10px 13px; }
+.rd-warn svg { color: var(--amber); flex-shrink: 0; margin-top: 2px; }
+.rd-panel { background: var(--panel); border: 1px solid var(--border); border-radius: 16px; padding: 16px 18px; }
+.rd-panel-h { display: flex; align-items: center; gap: 8px; font-weight: 700; font-size: 14px; color: var(--text); }
+.rd-panel-h em { margin-left: auto; font-style: normal; font-weight: 400; font-size: 11.5px; color: var(--dim); }
+.rd-sources { display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: 10px; margin-top: 12px; }
+.rd-source { display: flex; flex-direction: column; gap: 3px; padding: 11px 13px; border-radius: 12px; border: 1px solid var(--border); background: rgba(4,6,16,0.4); font-size: 11.5px; color: var(--muted); }
+.rd-source.ok { border-color: rgba(79,209,255,0.35); }
+.rd-source.ok .rd-source-top svg { color: var(--cyan); }
+.rd-source.off .rd-source-top svg { color: var(--amber); }
+.rd-source-top { display: flex; align-items: center; gap: 6px; color: var(--text); font-size: 12.5px; }
+.rd-needkey { color: var(--amber); }
+.rd-row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-top: 12px; }
+.rd-btn { display: inline-flex; align-items: center; gap: 7px; font-size: 12.5px; font-weight: 600; color: var(--text); background: rgba(255,255,255,0.03); border: 1px solid var(--border); border-radius: 10px; padding: 9px 14px; cursor: pointer; text-decoration: none; transition: border-color .16s, background .16s, transform .12s; }
+.rd-btn:hover:not(:disabled) { border-color: var(--border-lit); transform: translateY(-1px); }
+.rd-btn:disabled { opacity: .55; cursor: default; }
+.rd-btn:focus-visible { outline: 2px solid var(--cyan); outline-offset: 2px; }
+.rd-btn.primary { color: var(--ink); background: var(--amber); border-color: transparent; }
+.rd-btn.primary:hover:not(:disabled) { background: #ffc35a; }
+.rd-btn.sm { padding: 6px 10px; font-size: 11.5px; }
+.rd-link { background: none; border: 0; color: var(--cyan); font-size: 12px; cursor: pointer; padding: 8px 0; text-align: left; }
+.rd-dim { color: var(--dim); font-size: 11.5px; }
+.rd-profile { overflow: hidden; margin-top: 8px; }
+.rd-grid3 { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 10px 12px; margin-top: 10px; }
+.rd-grid3 label { display: flex; flex-direction: column; gap: 4px; font-size: 11.5px; color: var(--muted); }
+.rd-grid3 .cw-input, .rd-grid3 .cw-textarea { min-width: 0; width: 100%; box-sizing: border-box; margin-top: 0; }
+.rd-span3 { grid-column: 1 / -1; }
+.rd-checks { grid-column: 1 / -1; display: flex; flex-wrap: wrap; gap: 8px 14px; align-items: center; font-size: 12px; color: var(--muted); }
+.rd-chk { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--text); cursor: pointer; }
+.rd-chk input { accent-color: var(--amber); }
+.rd-views { display: flex; flex-wrap: wrap; gap: 8px; }
+.rd-chip { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; font-weight: 600; color: var(--muted); background: rgba(4,6,16,0.45); border: 1px solid var(--border); border-radius: 999px; padding: 6px 12px; cursor: pointer; transition: color .16s, border-color .16s, background .16s; }
+.rd-chip:hover { color: var(--text); border-color: var(--border-lit); }
+.rd-chip.active { color: var(--ink); background: var(--lime); border-color: transparent; }
+.rd-filters { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-top: 12px; }
+.rd-filters .cw-input { min-width: 140px; padding: 8px 10px; }
+.rd-narrow { width: 120px; min-width: 0 !important; }
+.rd-search { display: flex; align-items: center; gap: 6px; flex: 1; min-width: 220px; background: rgba(4,6,16,0.55); border: 1px solid var(--border); border-radius: 10px; padding: 0 10px; color: var(--dim); }
+.rd-search input { flex: 1; background: transparent; border: 0; color: var(--text); font-size: 12.5px; padding: 9px 0; outline: none; }
+.rd-nl svg { color: var(--lime); }
+.rd-proposal { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-top: 10px; font-size: 12px; color: var(--text); background: rgba(200,240,74,0.06); border: 1px dashed rgba(200,240,74,0.4); border-radius: 10px; padding: 8px 12px; }
+.rd-proposal code { font-size: 11px; color: var(--lime); }
+.rd-empty { display: flex; flex-direction: column; align-items: center; gap: 12px; text-align: center; color: var(--muted); padding: 46px 20px; background: var(--panel); border: 1px dashed var(--border-lit); border-radius: 16px; font-size: 13.5px; }
+.rd-empty svg { color: var(--amber); }
+.rd-empty p { max-width: 460px; line-height: 1.6; margin: 0; }
+.rd-feed { display: grid; grid-template-columns: repeat(auto-fill, minmax(360px, 1fr)); gap: 14px; }
+.rd-card { display: flex; flex-direction: column; gap: 9px; background: var(--panel); border: 1px solid var(--border); border-left: 3px solid rgba(245,179,66,0.55); border-radius: 14px; padding: 15px 16px 13px; transition: border-color .16s, transform .12s; }
+.rd-card:hover { border-color: var(--border-lit); transform: translateY(-1px); }
+.rd-card.stale { border-left-color: var(--dim); opacity: .8; }
+.rd-card h3 { margin: 0; font-size: 15px; line-height: 1.35; font-weight: 700; color: var(--text); cursor: pointer; }
+.rd-card h3:hover { color: var(--amber); }
+.rd-card-top { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.rd-type { font-size: 10.5px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; padding: 3px 8px; border-radius: 6px; background: rgba(245,179,66,0.14); color: var(--amber); }
+.rd-type.t-technical_bounty { background: rgba(200,240,74,0.12); color: var(--lime); }
+.rd-type.t-contract, .rd-type.t-procurement, .rd-type.t-rfp { background: rgba(79,209,255,0.12); color: var(--cyan); }
+.rd-src { display: inline-flex; align-items: center; gap: 5px; font-size: 10.5px; color: var(--cyan); background: rgba(79,209,255,0.08); border: 1px solid rgba(79,209,255,0.28); border-radius: 6px; padding: 2px 7px; }
+.rd-src.stale { color: var(--amber); border-color: rgba(245,179,66,0.4); background: rgba(245,179,66,0.08); }
+.rd-ustat { margin-left: auto; font-size: 10.5px; color: var(--lime); text-transform: uppercase; letter-spacing: .06em; }
+.rd-org { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--muted); }
+.rd-facts { display: flex; flex-wrap: wrap; gap: 6px 14px; font-size: 12px; color: var(--text); }
+.rd-facts span { display: inline-flex; align-items: center; gap: 5px; }
+.rd-facts svg { color: var(--dim); }
+.rd-nv { color: var(--dim); font-style: italic; font-size: 11.5px; }
+.rd-urgent { color: var(--amber); }
+.rd-score { display: flex; flex-direction: column; gap: 4px; }
+.rd-score-bar { height: 6px; border-radius: 4px; background: rgba(255,255,255,0.06); overflow: hidden; }
+.rd-score-bar span { display: block; height: 100%; border-radius: 4px; background: var(--dim); transition: width .3s; }
+.rd-score.hi .rd-score-bar span { background: var(--lime); } .rd-score.mid .rd-score-bar span { background: var(--amber); } .rd-score.lo .rd-score-bar span { background: #8a8fa8; }
+.rd-score-txt { display: flex; align-items: baseline; gap: 6px; font-size: 12px; }
+.rd-score-txt b { font-size: 15px; } .rd-score-txt small { color: var(--muted); font-size: 11px; }
+.rd-score.lg .rd-score-bar { height: 10px; } .rd-score.lg .rd-score-txt b { font-size: 24px; }
+.rd-barrier { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.rd-bar-lbl { font-size: 11px; padding: 2px 8px; border-radius: 6px; background: rgba(255,255,255,0.05); color: var(--muted); }
+.rd-bar-lbl.lo { color: var(--lime); background: rgba(200,240,74,0.1); } .rd-bar-lbl.hi { color: var(--amber); background: rgba(245,179,66,0.12); }
+.rd-req { font-size: 10.5px; color: var(--muted); border: 1px solid var(--border); border-radius: 6px; padding: 2px 7px; }
+.rd-next { font-size: 12px; line-height: 1.5; color: var(--text); background: rgba(4,6,16,0.45); border-left: 2px solid var(--lime); padding: 7px 10px; border-radius: 0 8px 8px 0; }
+.rd-actions { display: flex; align-items: center; gap: 6px; margin-top: 2px; }
+.rd-actions .rd-btn { margin-left: auto; }
+.rd-ic { display: inline-flex; align-items: center; justify-content: center; width: 32px; height: 32px; border-radius: 8px; border: 1px solid var(--border); background: transparent; color: var(--muted); cursor: pointer; transition: color .16s, border-color .16s, background .16s; }
+.rd-ic:hover { color: var(--amber); border-color: rgba(245,179,66,0.5); background: rgba(245,179,66,0.08); }
+.rd-modal-bg { position: fixed; inset: 0; z-index: 200; background: rgba(3,4,10,0.72); backdrop-filter: blur(10px); display: flex; align-items: flex-start; justify-content: center; padding: 30px 16px; overflow-y: auto; }
+.rd-modal { width: min(1180px, 100%); background: var(--panel-solid); border: 1px solid var(--border-lit); border-radius: 18px; padding: 22px 24px; display: flex; flex-direction: column; gap: 14px; }
+.rd-modal-h { display: flex; justify-content: space-between; gap: 16px; align-items: flex-start; }
+.rd-modal-h h2 { margin: 8px 0 6px; font-size: 20px; line-height: 1.3; }
+.rd-modal-actions { display: flex; gap: 8px; align-items: center; flex-shrink: 0; }
+.rd-stages { display: flex; gap: 4px; flex-wrap: wrap; }
+.rd-stage { font-size: 11px; font-weight: 600; color: var(--dim); background: rgba(255,255,255,0.03); border: 1px solid var(--border); padding: 5px 10px; border-radius: 999px; cursor: pointer; }
+.rd-stage.done { color: var(--text); border-color: rgba(200,240,74,0.4); }
+.rd-stage.cur { color: var(--ink); background: var(--lime); border-color: transparent; }
+.rd-detail-grid { display: grid; grid-template-columns: 1.1fr 1fr; gap: 22px; }
+.rd-detail-grid section { min-width: 0; display: flex; flex-direction: column; gap: 8px; font-size: 13px; }
+.rd-detail-grid h4 { margin: 10px 0 2px; font-size: 12px; text-transform: uppercase; letter-spacing: .07em; color: var(--amber); display: flex; gap: 8px; align-items: baseline; }
+.rd-detail-grid h4 small { text-transform: none; letter-spacing: 0; color: var(--dim); font-weight: 500; }
+.rd-dl { display: grid; grid-template-columns: 130px 1fr; gap: 5px 10px; margin: 0; font-size: 12.5px; }
+.rd-dl dt { color: var(--muted); } .rd-dl dd { margin: 0; color: var(--text); word-break: break-word; }
+.rd-dl a { color: var(--cyan); }
+.rd-quote { margin: 0; font-size: 12.5px; line-height: 1.55; color: var(--text); background: rgba(79,209,255,0.05); border-left: 2px solid var(--cyan); padding: 8px 12px; border-radius: 0 8px 8px 0; }
+.rd-desc { margin: 0; font-size: 12.5px; line-height: 1.55; color: var(--muted); max-height: 220px; overflow-y: auto; }
+.rd-evidence { margin: 0; padding-left: 16px; font-size: 12px; line-height: 1.55; color: var(--muted); }
+.rd-evidence q { color: var(--text); } .rd-evidence code { font-size: 10.5px; color: var(--cyan); }
+.rd-breakdown { display: flex; flex-direction: column; gap: 5px; margin-top: 6px; }
+.rd-bd-row { display: grid; grid-template-columns: 150px 1fr 48px; gap: 8px; align-items: center; font-size: 11.5px; color: var(--muted); }
+.rd-bd-bar { height: 6px; background: rgba(255,255,255,0.06); border-radius: 4px; overflow: hidden; } .rd-bd-bar span { display: block; height: 100%; background: var(--amber); }
+.rd-bd-row small { text-align: right; color: var(--text); }
+.rd-notes { margin: 4px 0 0; padding-left: 16px; font-size: 12px; color: var(--muted); }
+.rd-lbl-note { font-size: 11.5px; color: var(--dim); font-style: italic; }
+.rd-sig { font-size: 12px; color: var(--muted); } .rd-sig b.lo { color: var(--lime); } .rd-sig b.hi { color: var(--amber); }
+.rd-ai { display: flex; flex-direction: column; gap: 6px; font-size: 12.5px; line-height: 1.5; background: rgba(4,6,16,0.45); border: 1px solid var(--border); border-radius: 12px; padding: 12px 14px; }
+.rd-ai p { margin: 0; } .rd-ai ul { margin: 2px 0 0; padding-left: 16px; color: var(--muted); } .rd-ai b { color: var(--text); }
+.rd-ai-h { display: flex; align-items: center; gap: 7px; font-weight: 700; color: var(--cyan); } .rd-ai-h small { color: var(--dim); font-weight: 400; }
+.rd-ai.skeptic .rd-ai-h { color: var(--amber); }
+.rd-verdict { margin-left: auto; font-size: 10.5px; text-transform: uppercase; letter-spacing: .08em; padding: 2px 8px; border-radius: 6px; background: rgba(255,255,255,0.06); }
+.rd-ai.v-block .rd-verdict { color: #ff7a90; background: rgba(255,84,112,0.14); } .rd-ai.v-caution .rd-verdict { color: var(--amber); } .rd-ai.v-clear .rd-verdict { color: var(--lime); }
+.rd-two { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.rd-similar { margin: 0; padding-left: 16px; font-size: 12px; color: var(--muted); } .rd-similar small { color: var(--dim); }
+.rd-desk { background: rgba(200,240,74,0.04); border: 1px solid rgba(200,240,74,0.25); border-radius: 14px; padding: 14px 16px; display: flex; flex-direction: column; gap: 10px; }
+.rd-desk .cw-textarea { margin-top: 0; }
+.rd-draft { background: rgba(4,6,16,0.5); border: 1px solid var(--border); border-radius: 12px; padding: 12px 14px; font-size: 13px; line-height: 1.6; }
+.rd-draft-h { display: flex; justify-content: space-between; align-items: center; gap: 10px; font-size: 11.5px; color: var(--dim); margin-bottom: 8px; }
+.rd-notes-box { display: flex; flex-direction: column; gap: 6px; } .rd-notes-box h4 { margin: 0; font-size: 12px; text-transform: uppercase; letter-spacing: .07em; color: var(--amber); }
+.rd-notes-box .cw-textarea { margin-top: 0; }
+@media (max-width: 900px) { .rd-detail-grid, .rd-two { grid-template-columns: 1fr; } .rd-feed { grid-template-columns: 1fr; } .rd-dl { grid-template-columns: 110px 1fr; } }
+
+/* ===== Global Voice Commander (floating mic) ===== */
+.vcmd { position: fixed; right: 22px; bottom: 22px; z-index: 300; display: flex; flex-direction: column; align-items: flex-end; gap: 8px; }
+.vcmd-panel { max-width: 420px; background: rgba(10,14,34,0.92); backdrop-filter: blur(14px); border: 1px solid var(--border-lit); border-radius: 12px; padding: 10px 12px; font-size: 12px; color: var(--muted); box-shadow: 0 16px 40px rgba(0,0,0,0.45); }
+.vcmd-line { display: flex; align-items: center; gap: 7px; flex-wrap: wrap; line-height: 1.45; }
+.vcmd-line b { color: var(--text); } .vcmd-line em { color: var(--cyan); font-style: normal; } .vcmd-line svg { color: var(--violet2); flex-shrink: 0; }
+.vcmd-x { margin-left: auto; background: none; border: 0; color: var(--dim); font-size: 11px; cursor: pointer; }
+.vcmd-bar { display: flex; align-items: center; gap: 8px; background: rgba(10,14,34,0.92); backdrop-filter: blur(14px); border: 1px solid var(--border-lit); border-radius: 999px; padding: 5px 5px 5px 6px; box-shadow: 0 16px 40px rgba(0,0,0,0.45); }
+.vcmd-seg { display: flex; gap: 2px; background: rgba(4,6,16,0.6); border-radius: 999px; padding: 3px; }
+.vcmd-seg button { display: inline-flex; align-items: center; gap: 5px; font-size: 11.5px; font-weight: 600; color: var(--muted); background: transparent; border: 0; border-radius: 999px; padding: 6px 10px; cursor: pointer; transition: color .16s, background .16s; }
+.vcmd-seg button.on { color: #06060f; background: linear-gradient(135deg, var(--violet), var(--cyan)); }
+.vcmd-seg button:focus-visible { outline: 2px solid var(--cyan); }
+.vcmd-mic { width: 44px; height: 44px; border-radius: 50%; border: 1px solid var(--border-lit); background: rgba(255,255,255,0.04); color: var(--text); display: grid; place-items: center; cursor: pointer; transition: transform .12s, background .18s, box-shadow .18s; }
+.vcmd-mic:hover:not(:disabled) { transform: translateY(-1px); }
+.vcmd-mic:disabled { opacity: .5; cursor: default; }
+.vcmd-mic.on { color: #06060f; background: linear-gradient(135deg, var(--violet), var(--cyan)); border-color: transparent; animation: vcpulse 1.6s ease-in-out infinite; }
+.vcmd-mic:focus-visible { outline: 2px solid var(--cyan); outline-offset: 2px; }
+@media (max-width: 640px) { .vcmd { right: 12px; bottom: 12px; } .vcmd-panel { max-width: calc(100vw - 24px); } }
+
+/* Self-Directive: periodic scan */
+.sd-scan { margin-top: 14px; border: 1px solid var(--border); border-radius: 12px; padding: 12px 14px; background: rgba(4,6,16,0.35); display: flex; flex-direction: column; gap: 10px; }
+.sd-scan-note { margin-left: 8px; font-weight: 400; font-size: 11px; color: var(--dim); }
+.sd-scan-row { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; font-size: 12.5px; color: var(--muted); }
+.sd-toggle { display: inline-flex; align-items: center; gap: 8px; cursor: pointer; color: var(--text); font-weight: 600; }
+.sd-toggle input { accent-color: var(--violet); width: 16px; height: 16px; }
+.sd-interval { display: inline-flex; align-items: center; gap: 6px; }
+.sd-interval input { width: 64px; background: rgba(4,6,16,0.6); border: 1px solid var(--border); border-radius: 8px; color: var(--text); padding: 6px 8px; font-size: 12.5px; }
+.sd-scan-meta { font-size: 11.5px; color: var(--dim); }
+.sd-scan-run { margin-left: auto; display: inline-flex; align-items: center; gap: 6px; font-size: 12px; font-weight: 600; color: var(--text); background: rgba(255,255,255,0.03); border: 1px solid var(--border-lit); border-radius: 9px; padding: 7px 12px; cursor: pointer; }
+.sd-scan-run:disabled { opacity: .55; cursor: default; }
+.sd-focus { width: 100%; box-sizing: border-box; resize: vertical; font-size: 12px; line-height: 1.5; color: var(--muted); background: rgba(4,6,16,0.5); border: 1px solid var(--border); border-radius: 9px; padding: 8px 10px; }
+.sd-scans { display: flex; flex-direction: column; gap: 6px; }
+.sd-scan-item { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; font-size: 11.5px; color: var(--muted); }
+.sd-scan-when { color: var(--dim); } .sd-scan-counts { color: var(--text); } .sd-scan-res { color: var(--violet2); }
+.sd-auto { font-size: 10px; letter-spacing: .06em; text-transform: uppercase; color: var(--cyan); border: 1px solid rgba(79,209,255,0.35); border-radius: 5px; padding: 1px 6px; }
+
+/* ===== Local Node ===== */
+.ln-wrap { display: flex; flex-direction: column; gap: 16px; }
+.ln-wrap .chr-hero-left p b { color: var(--text); }
+.ln-setup { margin-top: 12px; font-size: 13px; line-height: 1.6; color: var(--muted); }
+.ln-setup ol { margin: 0; padding-left: 20px; display: flex; flex-direction: column; gap: 6px; }
+.ln-setup a { color: var(--cyan); }
+.ln-setup code, .ln-key { font-family: ui-monospace, monospace; font-size: 11.5px; color: var(--text); background: rgba(4,6,16,0.6); border: 1px solid var(--border); border-radius: 6px; padding: 2px 7px; word-break: break-all; }
+.ln-key { color: var(--gold); }
+.ln-dim { color: var(--dim); }
+.ln-safety { display: flex; flex-wrap: wrap; gap: 8px 16px; margin-top: 12px; font-size: 11.5px; color: var(--muted); }
+.ln-safety span { display: inline-flex; align-items: center; gap: 5px; } .ln-safety svg { color: var(--green); }
+.ln-nodes { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 10px; }
+.ln-node { display: flex; align-items: flex-start; gap: 10px; text-align: left; background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 12px 14px; color: var(--text); cursor: pointer; position: relative; transition: border-color .16s; }
+.ln-node svg { color: var(--dim); margin-top: 2px; flex-shrink: 0; } .ln-node.on svg { color: var(--green); }
+.ln-node.active { border-color: var(--border-lit); background: rgba(139,124,255,0.08); }
+.ln-node span { display: flex; flex-direction: column; gap: 2px; min-width: 0; } .ln-node b { font-size: 13.5px; } .ln-node small { font-size: 11px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ln-node em { margin-left: auto; font-style: normal; font-size: 11px; font-weight: 700; color: #06060f; background: var(--gold); border-radius: 999px; padding: 2px 8px; }
+.ln-plan { margin-top: 10px; font-size: 12.5px; color: var(--muted); background: rgba(139,124,255,0.08); border: 1px solid var(--border); border-radius: 10px; padding: 9px 12px; } .ln-plan b { color: var(--text); }
+.ln-manual { margin-top: 10px; font-size: 12px; color: var(--muted); } .ln-manual summary { cursor: pointer; }
+.ln-await { background: rgba(245,196,81,0.06); border: 1px solid rgba(245,196,81,0.35); border-radius: 14px; padding: 14px 16px; display: flex; flex-direction: column; gap: 8px; }
+.ln-await .fa-head { color: var(--gold); }
+.ln-await-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; font-size: 12.5px; color: var(--text); }
+.ln-await-row code { color: var(--gold); }
+.ln-tasks { display: flex; flex-direction: column; gap: 6px; margin-top: 10px; }
+.ln-task { border: 1px solid var(--border); border-radius: 10px; padding: 8px 12px; background: rgba(4,6,16,0.35); }
+.ln-task.s-proposed { border-color: rgba(245,196,81,0.45); } .ln-task.s-running { border-color: rgba(79,209,255,0.5); } .ln-task.s-failed { border-color: rgba(255,84,112,0.45); } .ln-task.s-awaiting_submit { border-color: rgba(245,196,81,0.6); }
+.ln-task-h { display: flex; align-items: center; gap: 8px; font-size: 12.5px; }
+.ln-task-h svg { color: var(--violet2); flex-shrink: 0; }
+.ln-task-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; cursor: pointer; color: var(--text); }
+.ln-status { font-size: 10.5px; text-transform: uppercase; letter-spacing: .06em; padding: 2px 7px; border-radius: 6px; background: rgba(255,255,255,0.05); color: var(--muted); }
+.ln-status.s-proposed { color: var(--gold); background: rgba(245,196,81,0.12); } .ln-status.s-queued { color: var(--cyan); } .ln-status.s-running { color: var(--cyan); background: rgba(79,209,255,0.12); }
+.ln-status.s-done { color: var(--green); background: rgba(72,213,151,0.12); } .ln-status.s-failed, .ln-status.s-rejected { color: #ff7a90; } .ln-status.s-awaiting_submit { color: var(--gold); background: rgba(245,196,81,0.15); }
+.ln-when { font-size: 11px; color: var(--dim); white-space: nowrap; }
+.ln-ok, .ln-no { width: 28px; height: 28px; border-radius: 7px; border: 1px solid var(--border); background: transparent; cursor: pointer; display: grid; place-items: center; }
+.ln-ok { color: var(--green); } .ln-ok:hover { background: rgba(72,213,151,0.15); border-color: rgba(72,213,151,0.5); }
+.ln-no { color: #ff7a90; } .ln-no:hover { background: rgba(255,84,112,0.12); border-color: rgba(255,84,112,0.5); }
+.ln-params, .ln-text { margin: 8px 0 0; font-family: ui-monospace, monospace; font-size: 11.5px; line-height: 1.5; color: var(--muted); background: rgba(4,6,16,0.6); border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; white-space: pre-wrap; word-break: break-word; max-height: 360px; overflow: auto; }
+.ln-err { margin-top: 6px; font-size: 11.5px; color: #ff7a90; display: flex; align-items: center; gap: 6px; }
+.ln-page { margin-top: 12px; display: flex; flex-direction: column; gap: 10px; }
+.ln-page-h { font-size: 12.5px; color: var(--muted); display: flex; gap: 8px; align-items: center; flex-wrap: wrap; } .ln-page-h b { color: var(--text); } .ln-page-h a { color: var(--cyan); display: inline-flex; }
+.ln-answer { font-size: 13px; line-height: 1.55; color: var(--text); background: rgba(79,209,255,0.06); border-left: 2px solid var(--cyan); padding: 9px 12px; border-radius: 0 8px 8px 0; } .ln-answer small { color: var(--dim); margin-left: 6px; }
+.ln-page-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.ln-shot { width: 100%; border-radius: 10px; border: 1px solid var(--border); } .ln-shot.big { max-height: 60vh; object-fit: contain; }
+.ln-forms { font-size: 12px; color: var(--muted); } .ln-forms code { display: inline-block; margin: 2px 6px 2px 0; font-size: 11px; color: var(--cyan); }
+.ln-detail h2 { font-size: 17px; margin: 0 0 4px; }
+@media (max-width: 900px) { .ln-page-grid { grid-template-columns: 1fr; } }
 
 ```
 
@@ -5837,7 +6560,7 @@ import { toast } from "sonner";
 import { motion, AnimatePresence } from "framer-motion";
 import {
   Wand2, Loader2, ShieldAlert, Lock, FileCode, Check, X, RotateCcw,
-  Search, History, AlertTriangle, GitCommitHorizontal, CheckCircle2, ScrollText
+  Search, History, AlertTriangle, GitCommitHorizontal, CheckCircle2, ScrollText, Radar, Play, Eye
 } from "lucide-react";
 import { API } from "../App";
 
@@ -5867,6 +6590,33 @@ export default function SelfDirective() {
   const [applying, setApplying] = useState(false);
   const [rolling, setRolling] = useState(false);
   const [history, setHistory] = useState([]);
+  const [scanCfg, setScanCfg] = useState(null);
+  const [scans, setScans] = useState([]);
+  const [scanning, setScanning] = useState(false);
+  const [savingCfg, setSavingCfg] = useState(false);
+
+  const loadScans = useCallback(async () => {
+    try {
+      const [c, l] = await Promise.all([axios.get(`${API}/self/scan/config`), axios.get(`${API}/self/scans`, { params: { limit: 8 } })]);
+      setScanCfg(c.data); setScans(l.data);
+    } catch (e) { console.error(e); }
+  }, []);
+  const saveScanCfg = async (patch) => {
+    setSavingCfg(true);
+    try { const r = await axios.put(`${API}/self/scan/config`, patch); setScanCfg(r.data); toast.success(r.data.enabled ? `Scheduled scans on - every ${r.data.interval_hours}h` : "Scheduled scans off"); }
+    catch (e) { toast.error(e?.response?.data?.detail || "Could not save"); }
+    finally { setSavingCfg(false); }
+  };
+  const runScan = async () => {
+    setScanning(true);
+    try {
+      const r = await axios.post(`${API}/self/scan/run`, {}, { timeout: 300000 });
+      const c = r.data.counts || {};
+      toast.success(`Scan done: ${c.critical || 0} critical · ${c.high || 0} high · ${c.low || 0} low · ${(r.data.proposal_ids || []).length} proposal(s) queued`);
+      loadScans(); loadHistory();
+    } catch (e) { toast.error(e?.response?.data?.detail || "Scan failed"); }
+    finally { setScanning(false); }
+  };
 
   const loadManifest = useCallback(async () => {
     try { const r = await axios.get(`${API}/self/manifest`); setManifest(r.data); }
@@ -5877,7 +6627,7 @@ export default function SelfDirective() {
     catch (e) { console.error(e); }
   }, []);
 
-  useEffect(() => { loadManifest(); loadHistory(); }, [loadManifest, loadHistory]);
+  useEffect(() => { loadManifest(); loadHistory(); loadScans(); }, [loadManifest, loadHistory, loadScans]);
 
   const toggle = (path) => {
     setSelected((s) => s.includes(path) ? s.filter((x) => x !== path) : (s.length >= 5 ? (toast.warning("Max 5 files per directive"), s) : [...s, path]));
@@ -5936,6 +6686,44 @@ export default function SelfDirective() {
           <div>
             <b>Preview-only & approval-gated.</b> This edits source in the live preview workspace and is <b>disabled after production deployment</b>. Every change is shown as a diff first, applied only on your approval, and can be rolled back.
           </div>
+        </div>
+
+        <div className="sd-scan" data-testid="self-scan">
+          <div className="sd-sub-head"><Radar size={14} /> Periodic self-scan <span className="sd-scan-note">propose-only · compile / lint / bundle / hygiene checks · never auto-applies</span></div>
+          {scanCfg && (
+            <div className="sd-scan-row">
+              <label className="sd-toggle" data-testid="self-scan-toggle">
+                <input type="checkbox" checked={!!scanCfg.enabled} disabled={savingCfg} onChange={(e) => saveScanCfg({ enabled: e.target.checked })} />
+                <span>{scanCfg.enabled ? "Scheduled" : "Off"}</span>
+              </label>
+              <label className="sd-interval">every
+                <input type="number" min={1} max={720} data-testid="self-scan-interval" defaultValue={scanCfg.interval_hours} onBlur={(e) => Number(e.target.value) !== scanCfg.interval_hours && saveScanCfg({ interval_hours: Number(e.target.value) })} /> h
+              </label>
+              <span className="sd-scan-meta">
+                {scanCfg.last_run_at ? `last ${new Date(scanCfg.last_run_at).toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })}` : "never run"}
+                {scanCfg.enabled && scanCfg.next_run_at ? ` · next ${new Date(scanCfg.next_run_at).toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })}` : ""}
+              </span>
+              <button className="sd-scan-run" data-testid="self-scan-run" onClick={runScan} disabled={scanning || scanCfg.running}>
+                {scanning || scanCfg.running ? <Loader2 className="spin" size={13} /> : <Play size={13} />} {scanning ? "Scanning..." : "Scan now"}
+              </button>
+            </div>
+          )}
+          {scanCfg && (
+            <textarea className="sd-focus" data-testid="self-scan-focus" defaultValue={scanCfg.focus} rows={2}
+              onBlur={(e) => e.target.value !== scanCfg.focus && saveScanCfg({ focus: e.target.value })} placeholder="What the scan should prioritise when it proposes a change..." />
+          )}
+          {scans.length > 0 && (
+            <div className="sd-scans" data-testid="self-scan-list">
+              {scans.map((sc) => (
+                <div key={sc.id} className="sd-scan-item">
+                  <span className={`sd-status s-${sc.status === "done" ? "applied" : sc.status}`}>{sc.trigger}</span>
+                  <span className="sd-scan-when">{new Date(sc.started_at).toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })} · {sc.duration_s}s</span>
+                  <span className="sd-scan-counts">{(sc.counts?.critical || 0)} crit · {(sc.counts?.high || 0)} high · {(sc.counts?.low || 0)} low · {(sc.counts?.info || 0)} info</span>
+                  <span className="sd-scan-res">{(sc.proposal_ids || []).length ? `${sc.proposal_ids.length} proposal queued for your approval` : (sc.note || sc.error || "")}</span>
+                </div>
+              ))}
+            </div>
+          )}
         </div>
       </section>
 
@@ -6020,8 +6808,12 @@ export default function SelfDirective() {
               {history.map((h) => (
                 <div key={h.id} className="sd-hrow">
                   <span className={`sd-status s-${h.status}`}>{h.status}</span>
+                  {h.origin === "scheduled_scan" && <span className="sd-auto" title="Generated by the periodic self-scan">scan</span>}
                   <span className="sd-hinstr" title={h.instruction}>{h.instruction}</span>
                   <span className="sd-hpaths">{(h.paths || []).join(", ")}</span>
+                  {h.status === "proposed" && (
+                    <button className="sd-hroll" data-testid="self-review" onClick={() => { setProposal(h); window.scrollTo({ top: 0, behavior: "smooth" }); }} title="Review & approve"><Eye size={12} /></button>
+                  )}
                   {h.status === "applied" && (
                     <button className="sd-hroll" onClick={() => rollback(h.id)} disabled={rolling} title="Rollback"><RotateCcw size={12} /></button>
                   )}
@@ -6046,7 +6838,7 @@ import { toast } from "sonner";
 import { motion, AnimatePresence } from "framer-motion";
 import {
   Crown, Loader2, Play, Download, History, Sparkles, ShieldAlert, Lightbulb,
-  Compass, Coins, Radar, Trash2, ChevronRight, X, Info
+  Compass, Coins, Radar, Trash2, ChevronRight, X, Info, Rocket, ExternalLink
 } from "lucide-react";
 import { API } from "../App";
 import { Markdown } from "./FileAnalyzer";
@@ -6069,6 +6861,7 @@ export default function Council() {
   const [result, setResult] = useState(null);
   const [history, setHistory] = useState([]);
   const [openWeaver, setOpenWeaver] = useState(null);
+  const [missioning, setMissioning] = useState(false);
 
   const applyPreset = useCallback((p) => {
     setPresetId(p.id);
@@ -6123,6 +6916,21 @@ export default function Council() {
   };
 
   const exportMd = (id) => { window.open(`${API}/acaso/deliberations/${id}/export`, "_blank"); };
+
+  const toMission = async () => {
+    if (!result) return;
+    setMissioning(true);
+    try {
+      const r = await axios.post(`${API}/acaso/deliberations/${result.id}/to-mission`, { mode: "Move" }, { timeout: 120000 });
+      setResult((prev) => ({ ...prev, mission_id: r.data.id, mission_title: r.data.title }));
+      loadHistory();
+      toast.success(`Mission "${r.data.title}" is on the Sovereign Home board`, {
+        action: { label: "Open board", onClick: () => { window.location.href = "/?tab=home"; } },
+      });
+    } catch (e) {
+      toast.error(e?.response?.data?.detail || "Could not compile mission");
+    } finally { setMissioning(false); }
+  };
 
   return (
     <div className="cw-wrap" data-testid="council-page">
@@ -6199,7 +7007,18 @@ export default function Council() {
                   {fmtDate(result.timestamp)} · {result.duration_s}s · {result.challenge_type} · Council: {(result.council_consulted || []).join(", ")}
                 </div>
               </div>
-              <button className="fa-btn" data-testid="council-export" onClick={() => exportMd(result.id)}><Download size={14} /> Export .md</button>
+              <div className="cw-actions">
+                {result.mission_id ? (
+                  <a className="fa-btn cw-mission-link" data-testid="council-open-mission" href="/?tab=home" title={result.mission_title}>
+                    <ExternalLink size={14} /> On board: {result.mission_title || "mission"}
+                  </a>
+                ) : (
+                  <button className="fa-btn primary" data-testid="council-to-mission" onClick={toMission} disabled={missioning}>
+                    {missioning ? <Loader2 className="spin" size={14} /> : <Rocket size={14} />} {missioning ? "Compiling mission..." : "Turn into Mission"}
+                  </button>
+                )}
+                <button className="fa-btn" data-testid="council-export" onClick={() => exportMd(result.id)}><Download size={14} /> Export .md</button>
+              </div>
             </div>
 
             <div className="cw-grid">
@@ -6240,7 +7059,7 @@ export default function Council() {
                 <button className="cw-hmain" onClick={() => openPast(h.id)} data-testid={`history-${h.id}`}>
                   <span className={`bb-tag`}>{h.preset_id || "custom"}</span>
                   <span className="cw-htitle">{h.title}</span>
-                  <span className="cw-hmeta">{fmtDate(h.timestamp)} · {h.duration_s}s{h.shadow_veto ? " · VETO" : ""}</span>
+                  <span className="cw-hmeta">{fmtDate(h.timestamp)} · {h.duration_s}s{h.shadow_veto ? " · VETO" : ""}{h.mission_id ? " · MISSION" : ""}</span>
                 </button>
                 <button className="attach-btn" title="Export" onClick={() => exportMd(h.id)}><Download size={13} /></button>
                 <button className="attach-btn danger" title="Delete" onClick={() => removePast(h.id)}><Trash2 size={13} /></button>
@@ -6528,6 +7347,2688 @@ export default function VoiceChat() {
     </div>
   );
 }
+
+```
+
+
+### `frontend/src/components/VoiceCommander.js`
+```javascript
+import React, { useCallback, useEffect, useRef, useState } from "react";
+import axios from "axios";
+import { toast } from "sonner";
+import { Mic, Square, Loader2, Command, Keyboard, Volume2 } from "lucide-react";
+import { API } from "../App";
+
+const SR = typeof window !== "undefined" ? (window.SpeechRecognition || window.webkitSpeechRecognition) : null;
+const TTS = typeof window !== "undefined" ? window.speechSynthesis : null;
+
+const isTextField = (el) =>
+  !!el && ((el.tagName === "TEXTAREA") || (el.tagName === "INPUT" && /^(text|search|email|url|tel|number|)$/.test(el.type || "text"))) && !el.readOnly && !el.disabled;
+
+/** Write into a React-controlled input so React's onChange fires. */
+function injectText(el, text, replaceFrom) {
+  const proto = el.tagName === "TEXTAREA" ? window.HTMLTextAreaElement.prototype : window.HTMLInputElement.prototype;
+  const setter = Object.getOwnPropertyDescriptor(proto, "value").set;
+  const base = replaceFrom !== null && replaceFrom !== undefined ? el.value.slice(0, replaceFrom) : el.value;
+  const sep = base && !/\s$/.test(base) ? " " : "";
+  setter.call(el, base + sep + text);
+  el.dispatchEvent(new Event("input", { bubbles: true }));
+  return base.length + sep.length;
+}
+
+const fieldLabel = (el) => el?.getAttribute("placeholder") || el?.getAttribute("aria-label") || el?.getAttribute("data-testid") || el?.name || "focused text box";
+
+/**
+ * VoiceCommander - floating mic available on every tab.
+ *  - Dictate mode: speaks into whichever text box was last focused (interim results shown live, finalized in place).
+ *  - Command mode: transcript -> POST /api/voice/command -> executes (navigate / council / radar / mission / ask) and speaks back.
+ */
+export default function VoiceCommander({ setTab }) {
+  const [mode, setMode] = useState(() => localStorage.getItem("acaso_vc_mode") || "dictate");
+  const [listening, setListening] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [interim, setInterim] = useState("");
+  const [target, setTarget] = useState(null);
+  const [lastSpoken, setLastSpoken] = useState("");
+  const recRef = useRef(null);
+  const targetRef = useRef(null);
+  const anchorRef = useRef(null); // char index where the current utterance began, for interim replacement
+  const modeRef = useRef(mode);
+  useEffect(() => { modeRef.current = mode; localStorage.setItem("acaso_vc_mode", mode); }, [mode]);
+
+  // Track the last focused text field anywhere in the app (ignore our own widget).
+  useEffect(() => {
+    const onFocus = (e) => {
+      const el = e.target;
+      if (el?.closest?.("[data-voice-commander]")) return;
+      if (isTextField(el)) { targetRef.current = el; setTarget(el); }
+    };
+    document.addEventListener("focusin", onFocus);
+    return () => document.removeEventListener("focusin", onFocus);
+  }, []);
+
+  const speak = useCallback((t) => {
+    if (!TTS || !t) return;
+    TTS.cancel();
+    const u = new SpeechSynthesisUtterance(t);
+    const pref = localStorage.getItem("acaso_voice_name");
+    const v = TTS.getVoices().find((x) => x.name === pref);
+    if (v) u.voice = v;
+    TTS.speak(u);
+  }, []);
+
+  const runCommand = useCallback(async (transcript) => {
+    if (!transcript) return;
+    setBusy(true);
+    toast(`Heard: "${transcript}"`, { icon: <Command size={14} /> });
+    try {
+      const r = await axios.post(`${API}/voice/command`, { transcript, session_id: localStorage.getItem("acaso_voice_session") || null }, { timeout: 320000 });
+      const d = r.data;
+      if (d.navigate_tab && setTab) setTab(d.navigate_tab);
+      setLastSpoken(d.spoken || "");
+      speak(d.spoken);
+      if (d.error) toast.error(d.spoken); else toast.success(d.spoken?.slice(0, 140) || d.intent);
+    } catch (e) {
+      toast.error(e?.response?.data?.detail || "Command failed");
+    } finally { setBusy(false); }
+  }, [setTab, speak]);
+
+  const stop = useCallback(() => { try { recRef.current?.stop(); } catch { /* ignore */ } setListening(false); }, []);
+
+  const start = useCallback(() => {
+    if (!SR) { toast.error("This browser lacks speech recognition - use Chrome, Edge or Safari"); return; }
+    if (modeRef.current === "dictate" && !isTextField(targetRef.current)) {
+      toast.error("Click into a text box first, then tap the mic to dictate into it");
+      return;
+    }
+    try { TTS?.cancel(); } catch { /* ignore */ }
+    const rec = new SR();
+    rec.lang = "en-US";
+    rec.interimResults = true;
+    rec.continuous = modeRef.current === "dictate";
+    let finalCmd = "";
+    anchorRef.current = null;
+    rec.onstart = () => { setListening(true); setInterim(""); };
+    rec.onresult = (ev) => {
+      let fin = "", inter = "";
+      for (let i = ev.resultIndex; i < ev.results.length; i++) {
+        const t = ev.results[i][0].transcript;
+        if (ev.results[i].isFinal) fin += t; else inter += t;
+      }
+      if (modeRef.current === "dictate") {
+        const el = targetRef.current;
+        if (!isTextField(el)) return;
+        if (anchorRef.current === null) anchorRef.current = el.value.length;
+        const combined = (fin + inter).trim();
+        if (combined) {
+          const end = injectText(el, combined, anchorRef.current);
+          if (fin) { anchorRef.current = end + combined.length; el.setSelectionRange?.(el.value.length, el.value.length); }
+        }
+        setInterim(inter);
+      } else {
+        finalCmd = (finalCmd + fin).trim();
+        setInterim(inter || finalCmd);
+      }
+    };
+    rec.onerror = (ev) => {
+      setListening(false);
+      if (ev.error === "not-allowed") toast.error("Microphone permission denied");
+      else if (!["aborted", "no-speech"].includes(ev.error)) toast.error(`Mic error: ${ev.error}`);
+    };
+    rec.onend = () => {
+      setListening(false); setInterim("");
+      if (modeRef.current === "command" && finalCmd) runCommand(finalCmd);
+      else if (modeRef.current === "dictate") targetRef.current?.focus?.();
+    };
+    recRef.current = rec;
+    try { rec.start(); } catch { /* already started */ }
+  }, [runCommand]);
+
+  // Keyboard shortcut: Ctrl/Cmd + Shift + Space toggles the mic
+  useEffect(() => {
+    const onKey = (e) => {
+      if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.code === "Space") { e.preventDefault(); listening ? stop() : start(); }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [listening, start, stop]);
+
+  const supported = !!SR;
+
+  return (
+    <div className={`vcmd ${listening ? "live" : ""}`} data-voice-commander data-testid="voice-commander">
+      {(listening || busy || lastSpoken) && (
+        <div className="vcmd-panel" data-testid="voice-commander-panel">
+          {listening && mode === "dictate" && <div className="vcmd-line"><Keyboard size={12} /> Dictating into <b>{fieldLabel(target)}</b>{interim ? <em> · {interim}</em> : null}</div>}
+          {listening && mode === "command" && <div className="vcmd-line"><Command size={12} /> Listening for a command{interim ? <em> · {interim}</em> : <em> · e.g. "open radar", "convene the council on...", "discover grants", "compile a mission to..."</em>}</div>}
+          {busy && <div className="vcmd-line"><Loader2 className="spin" size={12} /> Executing...</div>}
+          {!listening && !busy && lastSpoken && <div className="vcmd-line"><Volume2 size={12} /> <span>{lastSpoken.slice(0, 220)}</span><button className="vcmd-x" onClick={() => setLastSpoken("")}>dismiss</button></div>}
+        </div>
+      )}
+      <div className="vcmd-bar">
+        <div className="vcmd-seg" role="tablist" aria-label="Mic mode">
+          <button data-testid="vcmd-mode-dictate" className={mode === "dictate" ? "on" : ""} onClick={() => setMode("dictate")} title="Dictate into the focused text box"><Keyboard size={13} /> Dictate</button>
+          <button data-testid="vcmd-mode-command" className={mode === "command" ? "on" : ""} onClick={() => setMode("command")} title="Speak a command ACASO executes"><Command size={13} /> Command</button>
+        </div>
+        <button data-testid="vcmd-mic" className={`vcmd-mic ${listening ? "on" : ""}`} onClick={() => (listening ? stop() : start())} disabled={!supported || busy}
+          title={supported ? (listening ? "Stop (Ctrl+Shift+Space)" : "Start mic (Ctrl+Shift+Space)") : "Speech recognition unsupported in this browser"} aria-pressed={listening}>
+          {busy ? <Loader2 className="spin" size={18} /> : listening ? <Square size={18} /> : <Mic size={18} />}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+```
+
+
+### `frontend/src/components/Radar.js`
+```javascript
+import React, { useCallback, useEffect, useMemo, useState } from "react";
+import axios from "axios";
+import { toast } from "sonner";
+import { motion, AnimatePresence } from "framer-motion";
+import {
+  Radar as RadarIcon, RefreshCw, Loader2, Search, Bookmark, BookmarkCheck, EyeOff, Rocket, ExternalLink,
+  ShieldCheck, ShieldAlert, AlertTriangle, ChevronDown, ChevronUp, X, FileText, Mail, PenLine, Package,
+  ClipboardList, Download, Sparkles, KeyRound, CheckCircle2, Clock, MapPin, Landmark, Coins, Info, Copy
+} from "lucide-react";
+import { API } from "../App";
+import { Markdown } from "./FileAnalyzer";
+
+const ENTITY = ["individual", "sole_proprietor", "llc", "corporation", "nonprofit", "startup", "creator", "contractor", "community_org", "university", "government"];
+const TYPES = ["grant", "contract", "subcontract", "procurement", "sponsorship", "rfp", "funding", "technical_bounty"];
+const SET_ASIDES = ["minority", "veteran", "sdvosb", "woman", "disability", "hubzone", "8a", "disadvantaged"];
+const STAGES = ["Discovered", "Reviewed", "Qualified", "Preparing", "Submitted", "Awarded", "Not Awarded"];
+const VIEWS = [
+  { key: "all", label: "All open" }, { key: "high", label: "High fit" }, { key: "low", label: "Lower barrier" },
+  { key: "closing", label: "Closing soon" }, { key: "new", label: "Newest" }, { key: "saved", label: "Saved" }, { key: "dismissed", label: "Dismissed" },
+];
+const DRAFTS = [
+  { key: "email", label: "Intro email", icon: Mail },
+  { key: "grant_narrative", label: "Grant narrative", icon: PenLine },
+  { key: "outreach_packet", label: "Outreach packet", icon: Package },
+  { key: "form_answers", label: "Fill a form", icon: ClipboardList },
+];
+
+const money = (v) => (v === null || v === undefined ? null : `$${Number(v).toLocaleString()}`);
+const dateS = (iso) => { try { return iso ? new Date(iso).toLocaleDateString([], { month: "short", day: "numeric", year: "numeric" }) : null; } catch { return null; } };
+const ago = (iso) => { try { const m = Math.round((Date.now() - new Date(iso)) / 60000); return m < 60 ? `${m}m ago` : m < 1440 ? `${Math.round(m / 60)}h ago` : `${Math.round(m / 1440)}d ago`; } catch { return ""; } };
+const NV = <span className="rd-nv">Not verified</span>;
+const listToStr = (a) => (a || []).join(", ");
+const strToList = (s) => (s || "").split(",").map((x) => x.trim()).filter(Boolean);
+
+function ScoreMeter({ score, size = "sm" }) {
+  if (!score) return null;
+  const t = score.total ?? 0;
+  const tone = t >= 75 ? "hi" : t >= 50 ? "mid" : "lo";
+  return (
+    <div className={`rd-score ${size} ${tone}`} title="Inferred score - see breakdown in detail view" data-testid="rd-score">
+      <div className="rd-score-bar"><span style={{ width: `${t}%` }} /></div>
+      <div className="rd-score-txt"><b>{t}</b><small>/100 · {score.label} · inferred</small></div>
+    </div>
+  );
+}
+
+function SourceBadge({ o }) {
+  const stale = o.status === "stale";
+  return (
+    <span className={`rd-src ${stale ? "stale" : ""}`} title={`Source: ${o.source} · retrieved ${o.retrieved_at} · HTTP ${o.http_status}`} data-testid="rd-source-badge">
+      <ShieldCheck size={11} /> {o.source.replace("_", ".")} · {stale ? "STALE" : `verified ${ago(o.last_verified_at || o.retrieved_at)}`}
+    </span>
+  );
+}
+
+export default function Radar() {
+  const [profile, setProfile] = useState(null);
+  const [profileOpen, setProfileOpen] = useState(false);
+  const [moreOpen, setMoreOpen] = useState(false);
+  const [sources, setSources] = useState([]);
+  const [discovering, setDiscovering] = useState(false);
+  const [keyword, setKeyword] = useState("");
+  const [items, setItems] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [view, setView] = useState("all");
+  const [filters, setFilters] = useState({ type: "", source: "", min_score: "", closing_days: "", low_barrier: false, remote: false, max_value: "", q: "" });
+  const [nlq, setNlq] = useState("");
+  const [nlProposal, setNlProposal] = useState(null);
+  const [nlBusy, setNlBusy] = useState(false);
+  const [detail, setDetail] = useState(null);
+
+  const loadSources = useCallback(async () => { try { setSources((await axios.get(`${API}/radar/sources`)).data); } catch { /* silent */ } }, []);
+  const loadProfile = useCallback(async () => { try { setProfile((await axios.get(`${API}/radar/profile`)).data); } catch { /* silent */ } }, []);
+
+  const params = useMemo(() => {
+    const p = { limit: 150 };
+    if (filters.type) p.type = filters.type;
+    if (filters.source) p.source = filters.source;
+    if (filters.min_score) p.min_score = filters.min_score;
+    if (filters.closing_days) p.closing_days = filters.closing_days;
+    if (filters.low_barrier) p.low_barrier = true;
+    if (filters.remote) p.remote = true;
+    if (filters.max_value) p.max_value = filters.max_value;
+    if (filters.q) p.q = filters.q;
+    if (view === "high") p.min_score = Math.max(70, Number(p.min_score || 0));
+    if (view === "low") p.low_barrier = true;
+    if (view === "closing") { p.closing_days = Math.min(30, Number(p.closing_days || 30)); p.sort = "deadline"; }
+    if (view === "new") p.sort = "new";
+    if (view === "saved") p.saved = true;
+    if (view === "dismissed") { p.user_status = "dismissed"; p.include_dismissed = true; }
+    return p;
+  }, [filters, view]);
+
+  const loadItems = useCallback(async () => {
+    setLoading(true);
+    try { setItems((await axios.get(`${API}/radar/opportunities`, { params })).data); }
+    catch { toast.error("Could not load opportunities"); }
+    finally { setLoading(false); }
+  }, [params]);
+
+  useEffect(() => { loadSources(); loadProfile(); }, [loadSources, loadProfile]);
+  useEffect(() => { loadItems(); }, [loadItems]);
+
+  const discover = async () => {
+    setDiscovering(true);
+    try {
+      const r = await axios.post(`${API}/radar/discover`, { keyword: keyword || null, limit: 20 }, { timeout: 120000 });
+      const ok = r.data.runs.filter((x) => !x.error);
+      const errs = r.data.runs.filter((x) => x.error);
+      toast.success(`${ok.reduce((a, x) => a + x.new, 0)} new · ${ok.reduce((a, x) => a + x.updated, 0)} re-verified from ${ok.length} source(s)`);
+      errs.forEach((e) => toast.warning(`${e.source}: ${e.error.split(":")[0]}`));
+      loadSources(); loadItems();
+    } catch (e) { toast.error(e?.response?.data?.detail || "Discovery failed"); }
+    finally { setDiscovering(false); }
+  };
+
+  const saveProfile = async () => {
+    try { const r = await axios.put(`${API}/radar/profile`, profile); setProfile(r.data); toast.success("Profile saved - re-run Discover to rescore"); }
+    catch (e) { toast.error(e?.response?.data?.detail?.[0]?.msg || "Profile invalid"); }
+  };
+
+  const patch = async (id, body) => {
+    try {
+      const r = await axios.patch(`${API}/radar/opportunities/${id}`, body);
+      setItems((xs) => xs.map((x) => (x.id === id ? { ...x, ...r.data, description: undefined } : x)));
+      if (detail?.id === id) setDetail(r.data);
+      return r.data;
+    } catch { toast.error("Update failed"); }
+  };
+
+  const toMission = async (o) => {
+    try {
+      const r = await axios.post(`${API}/radar/opportunities/${o.id}/to-mission`, {}, { timeout: 120000 });
+      toast.success(`Mission "${r.data.title}" added to Sovereign Home`, { action: { label: "Open board", onClick: () => { window.location.href = "/?tab=home"; } } });
+      setItems((xs) => xs.map((x) => (x.id === o.id ? { ...x, mission_id: r.data.id, mission_title: r.data.title, stage: "Preparing" } : x)));
+      if (detail?.id === o.id) setDetail((d) => ({ ...d, mission_id: r.data.id, mission_title: r.data.title, stage: "Preparing" }));
+    } catch (e) { toast.error(e?.response?.data?.detail || "Could not create mission"); }
+  };
+
+  const openDetail = async (id) => {
+    try { setDetail((await axios.get(`${API}/radar/opportunities/${id}`)).data); } catch { toast.error("Could not open"); }
+  };
+
+  const runNl = async () => {
+    if (!nlq.trim()) return;
+    setNlBusy(true);
+    try { setNlProposal((await axios.post(`${API}/radar/search/nl`, { query: nlq })).data); }
+    catch (e) { toast.error(e?.response?.data?.detail || "Could not interpret query"); }
+    finally { setNlBusy(false); }
+  };
+  const applyNl = () => {
+    const f = nlProposal?.proposed_filters || {};
+    setFilters((cur) => ({ ...cur, type: f.type || "", source: f.source || "", min_score: f.min_score ?? "", closing_days: f.closing_days ?? "",
+      low_barrier: !!f.low_barrier, remote: !!f.remote, max_value: f.max_value ?? "", q: f.q || "" }));
+    setView("all"); setNlProposal(null);
+    if (f.exclusions?.length) toast(`Exclusions noted (apply by eye): ${f.exclusions.join("; ")}`);
+  };
+
+  const pf = (k) => (profile?.[k] ?? "");
+  const setP = (k, v) => setProfile((p) => ({ ...p, [k]: v }));
+  const configured = sources.filter((s) => s.configured).length;
+
+  return (
+    <div className="rd-wrap" data-testid="radar-page">
+      <div className="rd-hero">
+        <div>
+          <div className="rd-title"><RadarIcon size={18} /> Opportunity Radar</div>
+          <p>Finds public contracts, grants, sponsorships and B2B openings that match your capabilities - and shows the <b>real requirements, effort, deadline and next step</b>. Every record comes from an official source with a URL, retrieval time and evidence excerpts. Nothing here is "easy money", and nothing is ever auto-submitted.</p>
+        </div>
+        <div className="rd-hero-stats">
+          <div className="rd-stat"><span className="v">{items.length}</span><span className="l">in view</span></div>
+          <div className="rd-stat"><span className="v">{configured}/{sources.length}</span><span className="l">sources live</span></div>
+        </div>
+      </div>
+
+      <div className="rd-warn" data-testid="radar-disclaimer"><AlertTriangle size={14} /> Verify every opportunity on its original source before relying on it. Scores, fit labels and drafts are AI/heuristic inferences - they are not eligibility determinations and never predict an award.</div>
+
+      {/* Sources + discover */}
+      <div className="rd-panel">
+        <div className="rd-panel-h"><Landmark size={15} /> Sources <em>official APIs first - no scraping behind logins, CAPTCHAs or rate limits</em></div>
+        <div className="rd-sources">
+          {sources.map((s) => (
+            <div key={s.id} className={`rd-source ${s.configured ? "ok" : "off"}`} data-testid={`source-${s.id}`}>
+              <div className="rd-source-top">{s.configured ? <CheckCircle2 size={13} /> : <KeyRound size={13} />} <b>{s.name}</b></div>
+              <small>{s.type} · {s.active_count} active</small>
+              {!s.configured && <small className="rd-needkey">needs {s.env} in backend/.env</small>}
+              {s.last_run && <small>{s.last_run.error ? `last: ${s.last_run.error.split(":")[0]}` : `last: HTTP ${s.last_run.http_status} · ${s.last_run.fetched} fetched · ${ago(s.last_run.retrieved_at)}`}</small>}
+            </div>
+          ))}
+        </div>
+        <div className="rd-row">
+          <input data-testid="radar-keyword" className="cw-input grow" value={keyword} onChange={(e) => setKeyword(e.target.value)} placeholder="Focus keyword for this run (optional - defaults to your first profile keyword)" />
+          <button data-testid="radar-discover" className="rd-btn primary" onClick={discover} disabled={discovering}>
+            {discovering ? <Loader2 className="spin" size={14} /> : <RefreshCw size={14} />} {discovering ? "Fetching sources..." : "Discover now"}
+          </button>
+          <button data-testid="radar-profile-toggle" className="rd-btn" onClick={() => setProfileOpen((o) => !o)}>
+            {profileOpen ? <ChevronUp size={14} /> : <ChevronDown size={14} />} Your profile {profile?.entity_type ? `· ${profile.entity_type}` : "· not set"}
+          </button>
+        </div>
+
+        <AnimatePresence>
+          {profileOpen && profile && (
+            <motion.div className="rd-profile" initial={{ opacity: 0, height: 0 }} animate={{ opacity: 1, height: "auto" }} exit={{ opacity: 0, height: 0 }} data-testid="radar-profile">
+              <div className="rd-grid3">
+                <label>Entity type<select data-testid="profile-entity" className="cw-input" value={pf("entity_type") || ""} onChange={(e) => setP("entity_type", e.target.value || null)}><option value="">Select...</option>{ENTITY.map((x) => <option key={x} value={x}>{x}</option>)}</select></label>
+                <label>Organization<input className="cw-input" value={pf("org_name") || ""} onChange={(e) => setP("org_name", e.target.value)} /></label>
+                <label>Service area<select className="cw-input" value={pf("service_area") || ""} onChange={(e) => setP("service_area", e.target.value || null)}><option value="">Select...</option>{["local", "state", "national", "international"].map((x) => <option key={x}>{x}</option>)}</select></label>
+                <label>State (2-letter)<input className="cw-input" value={pf("state") || ""} onChange={(e) => setP("state", e.target.value.toUpperCase())} maxLength={2} /></label>
+                <label>City<input className="cw-input" value={pf("city") || ""} onChange={(e) => setP("city", e.target.value)} /></label>
+                <label>Country<input className="cw-input" value={pf("country") || ""} onChange={(e) => setP("country", e.target.value)} /></label>
+                <label>Industries (comma)<input data-testid="profile-industries" className="cw-input" value={listToStr(profile.industries)} onChange={(e) => setP("industries", strToList(e.target.value))} /></label>
+                <label>Skills (comma)<input data-testid="profile-skills" className="cw-input" value={listToStr(profile.skills)} onChange={(e) => setP("skills", strToList(e.target.value))} /></label>
+                <label>Search keywords (comma)<input data-testid="profile-keywords" className="cw-input" value={listToStr(profile.keywords)} onChange={(e) => setP("keywords", strToList(e.target.value))} /></label>
+              </div>
+              <button className="rd-link" onClick={() => setMoreOpen((m) => !m)}>{moreOpen ? "Hide" : "More"} fields (NAICS, certifications, set-asides, budget, time, value range...)</button>
+              {moreOpen && (
+                <div className="rd-grid3">
+                  <label>NAICS / PSC codes (comma)<input className="cw-input" value={listToStr(profile.naics_codes)} onChange={(e) => setP("naics_codes", strToList(e.target.value))} /></label>
+                  <label>Years experience<input type="number" className="cw-input" value={pf("years_experience") ?? ""} onChange={(e) => setP("years_experience", e.target.value === "" ? null : Number(e.target.value))} /></label>
+                  <label>Team size<input type="number" className="cw-input" value={pf("team_size") ?? ""} onChange={(e) => setP("team_size", e.target.value === "" ? null : Number(e.target.value))} /></label>
+                  <label>Revenue range<input className="cw-input" value={pf("revenue_range") || ""} onChange={(e) => setP("revenue_range", e.target.value)} placeholder="e.g. <$100K" /></label>
+                  <label>Certifications (comma)<input className="cw-input" value={listToStr(profile.certifications)} onChange={(e) => setP("certifications", strToList(e.target.value))} /></label>
+                  <label>Budget available ($)<input type="number" className="cw-input" value={pf("budget") ?? ""} onChange={(e) => setP("budget", e.target.value === "" ? null : Number(e.target.value))} /></label>
+                  <label>Hours / week<input type="number" className="cw-input" value={pf("hours_per_week") ?? ""} onChange={(e) => setP("hours_per_week", e.target.value === "" ? null : Number(e.target.value))} /></label>
+                  <label>Min value ($)<input type="number" className="cw-input" value={pf("min_value") ?? ""} onChange={(e) => setP("min_value", e.target.value === "" ? null : Number(e.target.value))} /></label>
+                  <label>Max value ($)<input type="number" className="cw-input" value={pf("max_value") ?? ""} onChange={(e) => setP("max_value", e.target.value === "" ? null : Number(e.target.value))} /></label>
+                  <div className="rd-checks">
+                    <span>Set-aside certifications you hold:</span>
+                    {SET_ASIDES.map((s) => (
+                      <label key={s} className="rd-chk"><input type="checkbox" checked={(profile.set_asides || []).includes(s)} onChange={(e) => setP("set_asides", e.target.checked ? [...(profile.set_asides || []), s] : (profile.set_asides || []).filter((x) => x !== s))} /> {s}</label>
+                    ))}
+                  </div>
+                  <div className="rd-checks">
+                    <span>Preferred types:</span>
+                    {TYPES.map((s) => (
+                      <label key={s} className="rd-chk"><input type="checkbox" checked={(profile.preferred_types || []).includes(s)} onChange={(e) => setP("preferred_types", e.target.checked ? [...(profile.preferred_types || []), s] : (profile.preferred_types || []).filter((x) => x !== s))} /> {s}</label>
+                    ))}
+                  </div>
+                  <div className="rd-checks">
+                    <label className="rd-chk"><input type="checkbox" checked={!!profile.nonprofit_status} onChange={(e) => setP("nonprofit_status", e.target.checked)} /> Nonprofit status</label>
+                    <label className="rd-chk"><input type="checkbox" checked={!!profile.willing_travel} onChange={(e) => setP("willing_travel", e.target.checked)} /> Willing to travel</label>
+                    <label className="rd-chk"><input type="checkbox" checked={!!profile.willing_subcontract} onChange={(e) => setP("willing_subcontract", e.target.checked)} /> Willing to subcontract</label>
+                  </div>
+                  <label className="rd-span3">Capability statement (the ONLY facts drafts may claim about you)<textarea className="cw-textarea" rows={3} value={pf("bio") || ""} onChange={(e) => setP("bio", e.target.value)} /></label>
+                </div>
+              )}
+              <div className="rd-row"><button data-testid="profile-save" className="rd-btn primary" onClick={saveProfile}><CheckCircle2 size={14} /> Save profile</button><small className="rd-dim">No field is required. More detail = better fit and eligibility scoring.</small></div>
+            </motion.div>
+          )}
+        </AnimatePresence>
+      </div>
+
+      {/* Filters */}
+      <div className="rd-panel">
+        <div className="rd-views">
+          {VIEWS.map((v) => <button key={v.key} data-testid={`view-${v.key}`} className={view === v.key ? "rd-chip active" : "rd-chip"} onClick={() => setView(v.key)}>{v.label}</button>)}
+        </div>
+        <div className="rd-filters">
+          <select data-testid="filter-type" className="cw-input" value={filters.type} onChange={(e) => setFilters({ ...filters, type: e.target.value })}><option value="">Any type</option>{TYPES.map((t) => <option key={t} value={t}>{t}</option>)}</select>
+          <select data-testid="filter-source" className="cw-input" value={filters.source} onChange={(e) => setFilters({ ...filters, source: e.target.value })}><option value="">Any source</option>{sources.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}</select>
+          <input data-testid="filter-min-score" type="number" className="cw-input rd-narrow" placeholder="Min score" value={filters.min_score} onChange={(e) => setFilters({ ...filters, min_score: e.target.value })} />
+          <input type="number" className="cw-input rd-narrow" placeholder="Closing ≤ days" value={filters.closing_days} onChange={(e) => setFilters({ ...filters, closing_days: e.target.value })} />
+          <input type="number" className="cw-input rd-narrow" placeholder="Max value $" value={filters.max_value} onChange={(e) => setFilters({ ...filters, max_value: e.target.value })} />
+          <label className="rd-chk"><input type="checkbox" checked={filters.low_barrier} onChange={(e) => setFilters({ ...filters, low_barrier: e.target.checked })} /> lower barrier</label>
+          <label className="rd-chk"><input type="checkbox" checked={filters.remote} onChange={(e) => setFilters({ ...filters, remote: e.target.checked })} /> remote/national</label>
+          <div className="rd-search"><Search size={13} /><input data-testid="filter-q" value={filters.q} onChange={(e) => setFilters({ ...filters, q: e.target.value })} placeholder="keyword in title / issuer / eligibility" /></div>
+        </div>
+        <div className="rd-row rd-nl">
+          <Sparkles size={14} />
+          <input data-testid="nl-query" className="cw-input grow" value={nlq} onChange={(e) => setNlq(e.target.value)} placeholder='Natural-language search, e.g. "small technology grants under $250,000 closing in the next 60 days"' onKeyDown={(e) => e.key === "Enter" && runNl()} />
+          <button data-testid="nl-run" className="rd-btn" onClick={runNl} disabled={nlBusy}>{nlBusy ? <Loader2 className="spin" size={14} /> : <Search size={14} />} Propose filters</button>
+        </div>
+        {nlProposal && (
+          <div className="rd-proposal" data-testid="nl-proposal">
+            <Info size={13} /> <span>AI proposes these filters (not applied yet): <code>{JSON.stringify(nlProposal.proposed_filters)}</code></span>
+            <button className="rd-btn primary sm" data-testid="nl-apply" onClick={applyNl}>Apply</button>
+            <button className="rd-btn sm" onClick={() => setNlProposal(null)}>Discard</button>
+          </div>
+        )}
+      </div>
+
+      {/* Feed */}
+      {loading ? (
+        <div className="rd-empty" data-testid="radar-loading"><Loader2 className="spin" size={18} /> Loading opportunities...</div>
+      ) : items.length === 0 ? (
+        <div className="rd-empty" data-testid="radar-empty"><RadarIcon size={26} /><p>No opportunities match this view yet. Set your profile, then press <b>Discover now</b> to pull live records from the configured sources.</p></div>
+      ) : (
+        <div className="rd-feed" data-testid="radar-feed">
+          {items.map((o, i) => {
+            const val = o.funding_amount ?? o.estimated_value;
+            const saved = ["saved", "contacted", "submitted"].includes(o.user_status);
+            return (
+              <motion.article key={o.id} className={`rd-card ${o.status === "stale" ? "stale" : ""}`} initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: Math.min(i, 12) * 0.03 }} data-testid={`opp-${o.id}`}>
+                <div className="rd-card-top">
+                  <span className={`rd-type t-${o.opportunity_type}`}>{o.opportunity_type.replace("_", " ")}</span>
+                  <SourceBadge o={o} />
+                  {o.user_status !== "new" && <span className="rd-ustat">{o.user_status}</span>}
+                </div>
+                <h3 onClick={() => openDetail(o.id)} role="button" tabIndex={0} onKeyDown={(e) => e.key === "Enter" && openDetail(o.id)} data-testid="opp-title">{o.title}</h3>
+                <div className="rd-org"><Landmark size={12} /> {o.organization_name || NV}{o.issuing_department && o.source === "github_bounties" ? <span className="rd-dim"> · {o.issuing_department}</span> : null}</div>
+                <div className="rd-facts">
+                  <span><Coins size={12} /> {money(val) || NV}</span>
+                  <span><Clock size={12} /> {o.deadline ? <>{dateS(o.deadline)} · <b className={o.days_remaining !== null && o.days_remaining <= 14 ? "rd-urgent" : ""}>{o.days_remaining}d</b></> : NV}</span>
+                  <span><MapPin size={12} /> {o.remote_status || o.location || NV}</span>
+                </div>
+                <ScoreMeter score={o.score} />
+                <div className="rd-barrier" title={`low: ${(o.barrier?.low || []).join(", ") || "-"} | high: ${(o.barrier?.high || []).join(", ") || "-"}`}>
+                  <span className={`rd-bar-lbl ${o.barrier?.label?.startsWith("lower") ? "lo" : o.barrier?.label?.startsWith("higher") ? "hi" : ""}`}>{o.barrier?.label}</span>
+                  {(o.required_entity_types || []).slice(0, 2).map((t) => <span key={t} className="rd-req">{t}</span>)}
+                  {o.set_aside && <span className="rd-req">{o.set_aside}</span>}
+                </div>
+                <div className="rd-next">{o.ai?.fit?.recommended_next_action || (o.score?.label === "Poor fit" ? "Likely skip - open detail only if the source text reads differently to you." : "Open detail, run Fit + Skeptic analysis, then verify on the original source.")}</div>
+                <div className="rd-actions">
+                  <button className="rd-ic" data-testid="opp-save" title={saved ? "Unsave" : "Save"} onClick={() => patch(o.id, { user_status: saved ? "new" : "saved" })}>{saved ? <BookmarkCheck size={14} /> : <Bookmark size={14} />}</button>
+                  <button className="rd-ic" data-testid="opp-dismiss" title={o.user_status === "dismissed" ? "Restore" : "Dismiss"} onClick={() => patch(o.id, { user_status: o.user_status === "dismissed" ? "new" : "dismissed" })}><EyeOff size={14} /></button>
+                  <button className="rd-ic" data-testid="opp-pipeline" title={o.mission_id ? `On board: ${o.mission_title}` : "Add to pipeline (Sovereign Home mission)"} onClick={() => (o.mission_id ? (window.location.href = "/?tab=home") : toMission(o))}><Rocket size={14} /></button>
+                  <a className="rd-ic" data-testid="opp-source" href={o.source_url} target="_blank" rel="noreferrer" title="Open original source"><ExternalLink size={14} /></a>
+                  <button className="rd-btn sm" data-testid="opp-detail" onClick={() => openDetail(o.id)}><FileText size={13} /> Detail & drafts</button>
+                </div>
+              </motion.article>
+            );
+          })}
+        </div>
+      )}
+
+      <AnimatePresence>{detail && <Detail o={detail} onClose={() => setDetail(null)} patch={patch} toMission={toMission} setDetail={setDetail} />}</AnimatePresence>
+    </div>
+  );
+}
+
+function Detail({ o, onClose, patch, toMission, setDetail }) {
+  const [analyzing, setAnalyzing] = useState(false);
+  const [draftKind, setDraftKind] = useState("email");
+  const [formText, setFormText] = useState("");
+  const [extra, setExtra] = useState("");
+  const [drafting, setDrafting] = useState(false);
+  const [notes, setNotes] = useState(o.notes || "");
+  const val = o.funding_amount ?? o.estimated_value;
+  const ai = o.ai || {};
+  const draft = (o.drafts || {})[draftKind];
+
+  const analyze = async () => {
+    setAnalyzing(true);
+    try { const r = await axios.post(`${API}/radar/opportunities/${o.id}/analyze`, { include_checklist: true }, { timeout: 180000 }); setDetail({ ...o, ...r.data }); toast.success("Fit Analyst, Skeptic and Compliance Sentinel have reported"); }
+    catch (e) { toast.error(e?.response?.data?.detail || "Analysis failed"); }
+    finally { setAnalyzing(false); }
+  };
+  const makeDraft = async () => {
+    setDrafting(true);
+    try {
+      const r = await axios.post(`${API}/radar/opportunities/${o.id}/draft`, { kind: draftKind, form_text: draftKind === "form_answers" ? formText : null, extra_instructions: extra || null }, { timeout: 180000 });
+      setDetail({ ...o, drafts: { ...(o.drafts || {}), [draftKind]: r.data }, stage: ["Discovered", "Reviewed", "Qualified"].includes(o.stage) ? "Preparing" : o.stage });
+      toast.success(`Draft ready - ${r.data.placeholders} [FILL] placeholder(s) need your input`);
+    } catch (e) { toast.error(e?.response?.data?.detail || "Draft failed"); }
+    finally { setDrafting(false); }
+  };
+  const copy = async (t) => { try { await navigator.clipboard.writeText(t); toast.success("Copied"); } catch { toast.error("Copy failed"); } };
+  const list = (a) => (Array.isArray(a) && a.length ? <ul>{a.map((x, i) => <li key={i}>{typeof x === "string" ? x : `${x.item || JSON.stringify(x)}${x.why ? ` - ${x.why}` : ""}${x.stated_by_source === false ? " (inferred, not stated by source)" : ""}`}</li>)}</ul> : <span className="rd-dim">none listed</span>);
+  const stageIdx = STAGES.indexOf(o.stage || "Discovered");
+
+  return (
+    <motion.div className="rd-modal-bg" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} onClick={onClose} data-testid="opp-detail-modal">
+      <motion.div className="rd-modal" initial={{ y: 20 }} animate={{ y: 0 }} exit={{ y: 20 }} onClick={(e) => e.stopPropagation()}>
+        <div className="rd-modal-h">
+          <div>
+            <div className="rd-card-top"><span className={`rd-type t-${o.opportunity_type}`}>{o.opportunity_type.replace("_", " ")}</span><SourceBadge o={o} /><span className="rd-ustat">{o.user_status}</span></div>
+            <h2>{o.title}</h2>
+            <div className="rd-org"><Landmark size={12} /> {o.organization_name || NV} {o.issuing_department ? <span className="rd-dim">· {o.issuing_department}</span> : null}</div>
+          </div>
+          <div className="rd-modal-actions">
+            <a className="rd-btn" href={o.source_url} target="_blank" rel="noreferrer" data-testid="detail-source"><ExternalLink size={14} /> Original source</a>
+            <a className="rd-btn" href={`${API}/radar/opportunities/${o.id}/export`} target="_blank" rel="noreferrer" data-testid="detail-export"><Download size={14} /> Export .md</a>
+            <button className="rd-ic" onClick={onClose} data-testid="detail-close"><X size={16} /></button>
+          </div>
+        </div>
+
+        <div className="rd-warn"><AlertTriangle size={14} /> <b>Verify before acting.</b> Retrieved {dateS(o.retrieved_at)} ({ago(o.retrieved_at)}) · HTTP {o.http_status} · parser {o.parser_version} · status <b>{o.status}</b>. Confirm deadline, amount and eligibility on the original page; this app never submits anything for you.</div>
+
+        <div className="rd-stages" data-testid="detail-stages">
+          {STAGES.map((s, i) => <button key={s} className={`rd-stage ${i <= stageIdx ? "done" : ""} ${s === o.stage ? "cur" : ""}`} onClick={() => patch(o.id, { stage: s })} title="Set stage">{s}</button>)}
+        </div>
+
+        <div className="rd-detail-grid">
+          <section>
+            <h4>Facts from source</h4>
+            <dl className="rd-dl">
+              <dt>Amount</dt><dd>{money(val) || NV}{o.funding_floor ? <span className="rd-dim"> (floor {money(o.funding_floor)})</span> : null}</dd>
+              <dt>Deadline</dt><dd>{o.deadline ? `${dateS(o.deadline)} · ${o.days_remaining} days` : NV}</dd>
+              <dt>Posted</dt><dd>{dateS(o.posted_date) || NV}</dd>
+              <dt>Location</dt><dd>{o.location || NV} {o.remote_status ? `· ${o.remote_status}` : ""}</dd>
+              <dt>Applicant types</dt><dd>{listToStr(o.required_entity_types) || <span className="rd-dim">Not stated by source</span>}</dd>
+              <dt>Set-aside</dt><dd>{o.set_aside || <span className="rd-dim">none stated</span>}</dd>
+              <dt>Registrations</dt><dd>{listToStr(o.required_registrations) || <span className="rd-dim">Not stated</span>}</dd>
+              <dt>Cost sharing</dt><dd>{o.cost_sharing === true ? "Required" : o.cost_sharing === false ? "Not required" : NV}</dd>
+              <dt>Codes</dt><dd>{listToStr(o.industry_codes) || <span className="rd-dim">none</span>}</dd>
+              <dt>Contact</dt><dd>{o.contact_information ? (Array.isArray(o.contact_information) ? o.contact_information.map((c, i) => <div key={i}>{c.name} {c.email && <a href={`mailto:${c.email}`}>{c.email}</a>}</div>) : <>{o.contact_information.name} {o.contact_information.email && <a href={`mailto:${o.contact_information.email}`}>{o.contact_information.email}</a>}</>) : NV}</dd>
+            </dl>
+            <h4>Eligibility text (verbatim from source)</h4>
+            <p className="rd-quote">{o.eligibility_text || <span className="rd-dim">Not stated by source</span>}</p>
+            <h4>Description (from source)</h4>
+            <p className="rd-desc">{o.description || <span className="rd-dim">Not provided by source - open the original page</span>}</p>
+            {o.attachments?.length > 0 && <><h4>Original documents</h4><ul>{o.attachments.map((a) => <li key={a}><a href={a} target="_blank" rel="noreferrer">{a}</a></li>)}</ul></>}
+            <h4>Evidence excerpts</h4>
+            <ul className="rd-evidence" data-testid="detail-evidence">{(o.evidence || []).map((e, i) => <li key={i}><b>{e.field}</b> <q>{e.excerpt}</q> <code>{e.source_location}</code></li>)}</ul>
+          </section>
+
+          <section>
+            <h4>Inferred score <small>heuristic, transparent</small></h4>
+            <ScoreMeter score={o.score} size="lg" />
+            <div className="rd-breakdown" data-testid="detail-breakdown">
+              {Object.entries(o.score?.breakdown || {}).map(([k, b]) => (
+                <div key={k} className="rd-bd-row"><span>{k.replace(/_/g, " ")}</span><div className="rd-bd-bar"><span style={{ width: `${(b.points / b.weight) * 100}%` }} /></div><small>{b.points}/{b.weight}</small></div>
+              ))}
+            </div>
+            <ul className="rd-notes">{(o.score?.notes || []).map((n, i) => <li key={i}>{n}</li>)}</ul>
+            <div className="rd-lbl-note">"Appears to match stated requirements" ≠ "legally eligible" ≠ "likely to win". Strong fit requires the Skeptic to have run.</div>
+
+            <h4>Barrier signals <small>observed in source text</small></h4>
+            <div className="rd-sig"><b className="lo">Lower:</b> {(o.barrier?.low || []).join(", ") || "none observed"}</div>
+            <div className="rd-sig"><b className="hi">Higher:</b> {(o.barrier?.high || []).join(", ") || "none observed"}</div>
+
+            <h4>AI personas <small>on demand · inferred</small></h4>
+            <button className="rd-btn primary" onClick={analyze} disabled={analyzing} data-testid="detail-analyze">{analyzing ? <Loader2 className="spin" size={14} /> : <Sparkles size={14} />} {ai.fit ? "Re-run" : "Run"} Fit Analyst + Skeptic + Compliance Sentinel</button>
+            {ai.fit && (
+              <div className="rd-ai" data-testid="detail-fit">
+                <div className="rd-ai-h"><ShieldCheck size={13} /> Fit Analyst <small>{ai.fit.model_label}</small></div>
+                <p>{ai.fit.summary}</p>
+                <div className="rd-two"><div><b>Why it may fit</b>{list(ai.fit.why_it_may_fit)}</div><div><b>Why it may not</b>{list(ai.fit.why_it_may_not_fit)}</div></div>
+                <div><b>Matches stated requirements:</b> {String(ai.fit.appears_to_match_stated_requirements)} · <b>Effort:</b> {ai.fit.effort_estimate}</div>
+                <div><b>Missing information</b>{list(ai.fit.missing_information)}</div>
+                <div className="rd-next"><b>Next action:</b> {ai.fit.recommended_next_action}</div>
+              </div>
+            )}
+            {ai.skeptic && (
+              <div className={`rd-ai skeptic v-${ai.skeptic.verdict}`} data-testid="detail-skeptic">
+                <div className="rd-ai-h"><ShieldAlert size={13} /> Skeptic <small>{ai.skeptic.model_label}</small> <span className="rd-verdict">{ai.skeptic.verdict}</span></div>
+                <div><b>Concerns</b>{list(ai.skeptic.concerns)}</div>
+                <div><b>Missing requirements</b>{list(ai.skeptic.missing_requirements)}</div>
+                <div><b>Stale / suspicious</b>{list(ai.skeptic.stale_or_suspicious)}</div>
+                <div><b>Verify at source</b>{list(ai.skeptic.verify_at_source)}</div>
+              </div>
+            )}
+            {ai.checklist && (
+              <div className="rd-ai" data-testid="detail-checklist">
+                <div className="rd-ai-h"><ClipboardList size={13} /> Compliance Sentinel + Proposal Architect <small>{ai.checklist.model_label}</small></div>
+                <div><b>Preparation checklist</b>{list(ai.checklist.preparation_checklist)}</div>
+                <div><b>Questions for the contracting officer / funder</b>{list(ai.checklist.questions_for_contracting_officer_or_funder)}</div>
+                <div><b>Proposal outline</b>{list(ai.checklist.proposal_outline)}</div>
+              </div>
+            )}
+
+            <h4>Similar open opportunities</h4>
+            <ul className="rd-similar">{(o.similar || []).map((s) => <li key={s.id}>{s.title} <small>{s.organization_name} · {s.score?.total}</small></li>)}{!o.similar?.length && <li className="rd-dim">none</li>}</ul>
+          </section>
+        </div>
+
+        {/* Drafting desk */}
+        <div className="rd-desk" data-testid="drafting-desk">
+          <div className="rd-panel-h"><PenLine size={15} /> Drafting Desk <em>drafts use only your profile + the source text; unknowns become [FILL: ...] - you review and submit manually</em></div>
+          <div className="rd-views">
+            {DRAFTS.map((d) => { const I = d.icon; return <button key={d.key} data-testid={`draft-${d.key}`} className={draftKind === d.key ? "rd-chip active" : "rd-chip"} onClick={() => setDraftKind(d.key)}><I size={13} /> {d.label}{(o.drafts || {})[d.key] ? " ✓" : ""}</button>; })}
+          </div>
+          {draftKind === "form_answers" && <textarea data-testid="draft-form-text" className="cw-textarea" rows={5} value={formText} onChange={(e) => setFormText(e.target.value)} placeholder="Paste the application or form questions here, one per line..." />}
+          <div className="rd-row">
+            <input className="cw-input grow" value={extra} onChange={(e) => setExtra(e.target.value)} placeholder="Optional instructions (tone, emphasis, length)..." />
+            <button className="rd-btn primary" data-testid="draft-generate" onClick={makeDraft} disabled={drafting || (draftKind === "form_answers" && !formText.trim())}>{drafting ? <Loader2 className="spin" size={14} /> : <Sparkles size={14} />} {draft ? "Regenerate" : "Generate"} {DRAFTS.find((d) => d.key === draftKind)?.label}</button>
+          </div>
+          {draft && (
+            <div className="rd-draft" data-testid="draft-output">
+              <div className="rd-draft-h"><span>{draft.model_label} · {ago(draft.generated_at)} · <b className={draft.placeholders ? "rd-urgent" : ""}>{draft.placeholders} [FILL] placeholder(s)</b></span><button className="rd-btn sm" onClick={() => copy(draft.content)}><Copy size={13} /> Copy</button></div>
+              <Markdown text={draft.content} />
+            </div>
+          )}
+        </div>
+
+        <div className="rd-notes-box">
+          <h4>Your notes</h4>
+          <textarea data-testid="detail-notes" className="cw-textarea" rows={3} value={notes} onChange={(e) => setNotes(e.target.value)} placeholder="Calls made, documents gathered, questions asked..." />
+          <div className="rd-row">
+            <button className="rd-btn" data-testid="notes-save" onClick={() => patch(o.id, { notes })}><CheckCircle2 size={14} /> Save notes</button>
+            <button className="rd-btn" data-testid="mark-contacted" onClick={() => patch(o.id, { user_status: "contacted" })}>Mark contacted</button>
+            <button className="rd-btn" data-testid="mark-submitted" onClick={() => patch(o.id, { user_status: "submitted" })}>Mark submitted (by you)</button>
+            <button className="rd-btn primary" data-testid="detail-pipeline" onClick={() => (o.mission_id ? (window.location.href = "/?tab=home") : toMission(o))}><Rocket size={14} /> {o.mission_id ? `On board: ${o.mission_title}` : "Add to pipeline"}</button>
+          </div>
+        </div>
+      </motion.div>
+    </motion.div>
+  );
+}
+
+```
+
+
+### `backend/radar.py`
+```python
+"""
+ACASO Opportunity Radar - real public-opportunity discovery with strict data integrity.
+
+Rules enforced here:
+  * AI never invents an opportunity, amount, deadline, agency or eligibility rule. Adapters only
+    normalize what a source returned; every record carries source_url, retrieved_at, http_status,
+    parser_version and evidence excerpts with a source_location for each important field.
+  * Unknown fields stay None and are rendered "Not verified" by the UI.
+  * Scores and classifications are explicitly labelled as inferred, with a full breakdown.
+  * "Strong fit" requires the Skeptic persona to have run and not blocked.
+  * Drafts (emails, grant narratives, packets, form answers) use only the owner's profile and the
+    opportunity's source text; anything unknown becomes a [FILL: ...] placeholder. No auto-submission.
+"""
+import asyncio
+import hashlib
+import json
+import logging
+import os
+import re
+import uuid
+from datetime import datetime, timezone, timedelta
+from typing import List, Optional, Callable, Awaitable
+
+import httpx
+from fastapi import APIRouter, HTTPException, Query
+from pydantic import BaseModel, Field
+
+logger = logging.getLogger("radar")
+router = APIRouter(prefix="/radar")
+
+PARSER_VERSION = "radar-1.0"
+UA = "ACASO-Opportunity-Radar/1.0 (+public data client; contact owner)"
+
+# injected by server.py
+db = None
+llm_call_failover: Optional[Callable[..., Awaitable]] = None
+compile_mission_from_text: Optional[Callable[..., Awaitable]] = None
+extract_json: Optional[Callable] = None
+
+
+def init(_db, _llm_failover, _compile_mission, _extract_json):
+    global db, llm_call_failover, compile_mission_from_text, extract_json
+    db, llm_call_failover, compile_mission_from_text, extract_json = _db, _llm_failover, _compile_mission, _extract_json
+
+
+def now_iso():
+    return datetime.now(timezone.utc).isoformat()
+
+
+# ----------------------------------------------------------------------------------------------
+# Profile
+# ----------------------------------------------------------------------------------------------
+ENTITY_TYPES = ["individual", "sole_proprietor", "llc", "corporation", "nonprofit", "startup", "creator",
+                "contractor", "community_org", "government", "university"]
+OPP_TYPES = ["grant", "contract", "subcontract", "procurement", "sponsorship", "rfp", "funding", "technical_bounty"]
+
+
+class RadarProfile(BaseModel):
+    id: str = "owner"
+    entity_type: Optional[str] = None
+    org_name: Optional[str] = None
+    country: Optional[str] = "US"
+    state: Optional[str] = None
+    city: Optional[str] = None
+    service_area: Optional[str] = None  # local | state | national | international
+    industries: List[str] = []
+    naics_codes: List[str] = []
+    skills: List[str] = []
+    keywords: List[str] = []
+    years_experience: Optional[int] = None
+    revenue_range: Optional[str] = None
+    team_size: Optional[int] = None
+    certifications: List[str] = []
+    set_asides: List[str] = []  # minority, veteran, woman, disability, hubzone, 8a, sdvosb, disadvantaged
+    nonprofit_status: Optional[bool] = None
+    budget: Optional[float] = None
+    hours_per_week: Optional[int] = None
+    min_value: Optional[float] = None
+    max_value: Optional[float] = None
+    willing_travel: Optional[bool] = None
+    willing_subcontract: Optional[bool] = None
+    preferred_types: List[str] = []
+    bio: Optional[str] = None  # owner-written capability statement; used verbatim as the only "claims" source
+    updated_at: str = Field(default_factory=now_iso)
+
+
+async def get_profile() -> dict:
+    doc = await db.radar_profile.find_one({"id": "owner"}, {"_id": 0})
+    return doc or RadarProfile().model_dump()
+
+
+@router.get("/profile")
+async def read_profile():
+    return await get_profile()
+
+
+@router.put("/profile")
+async def write_profile(p: RadarProfile):
+    p.id = "owner"
+    p.updated_at = now_iso()
+    await db.radar_profile.update_one({"id": "owner"}, {"$set": p.model_dump()}, upsert=True)
+    return p
+
+
+# ----------------------------------------------------------------------------------------------
+# Helpers: text, money, dates, evidence
+# ----------------------------------------------------------------------------------------------
+MONEY_RE = re.compile(r"\$\s?(\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?\s*(k|m|million|thousand)?", re.I)
+
+
+def parse_money(text: str):
+    if not text:
+        return None, None
+    m = MONEY_RE.search(text)
+    if not m:
+        return None, None
+    n = float(m.group(1).replace(",", ""))
+    suf = (m.group(2) or "").lower()
+    if suf in ("k", "thousand"):
+        n *= 1_000
+    elif suf in ("m", "million"):
+        n *= 1_000_000
+    start = max(0, m.start() - 60)
+    return n, text[start:m.end() + 60].strip()
+
+
+def parse_date(s):
+    if not s:
+        return None
+    s = str(s).strip()
+    fmts = ["%m/%d/%Y", "%b %d, %Y %I:%M:%S %p", "%b %d, %Y", "%Y-%m-%dT%H:%M:%S%z",
+            "%Y-%m-%dT%H:%M:%S.%f%z", "%Y-%m-%d", "%Y-%m-%dT%H:%M:%SZ", "%Y-%m-%dT%H:%M:%S"]
+    s2 = re.sub(r"\s(EDT|EST|CDT|CST|MDT|MST|PDT|PST)$", "", s)
+    for f in fmts:
+        for cand in (s, s2):
+            try:
+                d = datetime.strptime(cand, f)
+                if d.tzinfo is None:
+                    d = d.replace(tzinfo=timezone.utc)
+                return d.isoformat()
+            except Exception:
+                continue
+    try:
+        return datetime.fromisoformat(s.replace("Z", "+00:00")).isoformat()
+    except Exception:
+        return None
+
+
+def days_until(iso):
+    if not iso:
+        return None
+    try:
+        d = datetime.fromisoformat(iso)
+        return (d - datetime.now(timezone.utc)).days
+    except Exception:
+        return None
+
+
+def ev(field, excerpt, location):
+    if excerpt is None or excerpt == "":
+        return None
+    return {"field": field, "excerpt": str(excerpt)[:400], "source_location": location}
+
+
+def strip_html(t):
+    if not t:
+        return ""
+    t = re.sub(r"<[^>]+>", " ", str(t))
+    return re.sub(r"\s+", " ", t).strip()
+
+
+def dedupe_key(source, source_id, title, org, deadline):
+    if source_id:
+        return f"{source}:{source_id}"
+    base = f"{re.sub(r'[^a-z0-9]', '', (title or '').lower())[:80]}|{(org or '').lower()[:40]}|{deadline or ''}"
+    return "h:" + hashlib.sha1(base.encode()).hexdigest()[:16]
+
+
+# ----------------------------------------------------------------------------------------------
+# Barrier signals (observable text only)
+# ----------------------------------------------------------------------------------------------
+LOW_SIGNALS = [
+    ("micro-purchase", r"micro[- ]?purchase"),
+    ("simplified acquisition", r"simplified acquisition"),
+    ("request for quote", r"\brfq\b|request for quot"),
+    ("small business set-aside", r"small business set[- ]aside|total small business"),
+    ("no cost sharing", r"cost sharing[^.]{0,20}(no|not required)"),
+    ("beginner-friendly label", r"good first issue|beginner|starter|easy"),
+    ("subcontracting opportunity", r"subcontract"),
+    ("remote/virtual delivery", r"\bremote\b|virtual"),
+    ("open registration", r"open (vendor )?registration|register (as|to become) a vendor"),
+]
+HIGH_SIGNALS = [
+    ("past performance required", r"past performance"),
+    ("bonding requirement", r"\bbond(ing)?\b"),
+    ("security clearance", r"security clearance|top secret|\bsecret\b clearance"),
+    ("insurance requirement", r"insurance"),
+    ("cost sharing / matching funds", r"cost[- ]sharing (is )?required|matching (funds|requirement)|\bmatch\b required"),
+    ("restricted to governments/institutions", r"only (state|local|tribal) governments|institutions of higher education only|eligible applicants are (state|county|city)"),
+    ("large staffing", r"minimum of \d{2,} (staff|employees|personnel)"),
+    ("clinical trial", r"clinical trial"),
+    ("in-person delivery", r"on[- ]site|in[- ]person"),
+]
+
+
+def barrier_signals(text: str, value, cost_sharing):
+    t = (text or "").lower()
+    low, high = [], []
+    for name, rx in LOW_SIGNALS:
+        if re.search(rx, t):
+            low.append(name)
+    for name, rx in HIGH_SIGNALS:
+        if re.search(rx, t):
+            high.append(name)
+    if cost_sharing is True and "cost sharing / matching funds" not in high:
+        high.append("cost sharing / matching funds")
+    if cost_sharing is False and "no cost sharing" not in low:
+        low.append("no cost sharing")
+    if value is not None:
+        if value <= 25_000:
+            low.append("small dollar value")
+        elif value >= 1_000_000:
+            high.append("large dollar value")
+    score = 0.5 + 0.12 * len(low) - 0.15 * len(high)
+    score = max(0.0, min(1.0, score))
+    label = "lower observed barrier" if score >= 0.6 else ("higher observed barrier" if score <= 0.35 else "mixed barrier signals")
+    return {"low": low, "high": high, "score": round(score, 2), "label": label}
+
+
+# ----------------------------------------------------------------------------------------------
+# Scoring (transparent, 0-100, labelled inferred)
+# ----------------------------------------------------------------------------------------------
+WEIGHTS = {"profile_fit": 30, "eligibility_confidence": 20, "barrier": 15, "deadline_feasibility": 10,
+           "effort_to_value": 10, "geographic_fit": 5, "competition": 5, "source_freshness": 5}
+
+ENTITY_MAP = {  # profile entity -> words that indicate match in required entity types text
+    "nonprofit": ["nonprofit", "non-profit", "501"],
+    "llc": ["small business", "for-profit", "for profit", "business"],
+    "corporation": ["small business", "for-profit", "for profit", "business"],
+    "sole_proprietor": ["small business", "individual", "for-profit", "business"],
+    "individual": ["individual", "unrestricted", "others"],
+    "startup": ["small business", "for-profit", "business"],
+    "creator": ["individual", "small business"],
+    "contractor": ["small business", "for-profit", "business"],
+    "community_org": ["nonprofit", "community", "others"],
+    "university": ["institutions of higher education", "university"],
+    "government": ["state governments", "county governments", "city or township", "government"],
+}
+
+
+def tokens(s):
+    return {w for w in re.findall(r"[a-z0-9]{3,}", (s or "").lower())}
+
+
+def score_opportunity(o: dict, profile: dict) -> dict:
+    notes = []
+    text = " ".join(filter(None, [o.get("title"), o.get("description"), o.get("eligibility_text"),
+                                  " ".join(o.get("keywords") or []), " ".join(o.get("industry_codes") or [])]))
+    tt = tokens(text)
+
+    # profile fit
+    prof_terms = set()
+    for k in ("skills", "industries", "keywords", "naics_codes"):
+        for v in profile.get(k) or []:
+            prof_terms |= tokens(v)
+    if not prof_terms:
+        fit = 0.4
+        notes.append("Profile has no skills/industries/keywords yet - fit defaulted to 0.4")
+    else:
+        hits = len(prof_terms & tt)
+        fit = min(1.0, hits / 4.0)
+        if hits:
+            notes.append(f"{hits} profile term(s) appear in the source text")
+    pref = profile.get("preferred_types") or []
+    if pref and o.get("opportunity_type") in pref:
+        fit = min(1.0, fit + 0.15)
+
+    # eligibility confidence
+    req = " ".join(o.get("required_entity_types") or []).lower()
+    et = profile.get("entity_type")
+    if not req:
+        elig = 0.5
+        notes.append("Eligibility not stated by source - Not verified")
+    elif not et:
+        elig = 0.5
+        notes.append("Set your entity type to evaluate eligibility")
+    else:
+        words = ENTITY_MAP.get(et, [])
+        if any(w in req for w in words) or "unrestricted" in req:
+            elig = 0.9
+            notes.append("Your entity type appears in the stated applicant types")
+        else:
+            elig = 0.2
+            notes.append("Stated applicant types do not appear to include your entity type")
+    sa = (o.get("set_aside") or "").lower()
+    if sa and sa not in ("none", "n/a"):
+        mine = [s.lower() for s in profile.get("set_asides") or []]
+        if any(k in sa for k in ("women", "woman")) and "woman" not in mine:
+            elig = min(elig, 0.25); notes.append("Set-aside requires woman-owned status not in your profile")
+        if "veteran" in sa and not any("veteran" in m or "sdvosb" in m for m in mine):
+            elig = min(elig, 0.25); notes.append("Set-aside requires veteran-owned status not in your profile")
+        if "8(a)" in sa and "8a" not in mine:
+            elig = min(elig, 0.25); notes.append("Set-aside requires 8(a) certification not in your profile")
+        if "hubzone" in sa and "hubzone" not in mine:
+            elig = min(elig, 0.25); notes.append("Set-aside requires HUBZone certification not in your profile")
+
+    barrier = (o.get("barrier") or {}).get("score", 0.5)
+
+    d = days_until(o.get("deadline"))
+    if d is None:
+        dl = 0.5; notes.append("No deadline stated - Not verified")
+    elif d < 0:
+        dl = 0.0; notes.append("Deadline has passed")
+    elif d < 3:
+        dl = 0.1
+    elif d < 14:
+        dl = 0.5
+    elif d < 45:
+        dl = 0.8
+    else:
+        dl = 1.0
+
+    val = o.get("estimated_value") if o.get("estimated_value") is not None else o.get("funding_amount")
+    mn, mx = profile.get("min_value"), profile.get("max_value")
+    if val is None:
+        e2v = 0.5; notes.append("Value/amount not stated - Not verified")
+    elif mn is not None and val < mn:
+        e2v = 0.3
+    elif mx is not None and val > mx:
+        e2v = 0.6
+    else:
+        e2v = 1.0
+
+    rs = (o.get("remote_status") or "").lower()
+    loc = (o.get("location") or "").lower()
+    st = (profile.get("state") or "").lower()
+    if rs in ("remote", "national", "international"):
+        geo = 1.0
+    elif st and st in loc:
+        geo = 1.0
+    elif not loc:
+        geo = 0.5
+    else:
+        geo = 0.2 if not profile.get("willing_travel") else 0.6
+
+    if sa and sa not in ("none", "n/a"):
+        comp = 0.8
+    elif o.get("opportunity_type") == "technical_bounty":
+        comp = 0.5
+    elif o.get("opportunity_type") == "grant":
+        comp = 0.4
+    else:
+        comp = 0.5
+
+    try:
+        age_h = (datetime.now(timezone.utc) - datetime.fromisoformat(o["retrieved_at"])).total_seconds() / 3600
+    except Exception:
+        age_h = 999
+    fresh = 1.0 if (age_h < 24 and o.get("http_status") == 200) else (0.6 if age_h < 24 * 7 else 0.3)
+
+    comps = {"profile_fit": fit, "eligibility_confidence": elig, "barrier": barrier, "deadline_feasibility": dl,
+             "effort_to_value": e2v, "geographic_fit": geo, "competition": comp, "source_freshness": fresh}
+    breakdown = {k: {"weight": WEIGHTS[k], "value": round(v, 2), "points": round(WEIGHTS[k] * v, 1)} for k, v in comps.items()}
+    total = round(sum(b["points"] for b in breakdown.values()))
+
+    skeptic = ((o.get("ai") or {}).get("skeptic") or {})
+    if total >= 75:
+        if skeptic.get("verdict") in ("clear", "caution"):
+            label = "Strong fit"
+        elif skeptic.get("verdict") == "block":
+            label = "Needs verification"
+        else:
+            label = "Possible fit (Skeptic pending)"
+    elif total >= 50:
+        label = "Needs verification" if elig == 0.5 else "Possible fit"
+    else:
+        label = "Poor fit"
+    return {"total": total, "label": label, "breakdown": breakdown, "notes": notes, "inferred": True,
+            "eligibility_confidence": round(elig, 2), "scored_at": now_iso()}
+
+
+# ----------------------------------------------------------------------------------------------
+# Source adapters
+# ----------------------------------------------------------------------------------------------
+class SourceResult:
+    def __init__(self, source, url, access_method):
+        self.source, self.url, self.access_method = source, url, access_method
+        self.http_status = None
+        self.error = None
+        self.records: List[dict] = []
+        self.started = now_iso()
+        self.usage_notes = ""
+
+
+def profile_keywords(profile: dict, fallback: str) -> str:
+    """One focused phrase per run: first keyword, else first skill, else first industry (broad ORs return noise)."""
+    for k in ("keywords", "skills", "industries"):
+        vals = profile.get(k) or []
+        if vals:
+            return str(vals[0])
+    return fallback
+
+
+async def adapter_grants_gov(profile: dict, keyword: Optional[str], limit: int) -> SourceResult:
+    res = SourceResult("grants_gov", "https://api.grants.gov/v1/api/search2", "official public REST API (no key)")
+    res.usage_notes = "Grants.gov public search API; detail via fetchOpportunity. Verify on grants.gov before applying."
+    kw = keyword or profile_keywords(profile, "small business technology")
+    payload = {"keyword": kw, "oppStatuses": "posted", "rows": min(limit, 50), "sortBy": "openDate|desc"}
+    try:
+        async with httpx.AsyncClient(timeout=25, headers={"User-Agent": UA}) as cx:
+            r = await cx.post(res.url, json=payload)
+            res.http_status = r.status_code
+            r.raise_for_status()
+            hits = (r.json().get("data") or {}).get("oppHits") or []
+            sem = asyncio.Semaphore(4)
+
+            async def detail(h):
+                async with sem:
+                    try:
+                        d = await cx.post("https://api.grants.gov/v1/api/fetchOpportunity", json={"opportunityId": int(h["id"])})
+                        return h, (d.json().get("data") or {}) if d.status_code == 200 else {}
+                    except Exception as e:
+                        logger.warning(f"grants detail {h.get('id')} failed: {e}")
+                        return h, {}
+
+            pairs = await asyncio.gather(*[detail(h) for h in hits[:limit]])
+        retrieved = now_iso()
+        for h, d in pairs:
+            syn = d.get("synopsis") or {}
+            oid = str(h.get("id"))
+            src_url = f"https://www.grants.gov/search-results-detail/{oid}"
+            desc = strip_html(syn.get("synopsisDesc"))
+            elig_text = strip_html(syn.get("applicantEligibilityDesc"))
+            app_types = [a.get("description") for a in (syn.get("applicantTypes") or []) if a.get("description")]
+            ceiling = syn.get("awardCeiling")
+            floor = syn.get("awardFloor")
+            amt = None
+            if ceiling not in (None, "", "none"):
+                try:
+                    amt = float(str(ceiling).replace(",", "").replace("$", ""))
+                except Exception:
+                    amt = None
+            deadline = parse_date(syn.get("responseDate") or h.get("closeDate"))
+            evidence = [x for x in [
+                ev("title", h.get("title"), "search2.oppHits[].title"),
+                ev("organization_name", h.get("agency"), "search2.oppHits[].agency"),
+                ev("deadline", syn.get("responseDate") or h.get("closeDate"), "synopsis.responseDate | oppHits[].closeDate"),
+                ev("funding_amount", f"awardCeiling={ceiling} awardFloor={floor}" if (ceiling or floor) else None, "synopsis.awardCeiling/awardFloor"),
+                ev("required_entity_types", "; ".join(app_types) if app_types else None, "synopsis.applicantTypes[].description"),
+                ev("eligibility_text", elig_text[:400] if elig_text else None, "synopsis.applicantEligibilityDesc"),
+                ev("description", desc[:400] if desc else None, "synopsis.synopsisDesc"),
+                ev("cost_sharing", syn.get("costSharing"), "synopsis.costSharing"),
+            ] if x]
+            contact = {k: v for k, v in {"name": syn.get("agencyContactName"), "email": syn.get("agencyContactEmail"),
+                                        "phone": syn.get("agencyContactPhone")}.items() if v}
+            res.records.append({
+                "source": "grants_gov", "source_id": oid, "source_url": src_url, "submission_url": src_url,
+                "title": h.get("title"), "description": desc or None, "opportunity_type": "grant",
+                "organization_name": h.get("agency") or syn.get("agencyName"), "organization_type": "federal agency",
+                "issuing_department": h.get("agencyCode"), "location": "United States", "remote_status": "national",
+                "estimated_value": None, "funding_amount": amt, "funding_floor": floor if floor not in ("", "none") else None,
+                "currency": "USD", "posted_date": parse_date(h.get("openDate") or syn.get("postingDate")), "deadline": deadline,
+                "eligibility_text": elig_text or None, "required_entity_types": app_types, "required_certifications": [],
+                "required_registrations": ["SAM.gov UEI registration (standard for federal grants - verify)", "Grants.gov applicant account (verify)"],
+                "required_experience": None, "industry_codes": h.get("cfdaList") or [],
+                "keywords": [c.get("description") for c in (syn.get("fundingActivityCategories") or []) if c.get("description")],
+                "set_aside": None, "cost_sharing": syn.get("costSharing"), "contact_information": contact or None,
+                "attachments": [u for u in (d.get("synopsisDocumentURLs") or []) if isinstance(u, str)][:5],
+                "evidence": evidence, "source_reliability": "official government API", "http_status": res.http_status,
+                "retrieved_at": retrieved, "raw_status": h.get("oppStatus"),
+            })
+    except Exception as e:
+        res.error = str(e)[:400]
+        logger.error(f"grants_gov adapter failed: {e}")
+    return res
+
+
+async def adapter_sam_gov(profile: dict, keyword: Optional[str], limit: int) -> SourceResult:
+    res = SourceResult("sam_gov", "https://api.sam.gov/opportunities/v2/search", "official REST API (api.data.gov key)")
+    res.usage_notes = "Requires SAM_GOV_API_KEY (free at api.data.gov / sam.gov account). Rate-limited by SAM.gov."
+    key = os.environ.get("SAM_GOV_API_KEY")
+    if not key:
+        res.error = "not_configured: set SAM_GOV_API_KEY in backend/.env (free key from your SAM.gov account -> Account Details -> API key)"
+        return res
+    today = datetime.now(timezone.utc)
+    params = {"api_key": key, "limit": min(limit, 50), "postedFrom": (today - timedelta(days=30)).strftime("%m/%d/%Y"),
+              "postedTo": today.strftime("%m/%d/%Y"), "ptype": "o,k,p", "active": "true"}
+    kw = keyword or profile_keywords(profile, "")
+    if kw:
+        params["title"] = kw
+    if profile.get("naics_codes"):
+        params["ncode"] = profile["naics_codes"][0]
+    if profile.get("state") and (profile.get("service_area") in ("local", "state")):
+        params["state"] = profile["state"]
+    try:
+        async with httpx.AsyncClient(timeout=30, headers={"User-Agent": UA}) as cx:
+            r = await cx.get(res.url, params=params)
+            res.http_status = r.status_code
+            r.raise_for_status()
+            data = r.json().get("opportunitiesData") or []
+            retrieved = now_iso()
+            for o in data[:limit]:
+                nid = o.get("noticeId")
+                ui = o.get("uiLink") or f"https://sam.gov/opp/{nid}/view"
+                pop = o.get("placeOfPerformance") or {}
+                loc = ", ".join(filter(None, [(pop.get("city") or {}).get("name"), (pop.get("state") or {}).get("code")])) or None
+                contacts = [{"name": c.get("fullName"), "email": c.get("email"), "phone": c.get("phone"), "type": c.get("type")}
+                            for c in (o.get("pointOfContact") or []) if c.get("email") or c.get("fullName")]
+                sa = o.get("typeOfSetAsideDescription")
+                evidence = [x for x in [
+                    ev("title", o.get("title"), "opportunitiesData[].title"),
+                    ev("organization_name", o.get("fullParentPathName"), "opportunitiesData[].fullParentPathName"),
+                    ev("deadline", o.get("responseDeadLine"), "opportunitiesData[].responseDeadLine"),
+                    ev("set_aside", sa, "opportunitiesData[].typeOfSetAsideDescription"),
+                    ev("industry_codes", o.get("naicsCode"), "opportunitiesData[].naicsCode"),
+                    ev("notice_type", o.get("type"), "opportunitiesData[].type"),
+                    ev("location", loc, "opportunitiesData[].placeOfPerformance"),
+                ] if x]
+                res.records.append({
+                    "source": "sam_gov", "source_id": nid, "source_url": ui, "submission_url": ui,
+                    "title": o.get("title"), "description": None, "opportunity_type": "contract",
+                    "organization_name": o.get("fullParentPathName"), "organization_type": "federal agency",
+                    "issuing_department": (o.get("fullParentPathName") or "").split(".")[-1] or None,
+                    "location": loc, "remote_status": None, "estimated_value": None, "funding_amount": None, "currency": "USD",
+                    "posted_date": parse_date(o.get("postedDate")), "deadline": parse_date(o.get("responseDeadLine")),
+                    "eligibility_text": (f"Set-aside: {sa}" if sa else None), "required_entity_types": (["small business"] if sa and "small business" in sa.lower() else []),
+                    "required_certifications": [], "required_registrations": ["Active SAM.gov entity registration (UEI) - verify"],
+                    "required_experience": None, "industry_codes": [c for c in [o.get("naicsCode"), o.get("classificationCode")] if c],
+                    "keywords": [o.get("type")] if o.get("type") else [], "set_aside": sa, "cost_sharing": None,
+                    "contact_information": contacts or None, "attachments": [], "notice_type": o.get("type"),
+                    "solicitation_number": o.get("solicitationNumber"),
+                    "evidence": evidence, "source_reliability": "official government API", "http_status": res.http_status,
+                    "retrieved_at": retrieved, "raw_status": "active" if str(o.get("active")).lower() == "yes" else o.get("active"),
+                })
+    except Exception as e:
+        res.error = str(e)[:400]
+        logger.error(f"sam_gov adapter failed: {e}")
+    return res
+
+
+async def adapter_github_bounties(profile: dict, keyword: Optional[str], limit: int) -> SourceResult:
+    res = SourceResult("github_bounties", "https://api.github.com/search/issues", "official public REST API (optional GITHUB_TOKEN)")
+    res.usage_notes = "GitHub issue search for open issues labelled bounty. 10 req/min unauthenticated. Amounts are extracted from issue text and marked as such."
+    q = "label:bounty state:open is:issue"
+    kw = keyword or " ".join((profile.get("skills") or [])[:2])
+    if kw:
+        q += f" {kw}"
+    headers = {"Accept": "application/vnd.github+json", "User-Agent": UA}
+    tok = os.environ.get("GITHUB_TOKEN")
+    if tok:
+        headers["Authorization"] = f"Bearer {tok}"
+    try:
+        async with httpx.AsyncClient(timeout=25, headers=headers) as cx:
+            r = await cx.get(res.url, params={"q": q, "sort": "created", "order": "desc", "per_page": min(limit, 30)})
+            res.http_status = r.status_code
+            r.raise_for_status()
+            items = r.json().get("items") or []
+        retrieved = now_iso()
+        for it in items[:limit]:
+            body = (it.get("body") or "")[:3000]
+            amt, amt_ev = parse_money(it.get("title") or "")
+            if amt is None:
+                amt, amt_ev = parse_money(body)
+            repo = (it.get("repository_url") or "").replace("https://api.github.com/repos/", "")
+            labels = [l.get("name") for l in (it.get("labels") or []) if l.get("name")]
+            evidence = [x for x in [
+                ev("title", it.get("title"), "issue.title"),
+                ev("estimated_value", amt_ev, "issue.title/body (regex-extracted $ amount)"),
+                ev("labels", ", ".join(labels), "issue.labels[].name"),
+                ev("description", strip_html(body)[:400], "issue.body"),
+            ] if x]
+            res.records.append({
+                "source": "github_bounties", "source_id": str(it.get("id")), "source_url": it.get("html_url"), "submission_url": it.get("html_url"),
+                "title": it.get("title"), "description": strip_html(body)[:2000] or None, "opportunity_type": "technical_bounty",
+                "organization_name": repo.split("/")[0] if repo else None, "organization_type": "open-source project",
+                "issuing_department": repo or None, "location": None, "remote_status": "remote",
+                "estimated_value": amt, "funding_amount": None, "currency": "USD" if amt else None,
+                "posted_date": parse_date(it.get("created_at")), "deadline": None, "eligibility_text": None,
+                "required_entity_types": ["individual", "unrestricted"], "required_certifications": [], "required_registrations": ["GitHub account"],
+                "required_experience": None, "industry_codes": [], "keywords": labels, "set_aside": None, "cost_sharing": None,
+                "contact_information": None, "attachments": [], "evidence": evidence,
+                "source_reliability": "official platform API (community-posted bounty; payout terms unverified)",
+                "http_status": res.http_status, "retrieved_at": retrieved, "raw_status": it.get("state"),
+            })
+    except Exception as e:
+        res.error = str(e)[:400]
+        logger.error(f"github adapter failed: {e}")
+    return res
+
+
+ADAPTERS = {"grants_gov": adapter_grants_gov, "sam_gov": adapter_sam_gov, "github_bounties": adapter_github_bounties}
+SOURCE_META = {
+    "grants_gov": {"name": "Grants.gov", "type": "federal grants", "needs_key": False},
+    "sam_gov": {"name": "SAM.gov Contract Opportunities", "type": "federal contracts", "needs_key": True, "env": "SAM_GOV_API_KEY"},
+    "github_bounties": {"name": "GitHub bounty issues", "type": "technical bounties", "needs_key": False, "env": "GITHUB_TOKEN (optional)"},
+}
+
+
+@router.get("/sources")
+async def list_sources():
+    out = []
+    for k, meta in SOURCE_META.items():
+        last = await db.radar_source_runs.find_one({"source": k}, {"_id": 0}, sort=[("retrieved_at", -1)])
+        configured = True
+        if meta.get("needs_key"):
+            configured = bool(os.environ.get(meta["env"]))
+        count = await db.radar_opportunities.count_documents({"source": k, "status": {"$ne": "closed"}})
+        out.append({"id": k, **meta, "configured": configured, "last_run": last, "active_count": count})
+    return out
+
+
+# ----------------------------------------------------------------------------------------------
+# Pipeline: validate -> dedupe -> barrier -> score -> persist -> stale marking
+# ----------------------------------------------------------------------------------------------
+def validate(rec: dict) -> Optional[str]:
+    if not rec.get("title"):
+        return "missing title"
+    if not rec.get("source_url") or not str(rec["source_url"]).startswith("http"):
+        return "missing source_url"
+    if not rec.get("retrieved_at"):
+        return "missing retrieved_at"
+    return None
+
+
+class DiscoverRequest(BaseModel):
+    sources: Optional[List[str]] = None
+    keyword: Optional[str] = None
+    limit: int = 20
+
+
+@router.post("/discover")
+async def discover(req: DiscoverRequest):
+    profile = await get_profile()
+    names = [s for s in (req.sources or list(ADAPTERS)) if s in ADAPTERS]
+    if not names:
+        raise HTTPException(400, "no valid sources")
+    limit = max(1, min(req.limit, 50))
+    results: List[SourceResult] = await asyncio.gather(*[ADAPTERS[n](profile, req.keyword, limit) for n in names])
+    summary = []
+    for res in results:
+        fetched = len(res.records)
+        new = updated = invalid = dup = 0
+        for rec in res.records:
+            err = validate(rec)
+            if err:
+                invalid += 1
+                continue
+            key = dedupe_key(rec["source"], rec.get("source_id"), rec.get("title"), rec.get("organization_name"), rec.get("deadline"))
+            rec["dedupe_key"] = key
+            rec["parser_version"] = PARSER_VERSION
+            rec["last_verified_at"] = rec["retrieved_at"]
+            text_blob = " ".join(filter(None, [rec.get("title"), rec.get("description"), rec.get("eligibility_text"), rec.get("set_aside")]))
+            rec["barrier"] = barrier_signals(text_blob, rec.get("estimated_value") or rec.get("funding_amount"), rec.get("cost_sharing"))
+            d = days_until(rec.get("deadline"))
+            rec["status"] = "closed" if (d is not None and d < 0) else "open"
+            existing = await db.radar_opportunities.find_one({"$or": [{"dedupe_key": key}, {"source_url": rec["source_url"]}]}, {"_id": 0})
+            if existing:
+                # cross-source near-duplicate check by title+org
+                merged = {**existing, **{k: v for k, v in rec.items() if v not in (None, [], "")}}
+                merged["score"] = score_opportunity(merged, profile)
+                merged["updated_at"] = now_iso()
+                await db.radar_opportunities.update_one({"id": existing["id"]}, {"$set": merged})
+                updated += 1
+            else:
+                near = await db.radar_opportunities.find_one({"title": rec["title"], "organization_name": rec.get("organization_name"),
+                                                             "deadline": rec.get("deadline")}, {"_id": 0, "id": 1})
+                if near:
+                    dup += 1
+                    await db.radar_opportunities.update_one({"id": near["id"]}, {"$addToSet": {"also_seen_at": rec["source_url"]}})
+                    continue
+                rec["id"] = str(uuid.uuid4())
+                rec["user_status"] = "new"
+                rec["stage"] = "Discovered"
+                rec["notes"] = ""
+                rec["ai"] = {}
+                rec["drafts"] = {}
+                rec["created_at"] = now_iso()
+                rec["updated_at"] = rec["created_at"]
+                rec["is_demo"] = False
+                rec["score"] = score_opportunity(rec, profile)
+                await db.radar_opportunities.insert_one(dict(rec))
+                new += 1
+        run = {"id": str(uuid.uuid4()), "source": res.source, "source_url": res.url, "access_method": res.access_method,
+               "retrieved_at": res.started, "finished_at": now_iso(), "http_status": res.http_status, "parser_version": PARSER_VERSION,
+               "error": res.error, "usage_notes": res.usage_notes, "fetched": fetched, "new": new, "updated": updated,
+               "invalid": invalid, "near_duplicates": dup, "keyword": req.keyword}
+        await db.radar_source_runs.insert_one(dict(run))
+        run.pop("_id", None)
+        summary.append(run)
+    # stale marking: not re-seen for 7 days
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat()
+    await db.radar_opportunities.update_many({"last_verified_at": {"$lt": cutoff}, "status": "open"}, {"$set": {"status": "stale"}})
+    return {"runs": summary, "total_active": await db.radar_opportunities.count_documents({"status": {"$ne": "closed"}})}
+
+
+@router.get("/runs")
+async def runs(limit: int = Query(30, ge=1, le=200)):
+    return await db.radar_source_runs.find({}, {"_id": 0}).sort("retrieved_at", -1).to_list(limit)
+
+
+# ----------------------------------------------------------------------------------------------
+# Feed, detail, actions
+# ----------------------------------------------------------------------------------------------
+@router.get("/opportunities")
+async def list_opportunities(
+    type: Optional[str] = None, source: Optional[str] = None, status: Optional[str] = None,
+    user_status: Optional[str] = None, min_score: Optional[int] = None, closing_days: Optional[int] = None,
+    low_barrier: Optional[bool] = None, remote: Optional[bool] = None, max_value: Optional[float] = None,
+    q: Optional[str] = None, saved: Optional[bool] = None, include_dismissed: bool = False,
+    sort: str = "score", limit: int = Query(100, ge=1, le=300),
+):
+    f = {"is_demo": {"$ne": True}}
+    if type:
+        f["opportunity_type"] = type
+    if source:
+        f["source"] = source
+    if status:
+        f["status"] = status
+    else:
+        f["status"] = {"$ne": "closed"}
+    if user_status:
+        f["user_status"] = user_status
+    elif saved:
+        f["user_status"] = {"$in": ["saved", "contacted", "submitted"]}
+    elif not include_dismissed:
+        f["user_status"] = {"$ne": "dismissed"}
+    if min_score is not None:
+        f["score.total"] = {"$gte": min_score}
+    if low_barrier:
+        f["barrier.label"] = "lower observed barrier"
+    if remote:
+        f["remote_status"] = {"$in": ["remote", "national", "international"]}
+    if max_value is not None:
+        f["$or"] = [{"estimated_value": {"$lte": max_value}}, {"funding_amount": {"$lte": max_value}},
+                    {"estimated_value": None, "funding_amount": None}]
+    if closing_days is not None:
+        f["deadline"] = {"$lte": (datetime.now(timezone.utc) + timedelta(days=closing_days)).isoformat(), "$ne": None}
+    if q:
+        rx = {"$regex": re.escape(q), "$options": "i"}
+        f["$and"] = [{"$or": [{"title": rx}, {"description": rx}, {"organization_name": rx}, {"eligibility_text": rx}]}]
+    docs = await db.radar_opportunities.find(f, {"_id": 0, "description": 0, "drafts": 0}).to_list(2000)
+    if sort == "deadline":
+        docs.sort(key=lambda d: d.get("deadline") or "9999")
+    elif sort == "new":
+        docs.sort(key=lambda d: d.get("created_at") or "", reverse=True)
+    else:
+        docs.sort(key=lambda d: (d.get("score") or {}).get("total", 0), reverse=True)
+    docs = docs[:limit]
+    for d in docs:
+        d["days_remaining"] = days_until(d.get("deadline"))
+    return docs
+
+
+@router.get("/opportunities/{oid}")
+async def get_opportunity(oid: str):
+    d = await db.radar_opportunities.find_one({"id": oid}, {"_id": 0})
+    if not d:
+        raise HTTPException(404, "Opportunity not found")
+    d["days_remaining"] = days_until(d.get("deadline"))
+    sim = await db.radar_opportunities.find(
+        {"id": {"$ne": oid}, "opportunity_type": d.get("opportunity_type"), "status": {"$ne": "closed"}},
+        {"_id": 0, "id": 1, "title": 1, "organization_name": 1, "score": 1, "deadline": 1}).sort("score.total", -1).to_list(5)
+    d["similar"] = sim
+    return d
+
+
+STAGES = ["Discovered", "Reviewed", "Qualified", "Preparing", "Submitted", "Awarded", "Not Awarded"]
+
+
+class PatchOpportunity(BaseModel):
+    user_status: Optional[str] = None  # new | saved | dismissed | contacted | submitted
+    stage: Optional[str] = None
+    notes: Optional[str] = None
+
+
+@router.patch("/opportunities/{oid}")
+async def patch_opportunity(oid: str, p: PatchOpportunity):
+    d = await db.radar_opportunities.find_one({"id": oid}, {"_id": 0, "id": 1, "user_status": 1, "stage": 1})
+    if not d:
+        raise HTTPException(404, "Opportunity not found")
+    upd = {"updated_at": now_iso()}
+    if p.user_status is not None:
+        if p.user_status not in ("new", "saved", "dismissed", "contacted", "submitted"):
+            raise HTTPException(400, "invalid user_status")
+        upd["user_status"] = p.user_status
+        if p.user_status == "submitted":
+            upd["stage"] = "Submitted"
+        elif p.user_status == "contacted" and d.get("stage") in ("Discovered", "Reviewed"):
+            upd["stage"] = "Qualified"
+        elif p.user_status == "saved" and d.get("stage") == "Discovered":
+            upd["stage"] = "Reviewed"
+    if p.stage is not None:
+        if p.stage not in STAGES:
+            raise HTTPException(400, "invalid stage")
+        upd["stage"] = p.stage
+    if p.notes is not None:
+        upd["notes"] = p.notes[:5000]
+    await db.radar_opportunities.update_one({"id": oid}, {"$set": upd, "$push": {"audit": {"at": upd["updated_at"], "change": {k: v for k, v in upd.items() if k != "updated_at"}}}})
+    return await get_opportunity(oid)
+
+
+@router.post("/opportunities/{oid}/to-mission")
+async def opportunity_to_mission(oid: str):
+    d = await db.radar_opportunities.find_one({"id": oid}, {"_id": 0})
+    if not d:
+        raise HTTPException(404, "Opportunity not found")
+    if d.get("mission_id"):
+        m = await db.missions.find_one({"id": d["mission_id"]}, {"_id": 0})
+        if m:
+            return m
+    val = d.get("funding_amount") or d.get("estimated_value")
+    text = (f"Pursue this verified public opportunity (do NOT auto-submit; owner reviews and submits manually):\n"
+            f"Title: {d.get('title')}\nType: {d.get('opportunity_type')}\nIssuer: {d.get('organization_name') or 'Not verified'}\n"
+            f"Deadline: {d.get('deadline') or 'Not verified'}\nStated amount: {val if val is not None else 'Not verified'}\n"
+            f"Eligibility (source text): {(d.get('eligibility_text') or 'Not stated')[:600]}\n"
+            f"Required registrations: {', '.join(d.get('required_registrations') or []) or 'Not stated'}\n"
+            f"Source: {d.get('source_url')}\n"
+            f"Steps must include: verify on original source, confirm eligibility, gather required registrations/documents, "
+            f"prepare submission, submit manually before deadline, log outcome.")
+    mission = await compile_mission_from_text(text, "Collect" if d.get("opportunity_type") in ("grant", "funding") else "Move",
+                                              source_opportunity_id=oid)
+    await db.radar_opportunities.update_one({"id": oid}, {"$set": {"mission_id": mission.id, "mission_title": mission.title,
+                                                                    "stage": "Preparing", "updated_at": now_iso()}})
+    return mission
+
+
+# ----------------------------------------------------------------------------------------------
+# Natural-language search -> proposed structured filters (never applied silently)
+# ----------------------------------------------------------------------------------------------
+class NLSearch(BaseModel):
+    query: str
+
+
+@router.post("/search/nl")
+async def nl_search(req: NLSearch):
+    if not req.query.strip():
+        raise HTTPException(400, "query required")
+    system = ("You translate a natural-language opportunity search into a JSON filter object. Allowed keys ONLY: "
+              "type (one of grant, contract, subcontract, procurement, sponsorship, rfp, funding, technical_bounty), "
+              "source (grants_gov|sam_gov|github_bounties), min_score (int), closing_days (int), low_barrier (bool), "
+              "remote (bool), max_value (number), q (short keyword string), exclusions (list of short strings the user "
+              "wants to avoid, e.g. 'five years past performance'). Omit keys you cannot infer. Never add criteria the "
+              "user did not state. Respond ONLY with minified JSON.")
+    try:
+        raw, _, label = await llm_call_failover(system, req.query, ["openai", "gemini", "anthropic"])
+        filters = extract_json(raw)
+    except Exception as e:
+        raise HTTPException(502, f"could not parse query: {e}")
+    allowed = {"type", "source", "min_score", "closing_days", "low_barrier", "remote", "max_value", "q", "exclusions"}
+    filters = {k: v for k, v in (filters or {}).items() if k in allowed}
+    return {"query": req.query, "proposed_filters": filters, "model": label,
+            "note": "Review these filters before applying - the AI proposal is not applied automatically."}
+
+
+# ----------------------------------------------------------------------------------------------
+# AI personas on demand: Fit Analyst + Skeptic (+ checklist & questions)
+# ----------------------------------------------------------------------------------------------
+def source_pack(d: dict) -> str:
+    fields = ["title", "opportunity_type", "organization_name", "location", "remote_status", "estimated_value", "funding_amount",
+              "deadline", "eligibility_text", "required_entity_types", "required_certifications", "required_registrations",
+              "set_aside", "cost_sharing", "industry_codes", "keywords", "notice_type", "source_url", "retrieved_at"]
+    lines = [f"{k}: {d.get(k) if d.get(k) not in (None, [], '') else 'NOT STATED BY SOURCE'}" for k in fields]
+    desc = (d.get("description") or "NOT STATED BY SOURCE")[:2500]
+    evs = "\n".join([f"- [{e['field']}] \"{e['excerpt'][:200]}\" ({e['source_location']})" for e in d.get("evidence") or []])
+    return "SOURCE FIELDS:\n" + "\n".join(lines) + f"\n\nSOURCE DESCRIPTION:\n{desc}\n\nEVIDENCE EXCERPTS:\n{evs}"
+
+
+def profile_pack(p: dict) -> str:
+    keys = ["entity_type", "org_name", "country", "state", "city", "service_area", "industries", "naics_codes", "skills", "keywords",
+            "years_experience", "revenue_range", "team_size", "certifications", "set_asides", "nonprofit_status", "budget",
+            "hours_per_week", "min_value", "max_value", "willing_travel", "willing_subcontract", "preferred_types", "bio"]
+    return "OWNER PROFILE (the ONLY permitted source of claims about the owner):\n" + "\n".join(
+        [f"{k}: {p.get(k) if p.get(k) not in (None, [], '') else 'NOT PROVIDED'}" for k in keys])
+
+
+INTEGRITY = ("INTEGRITY RULES: Use only the SOURCE FIELDS/DESCRIPTION/EVIDENCE and the OWNER PROFILE. Never invent amounts, "
+             "deadlines, agencies, eligibility rules, or facts about the owner. If something is not stated, say 'Not stated by source' "
+             "or 'Not in profile'. Never claim the owner is legally eligible or will win; distinguish 'appears to match stated "
+             "requirements' from 'legally eligible' from 'likely to win'. Respond ONLY with minified JSON.")
+
+
+class AnalyzeRequest(BaseModel):
+    include_checklist: bool = True
+
+
+@router.post("/opportunities/{oid}/analyze")
+async def analyze(oid: str, req: AnalyzeRequest = None):
+    d = await db.radar_opportunities.find_one({"id": oid}, {"_id": 0})
+    if not d:
+        raise HTTPException(404, "Opportunity not found")
+    profile = await get_profile()
+    sp, pp = source_pack(d), profile_pack(profile)
+    include_ck = req.include_checklist if req else True
+
+    fit_sys = ("You are the FIT ANALYST persona of ACASO Opportunity Radar. Compare the owner profile to the opportunity. " + INTEGRITY +
+               " JSON keys: summary (2 sentences), why_it_may_fit (list), why_it_may_not_fit (list), appears_to_match_stated_requirements "
+               "(true|false|unknown), missing_information (list), effort_estimate (string labelled 'uncertain estimate'), "
+               "recommended_next_action (one sentence).")
+    skeptic_sys = ("You are the SKEPTIC persona of ACASO Opportunity Radar. Your job is to find what is missing, stale, suspicious or "
+                   "unrealistic before the owner relies on this opportunity. " + INTEGRITY +
+                   " JSON keys: verdict (clear|caution|block), concerns (list), missing_requirements (list), stale_or_suspicious (list), "
+                   "unrealistic_assumptions (list), verify_at_source (list of exact things to verify on the original page).")
+    ck_sys = ("You are the COMPLIANCE SENTINEL + PROPOSAL ARCHITECT personas of ACASO Opportunity Radar. " + INTEGRITY +
+              " JSON keys: preparation_checklist (list of {item, why, stated_by_source: true|false}), "
+              "questions_for_contracting_officer_or_funder (list of strings), proposal_outline (list of section titles with one-line guidance; no fabricated claims).")
+
+    body = f"{sp}\n\n{pp}"
+    tasks = [llm_call_failover(fit_sys, body, ["openai", "gemini", "anthropic"]),
+             llm_call_failover(skeptic_sys, body, ["anthropic", "openai", "gemini"])]
+    if include_ck:
+        tasks.append(llm_call_failover(ck_sys, body, ["gemini", "openai", "anthropic"]))
+    outs = await asyncio.gather(*tasks, return_exceptions=True)
+
+    def parse(o, name):
+        if isinstance(o, Exception):
+            return {"error": str(o)[:200], "persona": name}
+        raw, _, label = o
+        try:
+            j = extract_json(raw)
+        except Exception:
+            j = {"raw": raw[:1500]}
+        j["model_label"] = label
+        j["generated_at"] = now_iso()
+        j["inferred"] = True
+        return j
+
+    ai = dict(d.get("ai") or {})
+    ai["fit"] = parse(outs[0], "fit_analyst")
+    ai["skeptic"] = parse(outs[1], "skeptic")
+    if include_ck:
+        ai["checklist"] = parse(outs[2], "compliance_sentinel")
+    d["ai"] = ai
+    d["score"] = score_opportunity(d, profile)
+    if d.get("stage") == "Discovered":
+        d["stage"] = "Reviewed"
+    await db.radar_opportunities.update_one({"id": oid}, {"$set": {"ai": ai, "score": d["score"], "stage": d["stage"], "updated_at": now_iso()}})
+    return {"ai": ai, "score": d["score"], "stage": d["stage"]}
+
+
+# ----------------------------------------------------------------------------------------------
+# Drafting desk: email / grant narrative / outreach packet / fill-a-form
+# ----------------------------------------------------------------------------------------------
+DRAFT_KINDS = {
+    "email": ("Write a concise, specific introductory email (subject line + body under 180 words) from the owner to the issuing "
+              "organization's contact about this opportunity. Ask 1-2 clarifying questions that the source leaves unanswered."),
+    "grant_narrative": ("Write a grant proposal narrative draft with these sections: Statement of Need, Project Description, "
+                        "Goals & Measurable Objectives, Organizational Capacity, Timeline, Budget Narrative, Evaluation, Sustainability. "
+                        "Ground every capacity/experience statement in the owner profile verbatim; anywhere a fact is missing, insert a "
+                        "bracketed placeholder like [FILL: past project example] rather than inventing it."),
+    "outreach_packet": ("Produce a full outreach packet: (1) one-paragraph capability statement, (2) cold email, (3) LinkedIn/DM version "
+                        "under 80 words, (4) follow-up message for day 3, (5) call script opening 60 seconds, (6) list of documents to attach "
+                        "based on stated requirements. Use only profile facts; use [FILL: ...] placeholders for anything missing."),
+    "form_answers": ("The owner pasted application/form questions. Answer each question using ONLY the owner profile and the opportunity's "
+                     "source text. For any answer requiring information not in the profile, write [FILL: what is needed] instead of guessing. "
+                     "Output as numbered Q/A pairs."),
+}
+
+
+class DraftRequest(BaseModel):
+    kind: str
+    form_text: Optional[str] = None
+    tone: Optional[str] = "professional, direct, human"
+    extra_instructions: Optional[str] = None
+
+
+@router.post("/opportunities/{oid}/draft")
+async def draft(oid: str, req: DraftRequest):
+    if req.kind not in DRAFT_KINDS:
+        raise HTTPException(400, f"kind must be one of {list(DRAFT_KINDS)}")
+    d = await db.radar_opportunities.find_one({"id": oid}, {"_id": 0})
+    if not d:
+        raise HTTPException(404, "Opportunity not found")
+    if req.kind == "form_answers" and not (req.form_text or "").strip():
+        raise HTTPException(400, "form_text is required for form_answers")
+    profile = await get_profile()
+    system = ("You are the PROPOSAL ARCHITECT persona of ACASO Opportunity Radar, drafting on behalf of the owner. "
+              "HARD RULES: Never fabricate experience, revenue, credentials, certifications, past performance, partners, or metrics. "
+              "The ONLY permitted facts about the owner are in the OWNER PROFILE; the ONLY permitted facts about the opportunity are in "
+              "the SOURCE FIELDS/DESCRIPTION/EVIDENCE. Anything else must be a bracketed placeholder [FILL: ...]. Do not claim eligibility "
+              "or that funding is likely. The owner will review and submit manually; never state that anything has been submitted. "
+              f"Tone: {req.tone}. Output Markdown. End with a short 'Before sending' checklist of every [FILL] placeholder and every "
+              "claim the owner must verify.")
+    prompt = f"{source_pack(d)}\n\n{profile_pack(profile)}\n\nTASK: {DRAFT_KINDS[req.kind]}"
+    if req.form_text:
+        prompt += f"\n\nFORM QUESTIONS:\n{req.form_text[:6000]}"
+    if req.extra_instructions:
+        prompt += f"\n\nOWNER INSTRUCTIONS: {req.extra_instructions[:1000]}"
+    try:
+        text, _, label = await llm_call_failover(system, prompt, ["openai", "anthropic", "gemini"])
+    except Exception as e:
+        raise HTTPException(502, f"draft failed: {e}")
+    fills = re.findall(r"\[FILL:[^\]]*\]", text)
+    item = {"kind": req.kind, "content": text.strip(), "model_label": label, "generated_at": now_iso(),
+            "placeholders": len(fills), "form_text": (req.form_text or None)}
+    drafts = dict(d.get("drafts") or {})
+    drafts[req.kind] = item
+    upd = {"drafts": drafts, "updated_at": now_iso()}
+    if d.get("stage") in ("Discovered", "Reviewed", "Qualified"):
+        upd["stage"] = "Preparing"
+    await db.radar_opportunities.update_one({"id": oid}, {"$set": upd})
+    return item
+
+
+@router.get("/opportunities/{oid}/drafts")
+async def get_drafts(oid: str):
+    d = await db.radar_opportunities.find_one({"id": oid}, {"_id": 0, "drafts": 1})
+    if not d:
+        raise HTTPException(404, "Opportunity not found")
+    return d.get("drafts") or {}
+
+
+@router.get("/opportunities/{oid}/export")
+async def export_opportunity(oid: str):
+    from fastapi.responses import Response
+    d = await db.radar_opportunities.find_one({"id": oid}, {"_id": 0})
+    if not d:
+        raise HTTPException(404, "Opportunity not found")
+    sc = d.get("score") or {}
+    lines = [f"# {d.get('title')}", "",
+             f"> VERIFY BEFORE ACTING: confirm every field on the original source: {d.get('source_url')}",
+             f"> Retrieved {d.get('retrieved_at')} | parser {d.get('parser_version')} | HTTP {d.get('http_status')} | status {d.get('status')}", "",
+             "## Facts from source",
+             f"- Type: {d.get('opportunity_type')}", f"- Issuer: {d.get('organization_name') or 'Not verified'}",
+             f"- Deadline: {d.get('deadline') or 'Not verified'}",
+             f"- Amount: {d.get('funding_amount') if d.get('funding_amount') is not None else (d.get('estimated_value') if d.get('estimated_value') is not None else 'Not verified')}",
+             f"- Eligibility text: {d.get('eligibility_text') or 'Not stated by source'}",
+             f"- Required registrations: {', '.join(d.get('required_registrations') or []) or 'Not stated'}", "",
+             f"## Inferred score: {sc.get('total')} / 100 - {sc.get('label')}"]
+    for k, b in (sc.get("breakdown") or {}).items():
+        lines.append(f"- {k}: {b['points']} / {b['weight']}")
+    lines += ["", "## Evidence excerpts"] + [f"- [{e['field']}] \"{e['excerpt']}\" - {e['source_location']}" for e in d.get("evidence") or []]
+    ai = d.get("ai") or {}
+    for k in ("fit", "skeptic", "checklist"):
+        if ai.get(k):
+            lines += ["", f"## AI {k} (inferred, {ai[k].get('model_label','')})", "```json", json.dumps({x: y for x, y in ai[k].items() if x not in ('model_label',)}, indent=1)[:6000], "```"]
+    for k, v in (d.get("drafts") or {}).items():
+        lines += ["", f"## Draft: {k} ({v.get('placeholders')} placeholders to fill)", v.get("content", "")]
+    if d.get("notes"):
+        lines += ["", "## Notes", d["notes"]]
+    md = "\n".join(lines)
+    safe = re.sub(r"[^A-Za-z0-9_-]+", "-", (d.get("title") or "opportunity"))[:50]
+    return Response(content=md, media_type="text/markdown", headers={"Content-Disposition": f'attachment; filename="radar-{safe}.md"'})
+
+```
+
+
+### `backend/node.py`
+```python
+"""
+ACASO Local Node orchestration + server-side research browser.
+
+Reality: the hosted app cannot touch the owner's PC. A small Python client (handoff/local_node/acaso_node.py)
+runs on the owner's machine, pairs with this API using the Agent Bridge key, and polls for tasks.
+
+Safety model (owner decisions):
+  * Every WRITE / shell / browser action is created as `proposed` and must be approved in the UI before the
+    node is allowed to fetch it. Read-only actions (list/read/stat) are auto-approved.
+  * The node itself enforces allowed roots; the server records them and rejects paths outside them too.
+  * Browser tasks fill forms and STOP before submit; a separate `browser_submit` task (owner-approved) clicks submit.
+    Passwords / 2FA are typed by the owner in the real Chrome window on their PC; never sent to this server.
+  * Server research browser (headless Chromium here) is for public pages only: text + links + screenshot.
+"""
+import base64
+import logging
+import os
+import re
+import uuid
+from datetime import datetime, timezone
+from typing import List, Optional, Callable, Awaitable
+
+from fastapi import APIRouter, HTTPException, Query, Depends
+from pydantic import BaseModel
+
+logger = logging.getLogger("node")
+router = APIRouter(prefix="/node")
+browse_router = APIRouter(prefix="/browse")
+
+db = None
+require_key = None
+llm_call_failover: Optional[Callable[..., Awaitable]] = None
+extract_json: Optional[Callable] = None
+PROTOCOL_VERSION = "node-1.0"
+
+READ_ONLY_KINDS = {"file_list", "file_read", "file_stat", "sys_info", "browser_screenshot"}
+WRITE_KINDS = {"file_write", "file_append", "mkdir", "file_move", "file_delete", "shell", "browser_open", "browser_fill", "browser_submit", "browser_close"}
+ALL_KINDS = READ_ONLY_KINDS | WRITE_KINDS
+
+
+def init(_db, _require_key, _llm_failover, _extract_json):
+    global db, require_key, llm_call_failover, extract_json
+    db, require_key, llm_call_failover, extract_json = _db, _require_key, _llm_failover, _extract_json
+    # dependency must be resolved at import time for FastAPI; register node-auth routes now
+    _register_node_routes()
+
+
+def now_iso():
+    return datetime.now(timezone.utc).isoformat()
+
+
+# ----------------------------------------------------------------------------------------------
+# Models
+# ----------------------------------------------------------------------------------------------
+class NodeRegister(BaseModel):
+    name: str
+    os: str
+    hostname: Optional[str] = None
+    allowed_roots: List[str] = []
+    capabilities: List[str] = ["files"]  # files | shell | browser
+    node_version: Optional[str] = None
+    node_id: Optional[str] = None  # re-register existing
+
+
+class TaskCreate(BaseModel):
+    node_id: str
+    kind: str
+    params: dict = {}
+    title: Optional[str] = None
+    plan_id: Optional[str] = None
+
+
+class TaskResult(BaseModel):
+    status: str  # done | failed | awaiting_submit
+    result: Optional[dict] = None
+    error: Optional[str] = None
+    screenshot_b64: Optional[str] = None
+
+
+class PlanRequest(BaseModel):
+    node_id: str
+    goal: str
+    context: Optional[str] = None
+
+
+class Decision(BaseModel):
+    approved: bool
+    note: Optional[str] = None
+
+
+# ----------------------------------------------------------------------------------------------
+# Owner-side routes (UI; single-owner app, same trust level as the rest of the app)
+# ----------------------------------------------------------------------------------------------
+@router.get("/nodes")
+async def list_nodes():
+    nodes = await db.nodes.find({}, {"_id": 0}).sort("last_seen", -1).to_list(50)
+    for n in nodes:
+        try:
+            age = (datetime.now(timezone.utc) - datetime.fromisoformat(n["last_seen"])).total_seconds()
+        except Exception:
+            age = 1e9
+        n["online"] = age < 45
+        n["pending_approvals"] = await db.node_tasks.count_documents({"node_id": n["id"], "status": "proposed"})
+    return nodes
+
+
+@router.delete("/nodes/{node_id}")
+async def forget_node(node_id: str):
+    r = await db.nodes.delete_one({"id": node_id})
+    if not r.deleted_count:
+        raise HTTPException(404, "Node not found")
+    await db.node_tasks.update_many({"node_id": node_id, "status": {"$in": ["proposed", "queued"]}}, {"$set": {"status": "cancelled"}})
+    return {"ok": True}
+
+
+def _validate_path_in_roots(path: str, roots: List[str]) -> bool:
+    if not roots:
+        return False
+    p = os.path.normpath(path).replace("\\", "/").lower().rstrip("/")
+    for r in roots:
+        rr = os.path.normpath(r).replace("\\", "/").lower().rstrip("/")
+        if p == rr or p.startswith(rr + "/"):
+            return True
+    return False
+
+
+@router.post("/tasks")
+async def create_task(t: TaskCreate):
+    if t.kind not in ALL_KINDS:
+        raise HTTPException(400, f"kind must be one of {sorted(ALL_KINDS)}")
+    node = await db.nodes.find_one({"id": t.node_id}, {"_id": 0})
+    if not node:
+        raise HTTPException(404, "Node not found - pair the Local Node first")
+    # path checks against the node's declared roots (node re-checks locally too)
+    for key in ("path", "src", "dst", "cwd"):
+        v = t.params.get(key)
+        if v and not _validate_path_in_roots(v, node.get("allowed_roots") or []):
+            raise HTTPException(400, f"{key} '{v}' is outside this node's allowed roots {node.get('allowed_roots')}")
+    if t.kind == "shell" and "shell" not in (node.get("capabilities") or []):
+        raise HTTPException(400, "This node was started without shell capability")
+    if t.kind.startswith("browser") and "browser" not in (node.get("capabilities") or []):
+        raise HTTPException(400, "This node was started without browser capability (pip install playwright; playwright install chrome)")
+    if t.kind == "browser_fill" and t.params.get("submit"):
+        raise HTTPException(400, "browser_fill never submits. Approve a separate browser_submit task after reviewing the filled form.")
+    auto = t.kind in READ_ONLY_KINDS
+    doc = {
+        "id": str(uuid.uuid4()), "node_id": t.node_id, "kind": t.kind, "params": t.params,
+        "title": t.title or _default_title(t.kind, t.params), "plan_id": t.plan_id,
+        "requires_approval": not auto, "status": "queued" if auto else "proposed",
+        "created_at": now_iso(), "approved_at": now_iso() if auto else None, "started_at": None, "finished_at": None,
+        "result": None, "error": None, "screenshot_b64": None,
+        "audit": [{"at": now_iso(), "event": "created", "auto_approved": auto}],
+    }
+    await db.node_tasks.insert_one(dict(doc))
+    doc.pop("_id", None)
+    return doc
+
+
+def _default_title(kind, p):
+    if kind in ("file_read", "file_write", "file_append", "file_delete", "file_stat", "mkdir"):
+        return f"{kind.replace('_', ' ')}: {p.get('path', '')}"
+    if kind == "file_list":
+        return f"list: {p.get('path', '')}"
+    if kind == "file_move":
+        return f"move: {p.get('src', '')} -> {p.get('dst', '')}"
+    if kind == "shell":
+        return f"shell: {str(p.get('command', ''))[:60]}"
+    if kind.startswith("browser"):
+        return f"{kind.replace('_', ' ')}: {p.get('url', p.get('session_id', ''))}"
+    return kind
+
+
+@router.get("/tasks")
+async def list_tasks(node_id: Optional[str] = None, status: Optional[str] = None, limit: int = Query(60, ge=1, le=300)):
+    f = {}
+    if node_id:
+        f["node_id"] = node_id
+    if status:
+        f["status"] = status
+    docs = await db.node_tasks.find(f, {"_id": 0, "screenshot_b64": 0}).sort("created_at", -1).to_list(limit)
+    return docs
+
+
+@router.get("/tasks/{tid}")
+async def get_task(tid: str):
+    d = await db.node_tasks.find_one({"id": tid}, {"_id": 0})
+    if not d:
+        raise HTTPException(404, "Task not found")
+    return d
+
+
+@router.post("/tasks/{tid}/decision")
+async def decide_task(tid: str, d: Decision):
+    t = await db.node_tasks.find_one({"id": tid}, {"_id": 0})
+    if not t:
+        raise HTTPException(404, "Task not found")
+    if t["status"] != "proposed":
+        raise HTTPException(400, f"Task is '{t['status']}', nothing to decide")
+    new = "queued" if d.approved else "rejected"
+    await db.node_tasks.update_one({"id": tid}, {"$set": {"status": new, "approved_at": now_iso() if d.approved else None},
+                                                 "$push": {"audit": {"at": now_iso(), "event": new, "note": d.note}}})
+    return await get_task(tid)
+
+
+@router.post("/tasks/{tid}/cancel")
+async def cancel_task(tid: str):
+    t = await db.node_tasks.find_one({"id": tid}, {"_id": 0, "status": 1})
+    if not t:
+        raise HTTPException(404, "Task not found")
+    if t["status"] not in ("proposed", "queued"):
+        raise HTTPException(400, f"Cannot cancel a task that is '{t['status']}'")
+    await db.node_tasks.update_one({"id": tid}, {"$set": {"status": "cancelled"}, "$push": {"audit": {"at": now_iso(), "event": "cancelled"}}})
+    return {"ok": True}
+
+
+# ---- LLM planner: goal -> proposed tasks (all land in the approval queue; nothing runs) ----
+PLANNER_SYSTEM = (
+    "You are ACASO's Local Node planner. Turn the owner's goal into a SHORT ordered list of concrete tasks that a "
+    "trusted agent on the owner's own PC will execute after the owner approves each one. Allowed task kinds and params:\n"
+    "file_list {path}; file_read {path}; file_stat {path}; mkdir {path}; file_write {path, content}; file_append {path, content}; "
+    "file_move {src, dst}; file_delete {path}; shell {command, cwd}; browser_open {url, session_id}; "
+    "browser_fill {session_id, url?, fields:[{label_or_selector, value}]}; browser_screenshot {session_id}; browser_close {session_id}.\n"
+    "Rules: every path MUST be inside one of the allowed roots given. Prefer reads before writes. Never include a browser_submit - the owner "
+    "approves submission separately after seeing the filled form. Never put passwords or secrets in values; write [OWNER TYPES THIS] instead. "
+    "Keep to at most 8 tasks. Respond ONLY with minified JSON: {\"summary\": string, \"tasks\": [{\"kind\":..., \"params\":{...}, \"title\": string, \"why\": string}]}"
+)
+
+
+@router.post("/plan")
+async def plan_tasks(req: PlanRequest):
+    node = await db.nodes.find_one({"id": req.node_id}, {"_id": 0})
+    if not node:
+        raise HTTPException(404, "Node not found")
+    prompt = (f"NODE: os={node.get('os')} hostname={node.get('hostname')} capabilities={node.get('capabilities')}\n"
+              f"ALLOWED ROOTS: {node.get('allowed_roots')}\n\nGOAL: {req.goal}\n" + (f"CONTEXT: {req.context}\n" if req.context else ""))
+    try:
+        raw, _, label = await llm_call_failover(PLANNER_SYSTEM, prompt, ["openai", "anthropic", "gemini"])
+        parsed = extract_json(raw)
+    except Exception as e:
+        raise HTTPException(502, f"planner failed: {e}")
+    tasks = [t for t in (parsed.get("tasks") or []) if t.get("kind") in ALL_KINDS and t.get("kind") != "browser_submit"][:8]
+    pid = str(uuid.uuid4())
+    created = []
+    for t in tasks:
+        try:
+            doc = await create_task(TaskCreate(node_id=req.node_id, kind=t["kind"], params=t.get("params") or {}, title=t.get("title"), plan_id=pid))
+            doc["why"] = t.get("why")
+            created.append(doc)
+        except HTTPException as he:
+            created.append({"kind": t.get("kind"), "params": t.get("params"), "title": t.get("title"), "status": "rejected_by_policy", "error": str(he.detail)})
+    plan = {"id": pid, "node_id": req.node_id, "goal": req.goal, "summary": parsed.get("summary", ""), "model_label": label,
+            "tasks": [{k: v for k, v in c.items() if k in ("id", "kind", "title", "status", "why", "error")} for c in created], "created_at": now_iso()}
+    await db.node_plans.insert_one(dict(plan))
+    plan.pop("_id", None)
+    return plan
+
+
+@router.get("/plans")
+async def list_plans(limit: int = Query(20, ge=1, le=100)):
+    return await db.node_plans.find({}, {"_id": 0}).sort("created_at", -1).to_list(limit)
+
+
+@router.get("/setup")
+async def setup_info():
+    """Everything the owner needs to run the node - the key is fetched separately from the Agent Bridge tab."""
+    return {
+        "protocol": PROTOCOL_VERSION,
+        "download": ["/local-node/acaso_node.py", "/local-node/README.md", "/local-node/run_node.bat", "/local-node/run_node.sh"],
+        "install": ["python -m pip install httpx", "optional browser: python -m pip install playwright && python -m playwright install chrome"],
+        "run_windows": 'set ACASO_URL=<this site>&& set ACASO_KEY=<your Agent Bridge key>&& python acaso_node.py --root "C:\\Users\\you\\ACASO" --shell --browser',
+        "run_linux": 'ACASO_URL=<this site> ACASO_KEY=<your Agent Bridge key> python3 acaso_node.py --root ~/ACASO --shell --browser',
+        "safety": ["Only paths inside --root folders are touched", "Every write/shell/browser action waits for your approval in this tab",
+                   "Forms are filled but never submitted until you approve a separate submit step", "Passwords and 2FA are typed by you in your own Chrome; never stored here"],
+    }
+
+
+# ----------------------------------------------------------------------------------------------
+# Node-side routes (authenticated with X-ACASO-Key, registered after init so Depends resolves)
+# ----------------------------------------------------------------------------------------------
+def _register_node_routes():
+    dep = [Depends(require_key)]
+
+    @router.post("/register", dependencies=dep)
+    async def register(n: NodeRegister):
+        nid = n.node_id or str(uuid.uuid4())
+        doc = {"id": nid, "name": n.name[:60], "os": n.os[:40], "hostname": (n.hostname or "")[:80],
+               "allowed_roots": [r for r in n.allowed_roots if r][:10], "capabilities": [c for c in n.capabilities if c in ("files", "shell", "browser")],
+               "node_version": n.node_version, "protocol": PROTOCOL_VERSION, "last_seen": now_iso()}
+        existing = await db.nodes.find_one({"id": nid}, {"_id": 0, "created_at": 1})
+        doc["created_at"] = (existing or {}).get("created_at") or now_iso()
+        await db.nodes.update_one({"id": nid}, {"$set": doc}, upsert=True)
+        return doc
+
+    @router.post("/{node_id}/heartbeat", dependencies=dep)
+    async def heartbeat(node_id: str):
+        r = await db.nodes.update_one({"id": node_id}, {"$set": {"last_seen": now_iso()}})
+        if not r.matched_count:
+            raise HTTPException(404, "Unknown node - register first")
+        pending = await db.node_tasks.count_documents({"node_id": node_id, "status": "queued"})
+        return {"ok": True, "queued": pending, "server_time": now_iso()}
+
+    @router.post("/{node_id}/claim", dependencies=dep)
+    async def claim(node_id: str):
+        """Atomically hand ONE approved task to the node."""
+        doc = await db.node_tasks.find_one_and_update(
+            {"node_id": node_id, "status": "queued"}, {"$set": {"status": "running", "started_at": now_iso()}, "$push": {"audit": {"at": now_iso(), "event": "claimed"}}},
+            sort=[("created_at", 1)], projection={"_id": 0, "screenshot_b64": 0})
+        await db.nodes.update_one({"id": node_id}, {"$set": {"last_seen": now_iso()}})
+        return doc or {}
+
+    @router.post("/tasks/{tid}/result", dependencies=dep)
+    async def post_result(tid: str, r: TaskResult):
+        t = await db.node_tasks.find_one({"id": tid}, {"_id": 0, "status": 1})
+        if not t:
+            raise HTTPException(404, "Task not found")
+        if t["status"] != "running":
+            raise HTTPException(400, f"Task is '{t['status']}', not running")
+        status = r.status if r.status in ("done", "failed", "awaiting_submit") else "failed"
+        shot = r.screenshot_b64
+        if shot and len(shot) > 2_500_000:
+            shot = None
+        await db.node_tasks.update_one({"id": tid}, {"$set": {"status": status, "result": r.result, "error": r.error, "screenshot_b64": shot,
+                                                              "finished_at": now_iso()}, "$push": {"audit": {"at": now_iso(), "event": status}}})
+        return {"ok": True, "status": status}
+
+
+# ----------------------------------------------------------------------------------------------
+# Server research browser (headless Chromium in this container) - public pages only
+# ----------------------------------------------------------------------------------------------
+class ResearchRequest(BaseModel):
+    url: str
+    question: Optional[str] = None
+    screenshot: bool = True
+
+
+@browse_router.post("/research")
+async def research(req: ResearchRequest):
+    url = req.url.strip()
+    if not re.match(r"^https?://", url):
+        url = "https://" + url
+    try:
+        if "PLAYWRIGHT_BROWSERS_PATH" not in os.environ and os.path.isdir("/pw-browsers"):
+            os.environ["PLAYWRIGHT_BROWSERS_PATH"] = "/pw-browsers"
+        from playwright.async_api import async_playwright
+    except Exception as e:
+        raise HTTPException(500, f"Playwright not available on server: {e}")
+    started = now_iso()
+    text, links, title, shot, status = "", [], "", None, None
+    try:
+        async with async_playwright() as p:
+            b = await p.chromium.launch(headless=True)
+            ctx = await b.new_context(user_agent="ACASO-Research/1.0 (+public page reader)", viewport={"width": 1280, "height": 900})
+            pg = await ctx.new_page()
+            resp = await pg.goto(url, timeout=45000, wait_until="domcontentloaded")
+            status = resp.status if resp else None
+            await pg.wait_for_timeout(1200)
+            title = await pg.title()
+            text = await pg.evaluate("() => document.body ? document.body.innerText : ''")
+            links = await pg.evaluate("() => Array.from(document.querySelectorAll('a[href]')).slice(0,120).map(a => ({text: (a.innerText||'').trim().slice(0,80), href: a.href}))")
+            forms = await pg.evaluate("() => Array.from(document.querySelectorAll('form')).slice(0,5).map(f => ({action: f.action, fields: Array.from(f.querySelectorAll('input,select,textarea')).slice(0,30).map(i => ({name: i.name, type: i.type, placeholder: i.placeholder, required: i.required}))}))")
+            if req.screenshot:
+                shot = base64.b64encode(await pg.screenshot(type="jpeg", quality=45, full_page=False)).decode()
+            await b.close()
+    except Exception as e:
+        raise HTTPException(502, f"Could not load page: {str(e)[:300]}")
+    text = re.sub(r"\n{3,}", "\n\n", text or "").strip()
+    answer = None
+    if req.question and text:
+        try:
+            ans, _, label = await llm_call_failover(
+                "You answer questions strictly from the provided page text. If the page does not contain the answer, say so. Quote the exact passage you rely on. Never invent.",
+                f"PAGE: {title} ({url})\n\nTEXT:\n{text[:14000]}\n\nQUESTION: {req.question}", ["openai", "gemini", "anthropic"])
+            answer = {"text": ans.strip(), "model_label": label}
+        except Exception as e:
+            answer = {"error": str(e)[:200]}
+    doc = {"id": str(uuid.uuid4()), "url": url, "title": title, "http_status": status, "retrieved_at": started, "chars": len(text),
+           "text_excerpt": text[:6000], "links": links, "forms": forms, "answer": answer, "screenshot_b64": shot,
+           "note": "Server headless browser: datacenter IP, no logins. Use your Local Node browser for anything with an account."}
+    await db.research_pages.insert_one({**doc, "screenshot_b64": None})
+    return doc
+
+
+@browse_router.get("/history")
+async def research_history(limit: int = Query(20, ge=1, le=100)):
+    return await db.research_pages.find({}, {"_id": 0, "text_excerpt": 0, "links": 0, "forms": 0}).sort("retrieved_at", -1).to_list(limit)
+
+```
+
+
+### `frontend/src/components/LocalNode.js`
+```javascript
+import React, { useCallback, useEffect, useState } from "react";
+import axios from "axios";
+import { toast } from "sonner";
+import { motion, AnimatePresence } from "framer-motion";
+import {
+  MonitorSmartphone, Wifi, WifiOff, Download, KeyRound, ShieldCheck, Check, X, Loader2, Play, Sparkles,
+  FolderOpen, FileText, TerminalSquare, Globe, Camera, Trash2, RefreshCw, AlertTriangle, ChevronDown, ChevronUp, ExternalLink, Search
+} from "lucide-react";
+import { API } from "../App";
+
+const KIND_ICON = { file_list: FolderOpen, file_read: FileText, file_stat: FileText, file_write: FileText, file_append: FileText, mkdir: FolderOpen,
+  file_move: FolderOpen, file_delete: Trash2, shell: TerminalSquare, browser_open: Globe, browser_fill: Globe, browser_submit: Globe, browser_screenshot: Camera, browser_close: Globe, sys_info: MonitorSmartphone };
+const KINDS = ["file_list", "file_read", "file_stat", "mkdir", "file_write", "file_append", "file_move", "file_delete", "shell", "browser_open", "browser_fill", "browser_screenshot", "browser_close"];
+const fmt = (iso) => { try { return iso ? new Date(iso).toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" }) : ""; } catch { return ""; } };
+
+export default function LocalNode() {
+  const [nodes, setNodes] = useState([]);
+  const [nodeId, setNodeId] = useState(null);
+  const [tasks, setTasks] = useState([]);
+  const [setup, setSetup] = useState(null);
+  const [bridgeKey, setBridgeKey] = useState(null);
+  const [showKey, setShowKey] = useState(false);
+  const [goal, setGoal] = useState("");
+  const [planning, setPlanning] = useState(false);
+  const [plan, setPlan] = useState(null);
+  const [manual, setManual] = useState({ kind: "file_list", params: '{"path": ""}' });
+  const [open, setOpen] = useState(null);
+  const [detail, setDetail] = useState(null);
+  const [research, setResearch] = useState({ url: "", question: "" });
+  const [researching, setResearching] = useState(false);
+  const [page, setPage] = useState(null);
+  const [showSetup, setShowSetup] = useState(true);
+
+  const load = useCallback(async () => {
+    try {
+      const [n, s] = await Promise.all([axios.get(`${API}/node/nodes`), setup ? Promise.resolve({ data: setup }) : axios.get(`${API}/node/setup`)]);
+      setNodes(n.data); setSetup(s.data);
+      if (!nodeId && n.data[0]) setNodeId(n.data[0].id);
+      if (n.data.length) setShowSetup(false);
+    } catch { /* silent */ }
+  }, [nodeId, setup]);
+  const loadTasks = useCallback(async () => {
+    if (!nodeId) { setTasks([]); return; }
+    try { setTasks((await axios.get(`${API}/node/tasks`, { params: { node_id: nodeId, limit: 80 } })).data); } catch { /* silent */ }
+  }, [nodeId]);
+
+  useEffect(() => { load(); const t = setInterval(load, 10000); return () => clearInterval(t); }, [load]);
+  useEffect(() => { loadTasks(); const t = setInterval(loadTasks, 4000); return () => clearInterval(t); }, [loadTasks]);
+
+  const revealKey = async () => {
+    try { const r = await axios.get(`${API}/bridge/info`); setBridgeKey(r.data.api_key); setShowKey(true); } catch { toast.error("Could not fetch key"); }
+  };
+  const decide = async (id, approved) => {
+    try { await axios.post(`${API}/node/tasks/${id}/decision`, { approved }); toast[approved ? "success" : "info"](approved ? "Approved - the node will run it" : "Rejected"); loadTasks(); }
+    catch (e) { toast.error(e?.response?.data?.detail || "Failed"); }
+  };
+  const cancel = async (id) => { try { await axios.post(`${API}/node/tasks/${id}/cancel`); loadTasks(); } catch { /* ignore */ } };
+  const approveAll = async () => { for (const t of tasks.filter((x) => x.status === "proposed")) await axios.post(`${API}/node/tasks/${t.id}/decision`, { approved: true }); toast.success("All pending tasks approved"); loadTasks(); };
+
+  const doPlan = async () => {
+    if (!goal.trim() || !nodeId) return;
+    setPlanning(true);
+    try { const r = await axios.post(`${API}/node/plan`, { node_id: nodeId, goal }, { timeout: 120000 }); setPlan(r.data); toast.success(`${r.data.tasks.length} task(s) proposed - review and approve below`); loadTasks(); }
+    catch (e) { toast.error(e?.response?.data?.detail || "Planner failed"); }
+    finally { setPlanning(false); }
+  };
+  const addManual = async () => {
+    let params;
+    try { params = JSON.parse(manual.params || "{}"); } catch { toast.error("Params must be valid JSON"); return; }
+    try { await axios.post(`${API}/node/tasks`, { node_id: nodeId, kind: manual.kind, params }); toast.success("Task created"); loadTasks(); }
+    catch (e) { toast.error(e?.response?.data?.detail || "Rejected"); }
+  };
+  const openDetail = async (id) => { try { setDetail((await axios.get(`${API}/node/tasks/${id}`)).data); } catch { /* ignore */ } };
+  const submitFor = async (t) => {
+    const sid = t.result?.session_id;
+    if (!sid) return;
+    try { await axios.post(`${API}/node/tasks`, { node_id: t.node_id, kind: "browser_submit", params: { session_id: sid }, title: `submit form in session ${sid}` }); toast.success("Submit step proposed - approve it in the queue to actually submit"); loadTasks(); }
+    catch (e) { toast.error(e?.response?.data?.detail || "Failed"); }
+  };
+  const doResearch = async () => {
+    if (!research.url.trim()) return;
+    setResearching(true); setPage(null);
+    try { setPage((await axios.post(`${API}/browse/research`, { url: research.url, question: research.question || null, screenshot: true }, { timeout: 120000 })).data); }
+    catch (e) { toast.error(e?.response?.data?.detail || "Could not load page"); }
+    finally { setResearching(false); }
+  };
+
+  const node = nodes.find((n) => n.id === nodeId);
+  const pending = tasks.filter((t) => t.status === "proposed");
+  const awaiting = tasks.filter((t) => t.status === "awaiting_submit");
+
+  return (
+    <div className="ln-wrap" data-testid="localnode-page">
+      <div className="chr-hero">
+        <div className="chr-hero-left">
+          <div className="chr-title"><MonitorSmartphone size={18} /> Local Node</div>
+          <p>ACASO cannot reach your PC from this server - so a small program you run <b>on your machine</b> pairs with your Agent Bridge key and executes tasks there: create and fix files inside folders you allow, run scripts, and drive a real Chrome window for sign-ups and forms. <b>Every write, command and browser action waits for your approval here.</b> Forms are filled but never submitted until you approve the submit step; you type passwords and 2FA yourself.</p>
+        </div>
+        <div className="chr-hero-stats">
+          <div className={`chr-stat ${node?.online ? "gold" : ""}`}><span className="v">{node ? (node.online ? "ONLINE" : "OFFLINE") : "—"}</span><span className="l">{node?.name || "no node paired"}</span></div>
+          <div className="chr-stat"><span className="v">{pending.length}</span><span className="l">awaiting approval</span></div>
+        </div>
+      </div>
+
+      {/* Setup */}
+      <div className="fa-console">
+        <div className="fa-head" role="button" tabIndex={0} onClick={() => setShowSetup((s) => !s)} onKeyDown={(e) => e.key === "Enter" && setShowSetup((s) => !s)}><Download size={16} /> Install & pair {showSetup ? <ChevronUp size={14} /> : <ChevronDown size={14} />} <em>{nodes.length ? `${nodes.length} node(s) paired` : "no node yet"}</em></div>
+        {showSetup && setup && (
+          <div className="ln-setup" data-testid="localnode-setup">
+            <ol>
+              <li>Download <a href="/local-node/acaso_node.py" download data-testid="ln-download-py">acaso_node.py</a>, the <a href="/local-node/README.md" download>README</a>, and a launcher: <a href="/local-node/run_node.bat" download>run_node.bat</a> (Windows) / <a href="/local-node/run_node.sh" download>run_node.sh</a> (Linux).</li>
+              <li>Install: <code>python -m pip install httpx</code> — for browser tasks also <code>python -m pip install playwright && python -m playwright install chrome</code>.</li>
+              <li>Your key: {showKey && bridgeKey ? <code className="ln-key" data-testid="ln-key">{bridgeKey}</code> : <button className="fa-btn" onClick={revealKey} data-testid="ln-reveal-key"><KeyRound size={13} /> Reveal Agent Bridge key</button>} — paste it into the launcher or <code>ACASO_KEY</code>.</li>
+              <li>Run it. Windows: <code>{setup.run_windows}</code></li>
+              <li className="ln-dim">Linux: <code>{setup.run_linux}</code></li>
+            </ol>
+            <div className="ln-safety">{setup.safety.map((s) => <span key={s}><ShieldCheck size={12} /> {s}</span>)}</div>
+          </div>
+        )}
+      </div>
+
+      {/* Nodes */}
+      {nodes.length > 0 && (
+        <div className="ln-nodes" data-testid="ln-nodes">
+          {nodes.map((n) => (
+            <button key={n.id} className={`ln-node ${n.id === nodeId ? "active" : ""} ${n.online ? "on" : ""}`} onClick={() => setNodeId(n.id)} data-testid={`ln-node-${n.id}`}>
+              {n.online ? <Wifi size={14} /> : <WifiOff size={14} />}
+              <span><b>{n.name}</b><small>{n.os} · {n.hostname} · {(n.capabilities || []).join(", ")}</small><small>roots: {(n.allowed_roots || []).join(" | ")}</small><small>last seen {fmt(n.last_seen)}</small></span>
+              {n.pending_approvals > 0 && <em>{n.pending_approvals}</em>}
+            </button>
+          ))}
+        </div>
+      )}
+
+      {node && (
+        <>
+          {/* Planner + manual */}
+          <div className="fa-console">
+            <div className="fa-head"><Sparkles size={16} /> Give the node a goal <em>ACASO plans the steps; nothing runs until you approve each one</em></div>
+            <div className="cw-row">
+              <input data-testid="ln-goal" className="cw-input grow" value={goal} onChange={(e) => setGoal(e.target.value)} placeholder='e.g. "Organize my ACASO folder: move all PDFs into /invoices and write an index.md listing them"' onKeyDown={(e) => e.key === "Enter" && doPlan()} />
+              <button data-testid="ln-plan" className="fa-btn primary" onClick={doPlan} disabled={planning || !goal.trim()}>{planning ? <Loader2 className="spin" size={14} /> : <Sparkles size={14} />} Plan tasks</button>
+            </div>
+            {plan && <div className="ln-plan" data-testid="ln-plan-summary"><b>Plan:</b> {plan.summary} <small>({plan.model_label})</small></div>}
+            <details className="ln-manual">
+              <summary>Add a single task manually</summary>
+              <div className="cw-row">
+                <select className="cw-input" value={manual.kind} onChange={(e) => setManual({ ...manual, kind: e.target.value })} data-testid="ln-manual-kind">{KINDS.map((k) => <option key={k}>{k}</option>)}</select>
+                <input className="cw-input grow" value={manual.params} onChange={(e) => setManual({ ...manual, params: e.target.value })} placeholder='{"path": "C:\\Users\\you\\ACASO\\notes.txt", "content": "..."}' data-testid="ln-manual-params" />
+                <button className="fa-btn" onClick={addManual} data-testid="ln-manual-add"><Play size={14} /> Queue</button>
+              </div>
+            </details>
+          </div>
+
+          {/* Awaiting submit */}
+          {awaiting.length > 0 && (
+            <div className="ln-await" data-testid="ln-awaiting">
+              <div className="fa-head"><Globe size={16} /> Forms filled - waiting for your submit decision</div>
+              {awaiting.map((t) => (
+                <div key={t.id} className="ln-await-row">
+                  <span>{t.title} · session <code>{t.result?.session_id}</code> · filled {t.result?.filled?.length || 0} field(s){t.result?.skipped?.length ? ` · ${t.result.skipped.length} for you to type` : ""}</span>
+                  <button className="fa-btn" onClick={() => openDetail(t.id)}><Camera size={13} /> View screenshot</button>
+                  <button className="fa-btn primary" onClick={() => submitFor(t)} data-testid="ln-propose-submit"><Check size={13} /> Propose submit</button>
+                </div>
+              ))}
+            </div>
+          )}
+
+          {/* Queue */}
+          <div className="fa-console">
+            <div className="fa-head"><ShieldCheck size={16} /> Task queue {pending.length > 0 && <button className="fa-btn" style={{ marginLeft: 10 }} onClick={approveAll} data-testid="ln-approve-all"><Check size={13} /> Approve all {pending.length}</button>} <em><button className="attach-btn" onClick={loadTasks} title="Refresh"><RefreshCw size={13} /></button></em></div>
+            {tasks.length === 0 ? <div className="attach-empty" data-testid="ln-empty">No tasks yet. Give the node a goal above.</div> : (
+              <div className="ln-tasks" data-testid="ln-tasks">
+                <AnimatePresence initial={false}>
+                  {tasks.map((t) => { const I = KIND_ICON[t.kind] || FileText; const isOpen = open === t.id; return (
+                    <motion.div key={t.id} className={`ln-task s-${t.status}`} initial={{ opacity: 0, y: 6 }} animate={{ opacity: 1, y: 0 }} data-testid={`ln-task-${t.id}`}>
+                      <div className="ln-task-h">
+                        <I size={14} />
+                        <span className="ln-task-title" onClick={() => setOpen(isOpen ? null : t.id)} role="button" tabIndex={0} onKeyDown={(e) => e.key === "Enter" && setOpen(isOpen ? null : t.id)}>{t.title}</span>
+                        <span className={`ln-status s-${t.status}`} data-testid="ln-task-status">{t.status.replace("_", " ")}</span>
+                        <span className="ln-when">{fmt(t.created_at)}</span>
+                        {t.status === "proposed" && <>
+                          <button className="ln-ok" onClick={() => decide(t.id, true)} data-testid="ln-approve" title="Approve"><Check size={14} /></button>
+                          <button className="ln-no" onClick={() => decide(t.id, false)} data-testid="ln-reject" title="Reject"><X size={14} /></button>
+                        </>}
+                        {t.status === "queued" && <button className="ln-no" onClick={() => cancel(t.id)} title="Cancel"><X size={14} /></button>}
+                        {(t.status === "done" || t.status === "failed" || t.status === "awaiting_submit") && <button className="attach-btn" onClick={() => openDetail(t.id)} title="Result"><Search size={13} /></button>}
+                      </div>
+                      {isOpen && <pre className="ln-params">{JSON.stringify(t.params, null, 1)}</pre>}
+                      {t.error && <div className="ln-err"><AlertTriangle size={12} /> {t.error}</div>}
+                    </motion.div>); })}
+                </AnimatePresence>
+              </div>
+            )}
+          </div>
+        </>
+      )}
+
+      {/* Server research browser */}
+      <div className="fa-console">
+        <div className="fa-head"><Globe size={16} /> Research browser (server) <em>headless Chromium here - public pages only; datacenter IP; no logins</em></div>
+        <div className="cw-row">
+          <input className="cw-input grow" data-testid="ln-research-url" value={research.url} onChange={(e) => setResearch({ ...research, url: e.target.value })} placeholder="https://..." />
+          <input className="cw-input grow" data-testid="ln-research-q" value={research.question} onChange={(e) => setResearch({ ...research, question: e.target.value })} placeholder="Question about the page (optional)" />
+          <button className="fa-btn primary" data-testid="ln-research-run" onClick={doResearch} disabled={researching || !research.url.trim()}>{researching ? <Loader2 className="spin" size={14} /> : <Globe size={14} />} Read page</button>
+        </div>
+        {page && (
+          <div className="ln-page" data-testid="ln-research-result">
+            <div className="ln-page-h"><b>{page.title}</b> · HTTP {page.http_status} · {page.chars} chars · {page.links.length} links · {page.forms.length} form(s) <a href={page.url} target="_blank" rel="noreferrer"><ExternalLink size={12} /></a></div>
+            {page.answer && <div className="ln-answer"><Sparkles size={12} /> {page.answer.text || page.answer.error} <small>{page.answer.model_label}</small></div>}
+            <div className="ln-page-grid">
+              {page.screenshot_b64 && <img alt="page screenshot" src={`data:image/jpeg;base64,${page.screenshot_b64}`} className="ln-shot" />}
+              <pre className="ln-text">{page.text_excerpt.slice(0, 3000)}</pre>
+            </div>
+            {page.forms.length > 0 && <div className="ln-forms">Forms detected: {page.forms.map((f, i) => <code key={i}>{f.fields.map((x) => x.name || x.placeholder || x.type).filter(Boolean).slice(0, 8).join(", ")}</code>)} — to fill one with your account, use the Local Node browser (browser_fill).</div>}
+          </div>
+        )}
+      </div>
+
+      <AnimatePresence>
+        {detail && (
+          <motion.div className="rd-modal-bg" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} onClick={() => setDetail(null)} data-testid="ln-detail-modal">
+            <motion.div className="rd-modal ln-detail" initial={{ y: 16 }} animate={{ y: 0 }} exit={{ y: 16 }} onClick={(e) => e.stopPropagation()}>
+              <div className="rd-modal-h"><div><h2>{detail.title}</h2><div className="ln-when">{detail.kind} · {detail.status} · {fmt(detail.finished_at || detail.created_at)}</div></div><button className="rd-ic" onClick={() => setDetail(null)}><X size={16} /></button></div>
+              {detail.screenshot_b64 && <img alt="node screenshot" className="ln-shot big" src={`data:image/jpeg;base64,${detail.screenshot_b64}`} />}
+              {detail.result?.content !== undefined && <pre className="ln-text">{detail.result.content}</pre>}
+              {detail.result?.stdout !== undefined && <pre className="ln-text">$ {detail.result.command}{"\n"}{detail.result.stdout}{detail.result.stderr ? `\n[stderr]\n${detail.result.stderr}` : ""}</pre>}
+              {detail.result?.items && <pre className="ln-text">{detail.result.items.map((i) => `${i.type === "dir" ? "📁" : "  "} ${i.name}  ${i.size}`).join("\n")}</pre>}
+              {detail.result && !detail.result.content && !detail.result.stdout && !detail.result.items && <pre className="ln-text">{JSON.stringify(detail.result, null, 1)}</pre>}
+              {detail.error && <div className="ln-err"><AlertTriangle size={12} /> {detail.error}</div>}
+              <details><summary className="ln-dim">Audit trail</summary><pre className="ln-text">{JSON.stringify(detail.audit, null, 1)}</pre></details>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+    </div>
+  );
+}
+
+```
+
+
+### `handoff/local_node/acaso_node.py`
+```python
+#!/usr/bin/env python3
+"""
+ACASO Local Node - runs ON YOUR PC and lets the hosted ACASO app work with your files and your browser.
+
+    Windows:  set ACASO_URL=https://<your-acaso> && set ACASO_KEY=<Agent Bridge key> && python acaso_node.py --root "C:\\Users\\you\\ACASO" --shell --browser
+    Linux:    ACASO_URL=https://<your-acaso> ACASO_KEY=<Agent Bridge key> python3 acaso_node.py --root ~/ACASO --shell --browser
+
+Requirements:  python -m pip install httpx
+Browser (opt): python -m pip install playwright && python -m playwright install chrome
+
+Safety, enforced HERE on your machine (the server enforces the same rules again):
+  * Only paths inside the --root folder(s) you pass are ever read or written.
+  * The node only executes tasks you APPROVED in the ACASO "Local Node" tab. Read-only tasks are auto-approved.
+  * Browser tasks fill forms and STOP. Nothing is submitted until you approve a separate submit step.
+  * Passwords / 2FA: type them yourself in the Chrome window that opens. This program never sees or stores them.
+  * --shell is off unless you pass it. Shell commands run inside the allowed root with a timeout.
+"""
+import argparse
+import base64
+import json
+import os
+import platform
+import shutil
+import socket
+import subprocess
+import sys
+import time
+import uuid
+from pathlib import Path
+
+try:
+    import httpx
+except ImportError:
+    print("Missing dependency: python -m pip install httpx")
+    sys.exit(1)
+
+NODE_VERSION = "1.0.0"
+STATE_FILE = Path.home() / ".acaso_node.json"
+
+
+# ----------------------------------------------------------------------------------------------
+class Node:
+    def __init__(self, url, key, roots, shell, browser, name):
+        self.api = url.rstrip("/") + "/api"
+        self.h = {"X-ACASO-Key": key, "Content-Type": "application/json"}
+        self.roots = [Path(r).expanduser().resolve() for r in roots]
+        for r in self.roots:
+            r.mkdir(parents=True, exist_ok=True)
+        self.shell = shell
+        self.browser = browser
+        self.name = name or f"{platform.node()}-node"
+        self.node_id = None
+        self.pw = None
+        self.browser_ctx = None
+        self.pages = {}  # session_id -> page
+        self.cx = httpx.Client(timeout=60)
+
+    # ---- path safety ----
+    def safe(self, p: str) -> Path:
+        rp = Path(p).expanduser().resolve()
+        for r in self.roots:
+            try:
+                rp.relative_to(r)
+                return rp
+            except ValueError:
+                continue
+        raise PermissionError(f"Path outside allowed roots: {p}")
+
+    # ---- pairing ----
+    def register(self):
+        saved = {}
+        if STATE_FILE.exists():
+            try:
+                saved = json.loads(STATE_FILE.read_text())
+            except Exception:
+                saved = {}
+        caps = ["files"] + (["shell"] if self.shell else []) + (["browser"] if self.browser else [])
+        body = {"name": self.name, "os": f"{platform.system()} {platform.release()}", "hostname": socket.gethostname(),
+                "allowed_roots": [str(r) for r in self.roots], "capabilities": caps, "node_version": NODE_VERSION,
+                "node_id": saved.get("node_id")}
+        r = self.cx.post(f"{self.api}/node/register", headers=self.h, json=body)
+        if r.status_code == 401:
+            print("Rejected: bad ACASO_KEY. Copy it from the Agent Bridge tab.")
+            sys.exit(1)
+        r.raise_for_status()
+        self.node_id = r.json()["id"]
+        STATE_FILE.write_text(json.dumps({"node_id": self.node_id}))
+        print(f"Paired as '{self.name}' ({self.node_id[:8]}) | roots={[str(x) for x in self.roots]} | caps={caps}")
+
+    # ---- main loop ----
+    def run(self):
+        self.register()
+        print("Waiting for approved tasks... (Ctrl+C to stop)")
+        beat = 0
+        while True:
+            try:
+                r = self.cx.post(f"{self.api}/node/{self.node_id}/claim", headers=self.h)
+                if r.status_code == 404:
+                    self.register()
+                    continue
+                task = r.json() if r.status_code == 200 else {}
+                if task and task.get("id"):
+                    self.execute(task)
+                    continue
+                beat += 1
+                if beat % 8 == 0:
+                    self.cx.post(f"{self.api}/node/{self.node_id}/heartbeat", headers=self.h)
+            except KeyboardInterrupt:
+                print("\nStopping node.")
+                self.close_browser()
+                return
+            except Exception as e:
+                print(f"[net] {e}")
+                time.sleep(5)
+            time.sleep(3)
+
+    def report(self, tid, status, result=None, error=None, shot=None):
+        body = {"status": status, "result": result, "error": error, "screenshot_b64": shot}
+        self.cx.post(f"{self.api}/node/tasks/{tid}/result", headers=self.h, json=body)
+
+    # ---- execution ----
+    def execute(self, t):
+        kind, p, tid = t["kind"], t.get("params") or {}, t["id"]
+        print(f"-> {kind} {json.dumps(p)[:120]}")
+        try:
+            fn = getattr(self, "do_" + kind, None)
+            if not fn:
+                raise ValueError(f"unsupported task kind {kind}")
+            out = fn(p)
+            if isinstance(out, tuple):  # (status, result, screenshot)
+                self.report(tid, out[0], out[1], None, out[2] if len(out) > 2 else None)
+            else:
+                self.report(tid, "done", out)
+            print("   done")
+        except Exception as e:
+            print(f"   FAILED: {e}")
+            self.report(tid, "failed", None, str(e)[:800])
+
+    def do_sys_info(self, p):
+        return {"os": platform.platform(), "python": sys.version.split()[0], "cwd": os.getcwd(), "roots": [str(r) for r in self.roots],
+                "disk_free_gb": round(shutil.disk_usage(str(self.roots[0])).free / 1e9, 1) if self.roots else None}
+
+    def do_file_list(self, p):
+        d = self.safe(p.get("path") or str(self.roots[0]))
+        if not d.is_dir():
+            raise FileNotFoundError(f"not a directory: {d}")
+        items = []
+        for c in sorted(d.iterdir())[:500]:
+            st = c.stat()
+            items.append({"name": c.name, "type": "dir" if c.is_dir() else "file", "size": st.st_size, "modified": time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(st.st_mtime))})
+        return {"path": str(d), "count": len(items), "items": items}
+
+    def do_file_stat(self, p):
+        f = self.safe(p["path"])
+        if not f.exists():
+            return {"path": str(f), "exists": False}
+        st = f.stat()
+        return {"path": str(f), "exists": True, "type": "dir" if f.is_dir() else "file", "size": st.st_size}
+
+    def do_file_read(self, p):
+        f = self.safe(p["path"])
+        data = f.read_bytes()
+        limit = int(p.get("max_bytes") or 200_000)
+        try:
+            text = data[:limit].decode("utf-8")
+            return {"path": str(f), "size": len(data), "truncated": len(data) > limit, "content": text}
+        except UnicodeDecodeError:
+            return {"path": str(f), "size": len(data), "binary": True, "b64_head": base64.b64encode(data[:4096]).decode()}
+
+    def do_mkdir(self, p):
+        d = self.safe(p["path"]); d.mkdir(parents=True, exist_ok=True)
+        return {"path": str(d), "created": True}
+
+    def do_file_write(self, p):
+        f = self.safe(p["path"]); f.parent.mkdir(parents=True, exist_ok=True)
+        existed = f.exists()
+        if existed and p.get("backup", True):
+            shutil.copy2(f, f.with_suffix(f.suffix + ".acaso.bak"))
+        f.write_text(p.get("content") or "", encoding="utf-8")
+        return {"path": str(f), "bytes": f.stat().st_size, "overwrote": existed, "backup": str(f.with_suffix(f.suffix + '.acaso.bak')) if existed else None}
+
+    def do_file_append(self, p):
+        f = self.safe(p["path"]); f.parent.mkdir(parents=True, exist_ok=True)
+        with f.open("a", encoding="utf-8") as fh:
+            fh.write(p.get("content") or "")
+        return {"path": str(f), "bytes": f.stat().st_size}
+
+    def do_file_move(self, p):
+        s, d = self.safe(p["src"]), self.safe(p["dst"])
+        d.parent.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(s), str(d))
+        return {"src": str(s), "dst": str(d)}
+
+    def do_file_delete(self, p):
+        f = self.safe(p["path"])
+        trash = self.roots[0] / ".acaso_trash"; trash.mkdir(exist_ok=True)
+        dest = trash / f"{int(time.time())}_{f.name}"
+        shutil.move(str(f), str(dest))
+        return {"path": str(f), "moved_to_trash": str(dest), "note": "soft-deleted; restore from .acaso_trash"}
+
+    def do_shell(self, p):
+        if not self.shell:
+            raise PermissionError("node started without --shell")
+        cwd = self.safe(p.get("cwd") or str(self.roots[0]))
+        cmd = p["command"]
+        r = subprocess.run(cmd, shell=True, cwd=str(cwd), capture_output=True, text=True, timeout=int(p.get("timeout") or 120))
+        return {"command": cmd, "cwd": str(cwd), "returncode": r.returncode, "stdout": r.stdout[-8000:], "stderr": r.stderr[-4000:]}
+
+    # ---- browser (real Chrome on this PC, headed) ----
+    def ensure_browser(self):
+        if not self.browser:
+            raise PermissionError("node started without --browser")
+        if self.browser_ctx:
+            return
+        from playwright.sync_api import sync_playwright
+        self.pw = sync_playwright().start()
+        profile = Path.home() / ".acaso_chrome_profile"
+        try:
+            self.browser_ctx = self.pw.chromium.launch_persistent_context(str(profile), channel="chrome", headless=False, viewport={"width": 1280, "height": 900})
+        except Exception:
+            self.browser_ctx = self.pw.chromium.launch_persistent_context(str(profile), headless=False, viewport={"width": 1280, "height": 900})
+        print("   Chrome opened (persistent profile: logins you do here are kept between runs)")
+
+    def close_browser(self):
+        try:
+            if self.browser_ctx:
+                self.browser_ctx.close()
+            if self.pw:
+                self.pw.stop()
+        except Exception:
+            pass
+        self.browser_ctx = None; self.pw = None; self.pages = {}
+
+    def page(self, sid):
+        self.ensure_browser()
+        if sid not in self.pages or self.pages[sid].is_closed():
+            self.pages[sid] = self.browser_ctx.new_page()
+        return self.pages[sid]
+
+    def shot(self, pg):
+        return base64.b64encode(pg.screenshot(type="jpeg", quality=45)).decode()
+
+    def do_browser_open(self, p):
+        sid = p.get("session_id") or str(uuid.uuid4())[:8]
+        pg = self.page(sid)
+        pg.goto(p["url"], timeout=60000, wait_until="domcontentloaded")
+        pg.wait_for_timeout(1000)
+        return ("done", {"session_id": sid, "url": pg.url, "title": pg.title()}, self.shot(pg))
+
+    def do_browser_screenshot(self, p):
+        pg = self.page(p["session_id"])
+        return ("done", {"session_id": p["session_id"], "url": pg.url, "title": pg.title()}, self.shot(pg))
+
+    def _locate(self, pg, ref):
+        ref = str(ref)
+        for cand in (lambda: pg.get_by_label(ref, exact=False), lambda: pg.get_by_placeholder(ref, exact=False),
+                     lambda: pg.locator(f"[name='{ref}']"), lambda: pg.locator(ref)):
+            try:
+                loc = cand()
+                if loc.count() > 0:
+                    return loc.first
+            except Exception:
+                continue
+        raise LookupError(f"field not found: {ref}")
+
+    def do_browser_fill(self, p):
+        sid = p.get("session_id") or str(uuid.uuid4())[:8]
+        pg = self.page(sid)
+        if p.get("url"):
+            pg.goto(p["url"], timeout=60000, wait_until="domcontentloaded"); pg.wait_for_timeout(800)
+        filled, skipped = [], []
+        for f in p.get("fields") or []:
+            ref, val = f.get("label_or_selector"), f.get("value")
+            if val is None or "[OWNER TYPES THIS]" in str(val):
+                skipped.append({"field": ref, "reason": "owner types this manually (password/2FA/secret)"}); continue
+            try:
+                loc = self._locate(pg, ref)
+                tag = loc.evaluate("e => e.tagName.toLowerCase()")
+                typ = loc.evaluate("e => e.type || ''")
+                if tag == "select":
+                    loc.select_option(label=str(val))
+                elif typ in ("checkbox", "radio"):
+                    loc.check() if str(val).lower() in ("true", "yes", "1", "on") else loc.uncheck()
+                else:
+                    loc.fill(str(val))
+                filled.append(ref)
+            except Exception as e:
+                skipped.append({"field": ref, "reason": str(e)[:120]})
+        return ("awaiting_submit", {"session_id": sid, "url": pg.url, "title": pg.title(), "filled": filled, "skipped": skipped,
+                                    "note": "Form filled, NOT submitted. Review the screenshot, finish any manual fields in the Chrome window, then approve a browser_submit task."}, self.shot(pg))
+
+    def do_browser_submit(self, p):
+        pg = self.page(p["session_id"])
+        ref = p.get("label_or_selector")
+        btn = self._locate(pg, ref) if ref else pg.locator("button[type=submit], input[type=submit], button:has-text('Submit'), button:has-text('Sign up'), button:has-text('Create account'), button:has-text('Continue')").first
+        btn.click(timeout=15000)
+        pg.wait_for_timeout(2500)
+        return ("done", {"session_id": p["session_id"], "url": pg.url, "title": pg.title()}, self.shot(pg))
+
+    def do_browser_close(self, p):
+        sid = p.get("session_id")
+        if sid and sid in self.pages:
+            try: self.pages[sid].close()
+            except Exception: pass
+            self.pages.pop(sid, None)
+        else:
+            self.close_browser()
+        return {"closed": sid or "all"}
+
+
+def main():
+    ap = argparse.ArgumentParser(description="ACASO Local Node")
+    ap.add_argument("--url", default=os.environ.get("ACASO_URL"), help="ACASO site URL (or env ACASO_URL)")
+    ap.add_argument("--key", default=os.environ.get("ACASO_KEY"), help="Agent Bridge key (or env ACASO_KEY)")
+    ap.add_argument("--root", action="append", default=[], help="Allowed folder (repeatable). Default: ~/ACASO")
+    ap.add_argument("--shell", action="store_true", help="Allow approved shell commands inside the root")
+    ap.add_argument("--browser", action="store_true", help="Allow approved browser tasks in a real Chrome window")
+    ap.add_argument("--name", default=None)
+    a = ap.parse_args()
+    if not a.url or not a.key:
+        print("Need --url/ACASO_URL and --key/ACASO_KEY (key is on the Agent Bridge tab)."); sys.exit(1)
+    roots = a.root or [str(Path.home() / "ACASO")]
+    Node(a.url, a.key, roots, a.shell, a.browser, a.name).run()
+
+
+if __name__ == "__main__":
+    main()
 
 ```
 

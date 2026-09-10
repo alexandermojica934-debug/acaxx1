@@ -10,7 +10,10 @@ import FileAnalyzer from "./components/FileAnalyzer";
 import SelfDirective from "./components/SelfDirective";
 import Council from "./components/Council";
 import VoiceChat from "./components/VoiceChat";
-import { Sparkles, LayoutGrid, MessagesSquare, BookOpen, ShieldAlert, Plug, Boxes, Wand2, Crown, Waves } from "lucide-react";
+import Radar from "./components/Radar";
+import VoiceCommander from "./components/VoiceCommander";
+import LocalNode from "./components/LocalNode";
+import { Sparkles, LayoutGrid, MessagesSquare, BookOpen, ShieldAlert, Plug, Boxes, Wand2, Crown, Waves, Radar as RadarIcon, MonitorSmartphone } from "lucide-react";
 
 const BACKEND_URL = process.env.REACT_APP_BACKEND_URL;
 export const API = `${BACKEND_URL}/api`;
@@ -20,10 +23,12 @@ const TABS = [
   { key: "bounty", label: "Bug Bounty", icon: ShieldAlert },
   { key: "council", label: "Council", icon: Crown },
   { key: "voice", label: "Voice", icon: Waves },
+  { key: "radar", label: "Radar", icon: RadarIcon },
   { key: "askai", label: "Ask All AIs", icon: MessagesSquare },
   { key: "analyzer", label: "File Analyzer", icon: Boxes },
   { key: "self", label: "Self-Directive", icon: Wand2 },
   { key: "chronicle", label: "Chronicle", icon: BookOpen },
+  { key: "node", label: "Local Node", icon: MonitorSmartphone },
   { key: "bridge", label: "Agent Bridge", icon: Plug },
 ];
 
@@ -72,12 +77,16 @@ function App() {
         {tab === "bounty" && <BugBounty />}
         {tab === "council" && <Council />}
         {tab === "voice" && <VoiceChat />}
+        {tab === "radar" && <Radar />}
         {tab === "askai" && <AskAllAIs />}
         {tab === "analyzer" && <FileAnalyzer />}
         {tab === "self" && <SelfDirective />}
         {tab === "chronicle" && <Chronicle />}
+        {tab === "node" && <LocalNode />}
         {tab === "bridge" && <AgentBridge />}
       </main>
+
+      <VoiceCommander setTab={setTab} />
 
       <footer className="footof">
         <span>Closed Action Loop — Directive › Discovery › Deliverable › Outreach › Payment › Receipt › Learning</span>
